@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + STRICT LOCKS)
+# IMAGE (STABLE TORCH 2.1.2 + CORRECT DIFFUSERS + STRICT LOCKS)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -40,10 +40,11 @@ image = (
     
     .pip_install("deepspeed==0.11.2")
 
+    # 👑 THE FIX: Correctly matched Diffusers, Transformers, and Accelerate versions for Hunyuan3D-2.1
     .pip_install(
-        "transformers==4.36.2",
-        "accelerate==0.24.1",
-        "diffusers==0.24.0"
+        "transformers==4.46.0",
+        "accelerate==1.1.1",
+        "diffusers==0.30.0"
     )
 
     .pip_install(
