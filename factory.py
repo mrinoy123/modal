@@ -7,12 +7,12 @@ import urllib.request
 import uuid
 
 # ==========================================
-# 1. THE NATIVE IMAGE (Bulletproof Headless + Snipered Architecture)
+# 1. THE NATIVE IMAGE (The "Final Boss" Version)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
     
-    # THE FIX 1: The comprehensive suite of headless graphics libraries for Blender/OpenCV
+    # APT FIX: Full suite of headless X11/OpenGL libraries
     .apt_install(
         "git", "build-essential", "clang", "cmake", "ninja-build", 
         "libgl1-mesa-glx", "libglib2.0-0", "libopengl0", "libegl1",
@@ -21,27 +21,33 @@ image = (
     )
     
     .pip_install("setuptools", "wheel", "numpy")
-    .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu121")
     
+    # TORCH FIX: Pinning to 2.1.2/0.16.2 to prevent the 'functional_tensor' crash
+    .pip_install(
+        "torch==2.1.2", 
+        "torchvision==0.16.2", 
+        "torchaudio==2.1.2", 
+        index_url="https://download.pytorch.org/whl/cu121"
+    )
+    
+    # DEPENDENCY FIX: All missing AI and Vision modules
     .pip_install(
         "boto3", "transformers", "accelerate", "trimesh", "pillow", 
         "einops", "omegaconf", "xatlas", "qwen-vl-utils", "pyrender", "ninja", "pybind11",
         "diffusers", "pytorch-lightning", "huggingface-hub", "safetensors", "scipy", "pandas",
         "opencv-python", "imageio", "scikit-image", "rembg", "realesrgan", "basicsr",
         "pymeshlab==2022.2.post3", "pygltflib", "open3d", "pyyaml", "configargparse", "hf-transfer",
-        # THE FIX 2: Added the missing vision and inference modules
         "timm", "peft", "onnxruntime"
     )
     
+    # BLENDER FIX: Headless bpy for 3D processing
     .run_commands("pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/")
     
+    # COMPILER FIX: Targeting only the L4 GPU (8.9) to prevent builder memory crashes
     .run_commands(
         "pip install git+https://github.com/tatsy/torchmcubes.git",
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
-        
-        # THE FIX 3: Snipered TORCH_CUDA_ARCH_LIST to "8.9" for the L4 GPU to prevent Memory Crashes
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" CUDA_HOME=/usr/local/cuda pip install --no-build-isolation .',
-        
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
 )
