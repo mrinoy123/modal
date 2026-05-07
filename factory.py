@@ -42,12 +42,12 @@ image = (
         index_url="https://download.pytorch.org/whl/cu121"
     )
 
-    # 🔥 COMPATIBLE HF STACK
+    # 🔥 COMPATIBLE HF STACK (Upgraded to match Hunyuan3D-2.1 requirements)
     .pip_install(
-        "transformers==4.36.2",
-        "accelerate==0.24.1",
-        "diffusers==0.24.0",
-        "huggingface_hub==0.19.4"
+        "transformers==4.46.0",
+        "accelerate==1.1.1",
+        "diffusers==0.30.0",
+        "huggingface_hub==0.30.2"
     )
 
     # OTHER LIBS (NO NUMPY HERE)
@@ -86,7 +86,6 @@ image = (
     # HUNYUAN BUILD (Properly chained, verbose mode enabled)
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
-        # The -v flag prints the C++ compiler logs to the console to prevent GitHub Actions timeouts
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
