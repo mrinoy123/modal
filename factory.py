@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + STRICT LOCKS)
+# IMAGE (STABLE TORCH 2.1.2 + FP16 L4 OPTIMIZED)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -40,7 +40,6 @@ image = (
     
     .pip_install("deepspeed==0.11.2")
 
-    # 👑 THE FIX: Correctly matched Diffusers, Transformers, and Accelerate versions for Hunyuan3D-2.1
     .pip_install(
         "transformers==4.46.0",
         "accelerate==1.1.1",
@@ -56,16 +55,15 @@ image = (
         "hf-transfer","timm","peft",
         "pytorch_lightning",
         "fast-simplification",
-        "cupy-cuda12x",   # Essential for GPU Kernels
-        "torchmetrics",   # Required by Hunyuan ShapeVAE
-        "psutil",         # System monitoring
-        "tqdm"            # Progress bars/General imports
+        "cupy-cuda12x",   
+        "torchmetrics",   
+        "psutil",         
+        "tqdm",
+        "nvidia-ml-py"    # 👑 THE FIX: Solves the PyNVML deprecation warning
     )
 
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
 
-    # 👑 THE FIX: Absolute Force-Reinstall Locks
-    # This guarantees basicsr finds 'cached_download' and Open3D finds the correct Numpy
     .run_commands(
         "pip install --force-reinstall huggingface_hub==0.25.2",
         "pip install --force-reinstall numpy==1.26.4"
@@ -116,6 +114,9 @@ def generate_3d_from_image(input_img, base_name):
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
 
+    # 👑 THE FIX: Set cuSolver to use the safest backend for PyTorch 2.1.2 on CUDA 12
+    torch.backends.cuda.preferred_linalg_library("default")
+
     # =================================================================
     # 🕵️ THE RESILIENT LINKER (Dynamic Path Finder)
     # =================================================================
@@ -147,9 +148,9 @@ def generate_3d_from_image(input_img, base_name):
             if weights_path: break
 
         if not engine_path:
-            engine_path = "/root/hunyuan3d" # Fallback
+            engine_path = "/root/hunyuan3d" 
         if not weights_path:
-            raise FileNotFoundError("Linker Failed: Could not find the model weights in any mounted volume.")
+            raise FileNotFoundError("Linker Failed: Could not find the model weights.")
 
         print(f"✅ Linker Success -> Engine: {engine_path} | Weights: {weights_path}")
         return engine_path, weights_path
@@ -161,15 +162,11 @@ def generate_3d_from_image(input_img, base_name):
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dpaint'))
     os.chdir(CODE_ROOT)
 
-    # =================================================================
     # 🛠️ MOCK 1: Torchvision functional_tensor fix
-    # =================================================================
     from torchvision.transforms import functional as TF
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
-    # =================================================================
-    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2
-    # =================================================================
+    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2 (👑 THE FIX: Full FP16 Mode)
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
             def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
@@ -185,35 +182,28 @@ def generate_3d_from_image(input_img, base_name):
                     self.register_parameter('weight', None)
 
             def forward(self, input):
-                input_dtype = input.dtype
-                input_fp32 = input.to(torch.float32)
-                variance = input_fp32.pow(2).mean(-1, keepdim=True)
-                input_norm = input_fp32 * torch.rsqrt(variance + self.eps)
+                # We no longer cast to float32. We stay in native fp16 for max speed!
+                variance = input.pow(2).mean(-1, keepdim=True)
+                input_norm = input * torch.rsqrt(variance + self.eps)
                 if self.elementwise_affine:
-                    return (self.weight * input_norm).to(input_dtype)
-                return input_norm.to(input_dtype)
+                    return (self.weight * input_norm).to(input.dtype)
+                return input_norm.to(input.dtype)
         
         nn.RMSNorm = RMSNorm
         import torch.nn.modules.normalization as norm_mod
         norm_mod.RMSNorm = RMSNorm
 
-    # =================================================================
     # 🛠️ MOCK 3: Bulletproof Fast-Simplification target_reduction Fix
-    # =================================================================
     import fast_simplification
     _orig_simplify = fast_simplification.simplify
 
     def patched_simplify(*args, **kwargs):
-        # Intercept and force ratio to 0.9 if it's over 1.0
         if 'target_reduction' in kwargs and kwargs['target_reduction'] > 1.0:
             kwargs['target_reduction'] = 0.9
-        
         new_args = list(args)
         if len(new_args) >= 3 and new_args[2] > 1.0:
             new_args[2] = 0.9
-            
         return _orig_simplify(*new_args, **kwargs)
-
     fast_simplification.simplify = patched_simplify
 
     if hasattr(fast_simplification, 'simplify_mesh'):
@@ -228,13 +218,11 @@ def generate_3d_from_image(input_img, base_name):
         fast_simplification.simplify_mesh = patched_simplify_mesh
 
     # =================================================================
-
+    # STAGE 1: SHAPE GENERATION
+    # =================================================================
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
-    from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
-    from convert_utils import create_glb_with_pbr_materials
-
+    
     print("Loading Shape Pipeline...")
-    # Enable PyTorch's native memory-efficient attention mechanism globally
     torch.backends.cuda.enable_math_sdp(True)
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -245,31 +233,6 @@ def generate_3d_from_image(input_img, base_name):
         torch_dtype=torch.float16,
         device="cuda"
     )
-
-    esrgan_path = "/cache/RealESRGAN.pth"
-    if not os.path.exists(esrgan_path):
-        print("Downloading RealESRGAN...")
-        os.makedirs("/cache", exist_ok=True)
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-            esrgan_path
-        )
-
-    paint_weight_path = os.path.join(WEIGHT_ROOT, "hunyuan3d-paintpbr-v2-1")
-    
-    cfg_path = f"{CODE_ROOT}/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
-    cfg = OmegaConf.load(cfg_path)
-    cfg.model.pretrained_model_name_or_path = paint_weight_path
-    OmegaConf.save(cfg, cfg_path)
-
-    conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
-    conf.realesrgan_ckpt_path = esrgan_path
-    conf.multiview_cfg_path = cfg_path
-    conf.custom_pipeline = f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
-
-    print("Loading Paint Pipeline...")
-    paint_pipeline = Hunyuan3DPaintPipeline(conf)
 
     print("Generating base 3D mesh...")
     outputs = shape_pipeline(image=input_img, num_inference_steps=30, output_type='mesh')
@@ -284,6 +247,42 @@ def generate_3d_from_image(input_img, base_name):
     glb = f"/tmp/{base_name}.glb"
 
     mesh.export(base_obj)
+
+    # 👑 THE FIX: Sequential Execution to prevent VRAM Collision (cuSolver error fix)
+    print("Clearing Shape Model from VRAM...")
+    del shape_pipeline
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # =================================================================
+    # STAGE 2: TEXTURE PAINTING
+    # =================================================================
+    from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
+    from convert_utils import create_glb_with_pbr_materials
+
+    esrgan_path = "/cache/RealESRGAN.pth"
+    if not os.path.exists(esrgan_path):
+        print("Downloading RealESRGAN...")
+        os.makedirs("/cache", exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+            esrgan_path
+        )
+
+    paint_weight_path = os.path.join(WEIGHT_ROOT, "hunyuan3d-paintpbr-v2-1")
+    cfg_path = f"{CODE_ROOT}/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
+    cfg = OmegaConf.load(cfg_path)
+    cfg.model.pretrained_model_name_or_path = paint_weight_path
+    OmegaConf.save(cfg, cfg_path)
+
+    conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
+    conf.realesrgan_ckpt_path = esrgan_path
+    conf.multiview_cfg_path = cfg_path
+    conf.custom_pipeline = f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
+
+    print("Loading Paint Pipeline...")
+    paint_pipeline = Hunyuan3DPaintPipeline(conf)
 
     print("Painting textures...")
     tex_obj = paint_pipeline(
@@ -302,7 +301,7 @@ def generate_3d_from_image(input_img, base_name):
     print("Combining materials into GLB...")
     create_glb_with_pbr_materials(tex_obj, textures, glb)
 
-    del shape_pipeline, paint_pipeline
+    del paint_pipeline
     gc.collect()
     torch.cuda.empty_cache()
 
