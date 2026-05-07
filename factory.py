@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + XFORMERS FIX)
+# IMAGE (STABLE TORCH 2.1.2 + NATIVE SDP ATTENTION)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -22,7 +22,6 @@ image = (
         "PYTORCH_ENABLE_MPS_FALLBACK": "0",
     })
 
-    # 1. SYSTEM DEPENDENCIES
     .apt_install(
         "git","build-essential","clang","cmake","ninja-build",
         "libgl1-mesa-glx","libglib2.0-0","libopengl0","libegl1",
@@ -32,7 +31,6 @@ image = (
 
     .pip_install("setuptools","wheel")
 
-    # 2. STABLE TORCH (2.1.2 is REQUIRED for diffusers 0.30.0 stability)
     .pip_install(
         "torch==2.1.2",
         "torchvision==0.16.2",
@@ -40,21 +38,15 @@ image = (
         index_url="https://download.pytorch.org/whl/cu121"
     )
     
-    # 3. THE FIX: ADD XFORMERS FOR ATTENTION MECHANISM
-    .pip_install("xformers==0.0.23.post1")
-    
-    # 4. DEEPSPEED
     .pip_install("deepspeed==0.11.2")
 
-    # 5. COMPATIBLE HF STACK
     .pip_install(
-        "transformers==4.46.0",
-        "accelerate==1.1.1",
-        "diffusers==0.30.0",
-        "huggingface_hub==0.30.2"
+        "transformers==4.36.2",
+        "accelerate==0.24.1",
+        "diffusers==0.24.0",
+        "huggingface_hub==0.19.4"
     )
 
-    # 6. OTHER LIBS
     .pip_install(
         "boto3","trimesh","pillow","einops","omegaconf","xatlas",
         "pyrender","pybind11","safetensors","scipy","pandas",
@@ -62,31 +54,26 @@ image = (
         "realesrgan","basicsr","pymeshlab==2022.2.post3",
         "pygltflib","pyyaml","configargparse",
         "hf-transfer","timm","peft",
-        "pytorch_lightning", "huggingface_hub[hf_xet]"
+        "pytorch_lightning"
     )
 
-    # 7. Install problematic libs BEFORE numpy lock
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
 
-    # 8. FINAL NUMPY FIX (Forces 1.26.4 so Open3D doesn't crash)
     .run_commands(
         "pip uninstall -y numpy",
         "pip install numpy==1.26.4",
         "python -c 'import numpy; print(numpy.__version__)'"
     )
 
-    # 9. BLENDER
     .run_commands(
         "pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/"
     )
 
-    # 10. CACHE U2NET
     .run_commands(
         "mkdir -p ~/.u2net",
         "wget https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx -O ~/.u2net/u2net.onnx"
     )
 
-    # 11. TORCHMCUBES
     .run_commands(
         "git clone https://github.com/tatsy/torchmcubes.git /tmp/torchmcubes",
         "sed -i 's/3.5;//g' /tmp/torchmcubes/CMakeLists.txt || true",
@@ -94,7 +81,6 @@ image = (
         'cd /tmp/torchmcubes && TORCH_CUDA_ARCH_LIST="8.9" pip install .'
     )
 
-    # 12. HUNYUAN BUILD
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
@@ -102,9 +88,6 @@ image = (
     )
 )
 
-# ==========================================
-# APP + VOLUMES
-# ==========================================
 app = modal.App("hunyuan-final-fixed", image=image)
 
 hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21", create_if_missing=True)
@@ -127,8 +110,45 @@ def generate_3d_from_image(input_img, base_name):
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
 
-    CODE_ROOT = "/root/hunyuan3d"
-    WEIGHT_ROOT = "/weights/Hunyuan3D-2.1-Weights-Dataset"
+    # =================================================================
+    # 🕵️ THE RESILIENT LINKER (Dynamic Path Finder)
+    # =================================================================
+    def resolve_paths():
+        candidate_mounts = ["/weights", "/cache", "/mnt", "/root"]
+        engine_path = None
+        weights_path = None
+
+        print("🔍 Linker: Hunting for Engine (Hunyuan3D root)...")
+        for mount in candidate_mounts:
+            for root, dirs, files in os.walk(mount, topdown=True):
+                if root.count(os.sep) - mount.count(os.sep) > 3:
+                    del dirs[:]
+                    continue
+                if "hy3dpaint" in dirs and "hy3dshape" in dirs:
+                    engine_path = root
+                    break
+            if engine_path: break
+
+        print("🔍 Linker: Hunting for Weights (model.fp16.ckpt)...")
+        for mount in candidate_mounts:
+            for root, dirs, files in os.walk(mount, topdown=True):
+                if root.count(os.sep) - mount.count(os.sep) > 4:
+                    del dirs[:]
+                    continue
+                if "model.fp16.ckpt" in files and "hunyuan3d-dit-v2-1" in root:
+                    weights_path = os.path.dirname(root)
+                    break
+            if weights_path: break
+
+        if not engine_path:
+            engine_path = "/root/hunyuan3d" # Fallback
+        if not weights_path:
+            raise FileNotFoundError("Linker Failed: Could not find the model weights in any mounted volume.")
+
+        print(f"✅ Linker Success -> Engine: {engine_path} | Weights: {weights_path}")
+        return engine_path, weights_path
+
+    CODE_ROOT, WEIGHT_ROOT = resolve_paths()
 
     sys.path.insert(0, CODE_ROOT)
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dshape'))
@@ -142,7 +162,7 @@ def generate_3d_from_image(input_img, base_name):
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
     # =================================================================
-    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2 (STOPS THE CRASH)
+    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2
     # =================================================================
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
@@ -167,25 +187,27 @@ def generate_3d_from_image(input_img, base_name):
                     return (self.weight * input_norm).to(input_dtype)
                 return input_norm.to(input_dtype)
         
-        # Inject it into PyTorch's brain
         nn.RMSNorm = RMSNorm
         import torch.nn.modules.normalization as norm_mod
         norm_mod.RMSNorm = RMSNorm
-    # =================================================================
 
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
     from convert_utils import create_glb_with_pbr_materials
 
     print("Loading Shape Pipeline...")
+    # Enable PyTorch's native memory-efficient attention mechanism globally
+    torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+
     shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         WEIGHT_ROOT,
         subfolder="hunyuan3d-dit-v2-1",
         device="cuda"
     )
-    
-    # Force Xformers for memory-efficient attention (fixes the 0% freeze)
-    shape_pipeline.enable_xformers_memory_efficient_attention()
+    # REMOVED: shape_pipeline.enable_xformers_memory_efficient_attention() 
+    # (It is handled natively by torch.backends.cuda above)
 
     esrgan_path = "/cache/RealESRGAN.pth"
     if not os.path.exists(esrgan_path):
@@ -197,10 +219,6 @@ def generate_3d_from_image(input_img, base_name):
             esrgan_path
         )
 
-    # =================================================================
-    # 🛠️ MOCK 3: Paint Pipeline Path Fix (STOPS THE 19 FILE DOWNLOAD)
-    # =================================================================
-    # We must point directly to the paint subfolder so it sees the local files
     paint_weight_path = os.path.join(WEIGHT_ROOT, "hunyuan3d-paintpbr-v2-1")
     
     cfg_path = f"{CODE_ROOT}/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
@@ -217,14 +235,14 @@ def generate_3d_from_image(input_img, base_name):
     paint_pipeline = Hunyuan3DPaintPipeline(conf)
 
     print("Generating base 3D mesh...")
-    outputs = shape_pipeline(image=input_img, output_type='mesh')
+    # Explicitly move tensors to GPU to prevent device mismatch errors
+    outputs = shape_pipeline(image=input_img, num_inference_steps=30, output_type='mesh')
 
     raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
     raw_mesh.mesh_f = raw_mesh.mesh_f[:, ::-1]
 
     mesh = trimesh.Trimesh(raw_mesh.mesh_v, raw_mesh.mesh_f)
 
-    import uuid
     sid = uuid.uuid4().hex
     base_obj = f"/tmp/{sid}.obj"
     glb = f"/tmp/{base_name}.glb"
@@ -277,14 +295,16 @@ def process_cloudflare_queue(cfg: dict):
         print("Queue is empty.")
         return
 
+    processed_count = 0
+
     for obj in res["Contents"]:
         key = obj["Key"]
         
-        # FIX FOR INFINITE LOOP
-        if len(key.split("/")) != 2 or not key.endswith((".png",".jpg",".jpeg")):
+        if len(key.split("/")) != 2 or not key.lower().endswith((".png",".jpg",".jpeg")):
             continue
 
-        print(f"Processing image: {key}")
+        processed_count += 1
+        print(f"\n📥 Processing image: {key}")
         data = s3.get_object(Bucket=cfg["bucket"], Key=key)
         img = Image.open(io.BytesIO(data["Body"].read())).convert("RGBA")
 
@@ -303,7 +323,7 @@ def process_cloudflare_queue(cfg: dict):
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
         except Exception as e:
-            print(f"ERROR processing {key}:", e)
+            print(f"❌ ERROR processing {key}:", e)
             
             failed_key = key.replace("queue/", "queue/failed/", 1)
             print(f"Moving {key} to {failed_key}...")
@@ -313,6 +333,9 @@ def process_cloudflare_queue(cfg: dict):
                 Key=failed_key
             )
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
+
+    if processed_count == 0:
+        print("📭 Checked R2, but found no valid images waiting in the queue/")
 
     cache_vol.commit()
 
