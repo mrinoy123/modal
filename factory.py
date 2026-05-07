@@ -164,7 +164,7 @@ def generate_3d_from_image(input_img, base_name):
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
     # =================================================================
-    # 🛠️ MOCK 1: Flexible RMSNorm Polyfill
+    # 🛠️ MOCK 1: PURE FP16 RMSNorm Polyfill
     # =================================================================
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
@@ -176,8 +176,9 @@ def generate_3d_from_image(input_img, base_name):
                 self.eps = eps
                 self.elementwise_affine = elementwise_affine
                 
+                # 👑 FP16 Optimization: Force native FP16 initialization for maximum speed
                 if self.elementwise_affine:
-                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=dtype))
+                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=torch.float16))
                 else:
                     self.register_parameter('weight', None)
 
@@ -219,18 +220,17 @@ def generate_3d_from_image(input_img, base_name):
         fast_simplification.simplify_mesh = patched_simplify_mesh
 
     # =================================================================
-    # 🛠️ MOCK 3: THE ULTIMATE XATLAS ENGINE BYPASS (Strict FP32 enforcement)
+    # 🛠️ MOCK 3: THE ULTIMATE XATLAS ENGINE BYPASS (The Shield)
     # =================================================================
     import xatlas
     
     def patched_parametrize(positions, indices, normals=None, uvs=None, **kwargs):
         print("✅ SUCCESS: Bypassing C++ bindings! Re-routing mesh through custom Atlas Engine (4 Iterations).")
         
-        # Strip PyTorch tensors if they somehow leaked in here
+        # 🛡️ THE SHIELD: Strip FP16 tensors from the fast AI pipeline and force into stable FP32 numpy
         if hasattr(positions, 'cpu'): positions = positions.detach().cpu().numpy()
         if hasattr(indices, 'cpu'): indices = indices.detach().cpu().numpy()
         
-        # Force strict types for the underlying C++ library
         positions = np.asarray(positions, dtype=np.float32)
         indices = np.asarray(indices, dtype=np.uint32)
         
@@ -249,8 +249,8 @@ def generate_3d_from_image(input_img, base_name):
         opts.max_iterations = 4
         atlas.generate(chart_options=opts)
         
-        m = atlas.get_mesh(0)
-        return m.vertex_mapping, m.indices, m.uvs
+        # 👑 THE FIX: Return the actual Mesh Object (not a tuple) so .vertex_mapping works downstream!
+        return atlas.get_mesh(0)
         
     xatlas.parametrize = patched_parametrize
     # =================================================================
@@ -273,7 +273,7 @@ def generate_3d_from_image(input_img, base_name):
     )
 
     print("Generating base 3D mesh...")
-    # 👑 FP16 Optimization: DiT models thrive in half-precision. Massive speed boost here.
+    # 🚀 Full FP16 Autocast for maximum shape generation speed
     with torch.autocast('cuda', dtype=torch.float16):
         outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
 
@@ -326,13 +326,14 @@ def generate_3d_from_image(input_img, base_name):
 
     print("Painting textures...")
     
-    # 🛡️ FP32 Safety: NO autocast here! The C++ Rasterizers require native FP32 to calculate geometry.
-    tex_obj = paint_pipeline(
-        mesh_path=base_obj,
-        image_path=input_img,
-        output_mesh_path=f"/tmp/text_{sid}.obj",
-        save_glb=False
-    )
+    # 🚀 SPEED RESTORED: We put the FP16 autocast back! The Xatlas mock will protect the C++ engine.
+    with torch.autocast('cuda', dtype=torch.float16):
+        tex_obj = paint_pipeline(
+            mesh_path=base_obj,
+            image_path=input_img,
+            output_mesh_path=f"/tmp/text_{sid}.obj",
+            save_glb=False
+        )
 
     textures = {
         'albedo': tex_obj.replace('.obj', '.jpg'),
