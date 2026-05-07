@@ -47,6 +47,9 @@ image = (
         "diffusers==0.30.0"
     )
 
+
+
+
     .pip_install(
         "boto3","trimesh","pillow","einops","omegaconf","xatlas",
         "pyrender","pybind11","safetensors","scipy","pandas",
@@ -54,8 +57,16 @@ image = (
         "realesrgan","basicsr","pymeshlab==2022.2.post3",
         "pygltflib","pyyaml","configargparse",
         "hf-transfer","timm","peft",
-        "pytorch_lightning"
+        "pytorch_lightning",
+        "fast-simplification",
+        "cupy-cuda12x",   # <--- Essential for GPU Kernels
+        "torchmetrics",   # <--- Required by Hunyuan ShapeVAE
+        "psutil",         # <--- System monitoring
+        "tqdm"            # <--- Progress bars/General imports
     )
+
+
+
 
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
 
