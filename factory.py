@@ -66,7 +66,9 @@ image = (
 
     .run_commands(
         "pip install --force-reinstall huggingface_hub==0.25.2",
-        "pip install --force-reinstall numpy==1.26.4"
+        "pip install --force-reinstall numpy==1.26.4",
+        # 👑 THE FIX: Eradicate the deprecated PyNVML library to stop the warning
+        "pip uninstall -y pynvml"
     )
 
     .run_commands(
@@ -87,10 +89,6 @@ image = (
 
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
-        
-        # 👑 THE XATLAS PATCH (Visualbruno UV Fix)
-        "find /root/hunyuan3d/hy3dpaint -name '*.py' -exec sed -i 's/chart_options.max_iterations = 1/chart_options.max_iterations = 4/g' {} +",
-        
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
@@ -111,7 +109,6 @@ def generate_3d_from_image(input_img, base_name):
     import torch
     import torch.nn as nn
     import gc
-    import glob
     from omegaconf import OmegaConf
     import trimesh
     import sys
@@ -165,23 +162,6 @@ def generate_3d_from_image(input_img, base_name):
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dshape'))
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dpaint'))
     os.chdir(CODE_ROOT)
-
-    # =================================================================
-    # 🔍 XATLAS VERIFICATION SCANNER
-    # =================================================================
-    print("🔍 VERIFYING XATLAS PATCH...")
-    patch_found = False
-    for py_file in glob.glob(f"{CODE_ROOT}/hy3dpaint/**/*.py", recursive=True):
-        try:
-            with open(py_file, 'r') as f:
-                if "chart_options.max_iterations = 4" in f.read():
-                    print(f"✅ SUCCESS: Verified xatlas patch is active in -> {py_file}")
-                    patch_found = True
-        except Exception:
-            pass
-    if not patch_found:
-        print("⚠️ WARNING: Could not find the patched xatlas setting. It may still be running at 1 iteration.")
-    # =================================================================
 
     # 🛠️ MOCK 1: Torchvision functional_tensor fix
     from torchvision.transforms import functional as TF
@@ -238,6 +218,27 @@ def generate_3d_from_image(input_img, base_name):
         fast_simplification.simplify_mesh = patched_simplify_mesh
 
     # =================================================================
+    # 🛠️ MOCK 4: Python-Level XATLAS Intercept
+    # =================================================================
+    import xatlas
+    _orig_parametrize = xatlas.parametrize
+    
+    def patched_parametrize(*args, **kwargs):
+        # Force the engine to use 4 iterations for better UV seams
+        if 'chart_options' not in kwargs:
+            opts = xatlas.ChartOptions()
+            opts.max_iterations = 4
+            kwargs['chart_options'] = opts
+        else:
+            kwargs['chart_options'].max_iterations = 4
+            
+        print("✅ SUCCESS: Xatlas UV parametrizaton intercepted and upgraded to 4 iterations!")
+        return _orig_parametrize(*args, **kwargs)
+        
+    xatlas.parametrize = patched_parametrize
+    # =================================================================
+
+    # =================================================================
     # STAGE 1: SHAPE GENERATION
     # =================================================================
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
@@ -255,7 +256,7 @@ def generate_3d_from_image(input_img, base_name):
     )
 
     print("Generating base 3D mesh...")
-    # ⚡ OPTIMIZATION: Reduced inference steps from 30 to 20 for faster mesh generation
+    # ⚡ OPTIMIZATION: Reduced inference steps from 30 to 20
     outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
 
     raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
@@ -296,7 +297,7 @@ def generate_3d_from_image(input_img, base_name):
     cfg.model.pretrained_model_name_or_path = paint_weight_path
     OmegaConf.save(cfg, cfg_path)
 
-    # ⚡ OPTIMIZATION: Reduced max_num_view to 6 and resolution to 512 to massively speed up rendering
+    # ⚡ OPTIMIZATION: Reduced max_num_view to 6 and resolution to 512
     conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
     conf.realesrgan_ckpt_path = esrgan_path
     conf.multiview_cfg_path = cfg_path
