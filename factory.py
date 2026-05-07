@@ -6,18 +6,25 @@ import urllib.request
 import uuid
 
 # ==========================================
-# IMAGE
+# IMAGE (FULLY FIXED)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
 
+    # ✅ HARD ENV FIXES
     .env({
         "TORCH_CUDA_ARCH_LIST": "8.9",
         "CUDA_HOME": "/usr/local/cuda",
         "FORCE_CUDA": "1",
-        "MAX_JOBS": "4"
+        "MAX_JOBS": "4",
+
+        # 🔥 CRITICAL XPU DISABLE
+        "ACCELERATE_DISABLE_XPU": "1",
+        "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+        "CUDA_VISIBLE_DEVICES": "0"
     })
 
+    # SYSTEM
     .apt_install(
         "git","build-essential","clang","cmake","ninja-build",
         "libgl1-mesa-glx","libglib2.0-0","libopengl0","libegl1",
@@ -25,11 +32,12 @@ image = (
         "libxxf86vm1","libxfixes3","libxkbcommon0"
     )
 
-    # 🔥 CRITICAL FIX
+    # 🔥 LOCK NUMPY FOREVER
     .pip_install("numpy==1.26.4")
 
     .pip_install("setuptools","wheel")
 
+    # 🔥 TORCH (SAFE VERSION)
     .pip_install(
         "torch==2.1.2",
         "torchvision==0.16.2",
@@ -37,30 +45,37 @@ image = (
         index_url="https://download.pytorch.org/whl/cu121"
     )
 
+    # 🔥 CRITICAL: SAFE AI STACK (NO XPU)
     .pip_install(
-        "boto3","transformers","accelerate","trimesh","pillow",
-        "einops","omegaconf","xatlas","pyrender","ninja","pybind11",
-        "diffusers","pytorch-lightning","huggingface-hub",
-        "safetensors","scipy","pandas","opencv-python",
-        "imageio","scikit-image","rembg","realesrgan","basicsr",
-        "pymeshlab==2022.2.post3","pygltflib","open3d",
-        "pyyaml","configargparse","hf-transfer","timm","peft","onnxruntime"
+        "transformers==4.36.2",
+        "accelerate==0.25.0",
+        "diffusers==0.25.0"
     )
 
+    # OTHER LIBS
+    .pip_install(
+        "boto3","trimesh","pillow","einops","omegaconf","xatlas",
+        "pyrender","pybind11","safetensors","scipy","pandas",
+        "opencv-python","imageio","scikit-image","rembg",
+        "realesrgan","basicsr","pymeshlab==2022.2.post3",
+        "pygltflib","open3d","pyyaml","configargparse",
+        "hf-transfer","timm","peft","onnxruntime"
+    )
+
+    # BLENDER
     .run_commands(
         "pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/"
     )
 
-    # 🔥 PATCHED TORCHMCUBES
+    # 🔥 TORCHMCUBES PATCH
     .run_commands(
         "git clone https://github.com/tatsy/torchmcubes.git /tmp/torchmcubes",
         "sed -i 's/3.5;//g' /tmp/torchmcubes/CMakeLists.txt || true",
         "sed -i 's/5.0;//g' /tmp/torchmcubes/CMakeLists.txt || true",
-        "rm -rf /tmp/torchmcubes/build",
         'cd /tmp/torchmcubes && TORCH_CUDA_ARCH_LIST="8.9" pip install .'
     )
 
-    # HUNYUAN
+    # HUNYUAN BUILD
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install .',
@@ -68,7 +83,7 @@ image = (
     )
 )
 
-app = modal.App("fixed-hunyuan-pipeline", image=image)
+app = modal.App("hunyuan-final-fixed", image=image)
 
 hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21")
 cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
@@ -77,14 +92,15 @@ cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
 # PIPELINE
 # ==========================================
 def generate_3d_from_image(input_img, base_name):
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
     import torch
     import gc
     from omegaconf import OmegaConf
     import trimesh
 
-    # 🔥 ENSURE CUDA OK
-    assert torch.cuda.is_available(), "CUDA not available"
-    torch.cuda.init()
+    assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
 
     CODE_ROOT = "/root/hunyuan3d"
     WEIGHT_ROOT = "/weights/Hunyuan3D-2.1-Weights-Dataset"
@@ -200,9 +216,8 @@ def process_cloudflare_queue(cfg: dict):
 
     cache_vol.commit()
 
-
 # ==========================================
-# ENTRYPOINT (UPDATED WITH YOUR CREDENTIALS)
+# ENTRYPOINT
 # ==========================================
 @app.local_entrypoint()
 def main():
