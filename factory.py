@@ -5,6 +5,7 @@ import io
 import gc
 import uuid
 import shutil
+import traceback
 import urllib.request
 
 # =========================================================
@@ -19,6 +20,8 @@ image = (
     )
 
     .env({
+
+        # CUDA
         "CUDA_HOME": "/usr/local/cuda",
         "FORCE_CUDA": "1",
         "TORCH_CUDA_ARCH_LIST": "8.9",
@@ -28,13 +31,16 @@ image = (
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "TOKENIZERS_PARALLELISM": "false",
 
-        # disable garbage accelerators
+        # disable unsupported accelerators
         "ACCELERATE_DISABLE_XPU": "1",
         "PYTORCH_ENABLE_MPS_FALLBACK": "0",
 
-        # HF cache
+        # huggingface cache
         "HF_HOME": "/cache/huggingface",
-        "HF_HUB_ENABLE_HF_TRANSFER": "1"
+        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+
+        # runtime
+        "MAX_JOBS": "4"
     })
 
     # =====================================================
@@ -56,7 +62,8 @@ image = (
         "libxrender1",
         "libx11-6",
         "libegl1",
-        "libopengl0"
+        "libopengl0",
+        "libgomp1"
     )
 
     .pip_install(
@@ -76,7 +83,7 @@ image = (
     )
 
     # =====================================================
-    # CORE STACK
+    # CORE AI STACK
     # =====================================================
 
     .pip_install(
@@ -88,7 +95,7 @@ image = (
     )
 
     # =====================================================
-    # OTHER LIBS
+    # EXTRA LIBRARIES
     # =====================================================
 
     .pip_install(
@@ -118,7 +125,7 @@ image = (
     )
 
     # =====================================================
-    # OPEN3D + NUMPY FIX
+    # OPEN3D FIX
     # =====================================================
 
     .pip_install(
@@ -163,6 +170,7 @@ image = (
 
     .run_commands(
         "rm -rf /root/hunyuan3d",
+
         "git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
 
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install .',
@@ -196,17 +204,19 @@ cache_vol = modal.Volume.from_name(
 
 shape_pipeline = None
 paint_pipeline = None
+models_loaded = False
 
 # =========================================================
-# LOAD MODELS ONCE
+# LOAD MODELS
 # =========================================================
 
 def load_models():
 
     global shape_pipeline
     global paint_pipeline
+    global models_loaded
 
-    if shape_pipeline is not None:
+    if models_loaded:
         return
 
     import torch
@@ -215,9 +225,14 @@ def load_models():
     CODE_ROOT = "/root/hunyuan3d"
     WEIGHT_ROOT = "/weights/Hunyuan3D-2.1-Weights-Dataset"
 
-    sys.path.insert(0, CODE_ROOT)
-    sys.path.insert(0, f"{CODE_ROOT}/hy3dshape")
-    sys.path.insert(0, f"{CODE_ROOT}/hy3dpaint")
+    if CODE_ROOT not in sys.path:
+        sys.path.insert(0, CODE_ROOT)
+
+    if f"{CODE_ROOT}/hy3dshape" not in sys.path:
+        sys.path.insert(0, f"{CODE_ROOT}/hy3dshape")
+
+    if f"{CODE_ROOT}/hy3dpaint" not in sys.path:
+        sys.path.insert(0, f"{CODE_ROOT}/hy3dpaint")
 
     os.chdir(CODE_ROOT)
 
@@ -230,7 +245,7 @@ def load_models():
         Hunyuan3DPaintConfig
     )
 
-    print("Loading shape pipeline...")
+    print("Loading Shape Pipeline...")
 
     shape_pipeline = (
         Hunyuan3DDiTFlowMatchingPipeline
@@ -241,7 +256,6 @@ def load_models():
         )
     )
 
-    # warmup
     torch.cuda.empty_cache()
 
     # =====================================================
@@ -275,7 +289,7 @@ def load_models():
     OmegaConf.save(cfg, cfg_path)
 
     # =====================================================
-    # LOWER MEMORY CONFIG
+    # LOWER VRAM CONFIG
     # =====================================================
 
     conf = Hunyuan3DPaintConfig(
@@ -290,9 +304,11 @@ def load_models():
         f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
     )
 
-    print("Loading paint pipeline...")
+    print("Loading Paint Pipeline...")
 
     paint_pipeline = Hunyuan3DPaintPipeline(conf)
+
+    models_loaded = True
 
     print("Pipelines loaded successfully.")
 
@@ -305,11 +321,11 @@ def generate_3d_from_image(input_img, base_name):
     import torch
     import trimesh
 
+    load_models()
+
     from convert_utils import (
         create_glb_with_pbr_materials
     )
-
-    load_models()
 
     sid = uuid.uuid4().hex
 
@@ -318,9 +334,7 @@ def generate_3d_from_image(input_img, base_name):
     os.makedirs(tmp_dir, exist_ok=True)
 
     base_obj = f"{tmp_dir}/base.obj"
-
     output_obj = f"{tmp_dir}/painted.obj"
-
     glb_path = f"{tmp_dir}/{base_name}.glb"
 
     try:
@@ -331,7 +345,7 @@ def generate_3d_from_image(input_img, base_name):
 
             outputs = shape_pipeline(
                 image=input_img,
-                output_type='mesh'
+                output_type="mesh"
             )
 
             raw_mesh = (
@@ -359,9 +373,9 @@ def generate_3d_from_image(input_img, base_name):
             )
 
             textures = {
-                'albedo': tex_obj.replace('.obj', '.jpg'),
-                'metallic': tex_obj.replace('.obj', '_metallic.jpg'),
-                'roughness': tex_obj.replace('.obj', '_roughness.jpg')
+                "albedo": tex_obj.replace(".obj", ".jpg"),
+                "metallic": tex_obj.replace(".obj", "_metallic.jpg"),
+                "roughness": tex_obj.replace(".obj", "_roughness.jpg")
             }
 
             print("Building GLB...")
@@ -378,9 +392,9 @@ def generate_3d_from_image(input_img, base_name):
 
         gc.collect()
 
-        torch.cuda.empty_cache()
-
-        torch.cuda.ipc_collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
 
 # =========================================================
 # WORKER
@@ -390,8 +404,10 @@ def generate_3d_from_image(input_img, base_name):
     gpu="L4",
     timeout=3600,
 
-    # prevents multiple workers fighting for VRAM
-    concurrency_limit=1,
+    # FIXED: renamed from concurrency_limit
+    max_containers=1,
+
+    scaledown_window=300,
 
     volumes={
         "/weights": weights_vol,
@@ -402,10 +418,9 @@ def generate_3d_from_image(input_img, base_name):
 def process_cloudflare_queue(cfg: dict):
 
     import boto3
-
     from PIL import Image
 
-    print("Connecting to R2...")
+    print("Connecting to Cloudflare R2...")
 
     s3 = boto3.client(
         "s3",
@@ -422,6 +437,8 @@ def process_cloudflare_queue(cfg: dict):
     if "Contents" not in res:
         print("Queue empty.")
         return
+
+    print(f"Found {len(res['Contents'])} queue items.")
 
     for obj in res["Contents"]:
 
@@ -477,7 +494,7 @@ def process_cloudflare_queue(cfg: dict):
 
             print("Upload complete.")
 
-            # DELETE FROM QUEUE
+            # remove processed queue item
             s3.delete_object(
                 Bucket=cfg["bucket"],
                 Key=key
@@ -487,30 +504,46 @@ def process_cloudflare_queue(cfg: dict):
 
         except Exception as e:
 
+            print("===================================")
             print(f"FAILED: {key}")
             print(str(e))
+            traceback.print_exc()
+            print("===================================")
 
         finally:
 
             gc.collect()
 
-            try:
-                shutil.rmtree("/tmp", ignore_errors=True)
-            except:
-                pass
+            if os.path.exists("/tmp"):
+                try:
+                    shutil.rmtree("/tmp", ignore_errors=True)
+                    os.makedirs("/tmp", exist_ok=True)
+                except:
+                    pass
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     cache_vol.commit()
 
-
-
-# ==========================================
+# =========================================================
 # ENTRYPOINT
-# ==========================================
+# =========================================================
+
 @app.local_entrypoint()
 def main():
+
     process_cloudflare_queue.remote({
-        "endpoint": "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
-        "access_key": "3c33425ba6e5abbd3e63afab14dc8866",
-        "secret_key": "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8",
-        "bucket": "video-asset-files-storage-workflow"
+
+        "endpoint":
+        "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
+
+        "access_key":
+        "3c33425ba6e5abbd3e63afab14dc8866",
+
+        "secret_key":
+        "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8",
+
+        "bucket":
+        "video-asset-files-storage-workflow"
     })
