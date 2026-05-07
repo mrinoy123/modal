@@ -45,7 +45,7 @@ image = (
     # 3. DEEPSPEED
     .pip_install("deepspeed==0.11.2")
 
-    # 4. COMPATIBLE HF STACK (Upgraded to fix cached_download error)
+    # 4. COMPATIBLE HF STACK
     .pip_install(
         "transformers==4.46.0",
         "accelerate==1.1.1",
@@ -53,14 +53,15 @@ image = (
         "huggingface_hub==0.30.2"
     )
 
-    # 5. OTHER LIBS (Default xatlas restored here)
+    # 5. OTHER LIBS (Added pytorch_lightning & hf_xet)
     .pip_install(
         "boto3","trimesh","pillow","einops","omegaconf","xatlas",
         "pyrender","pybind11","safetensors","scipy","pandas",
         "opencv-python","imageio","scikit-image","rembg",
         "realesrgan","basicsr","pymeshlab==2022.2.post3",
         "pygltflib","pyyaml","configargparse",
-        "hf-transfer","timm","peft"
+        "hf-transfer","timm","peft",
+        "pytorch_lightning", "huggingface_hub[hf_xet]"
     )
 
     # 6. Install problematic libs BEFORE numpy lock
@@ -239,7 +240,11 @@ def process_cloudflare_queue(cfg: dict):
 
     for obj in res["Contents"]:
         key = obj["Key"]
-        if not key.endswith((".png",".jpg",".jpeg")):
+        
+        # 🚨 FIX FOR INFINITE LOOP: Ignore sub-folders like queue/failed/
+        # Valid key: "queue/image.png" (length 2)
+        # Invalid key: "queue/failed/image.png" (length 3)
+        if len(key.split("/")) != 2 or not key.endswith((".png",".jpg",".jpeg")):
             continue
 
         print(f"Processing image: {key}")
@@ -256,13 +261,23 @@ def process_cloudflare_queue(cfg: dict):
                     Key=f"output/{os.path.basename(glb)}",
                     Body=f
                 )
-            print("Successfully uploaded!")
+            print("Successfully uploaded! Removing original from queue...")
             
-            # Optional: Delete the image from the queue once successfully processed
-            # s3.delete_object(Bucket=cfg["bucket"], Key=key)
+            # 🚨 FIX: Delete the original to prevent looping over it again
+            s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
         except Exception as e:
             print(f"ERROR processing {key}:", e)
+            
+            # 🚨 FIX: Move broken files to a failed folder to prevent retrying the same bad file endlessly
+            failed_key = key.replace("queue/", "queue/failed/", 1)
+            print(f"Moving {key} to {failed_key}...")
+            s3.copy_object(
+                Bucket=cfg["bucket"],
+                CopySource={'Bucket': cfg["bucket"], 'Key': key},
+                Key=failed_key
+            )
+            s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
     cache_vol.commit()
 
