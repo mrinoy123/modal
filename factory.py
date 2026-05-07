@@ -89,7 +89,6 @@ image = (
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
         
         # 👑 THE XATLAS PATCH (Visualbruno UV Fix)
-        # We use 'find' to locate the exact python file containing the xatlas chart options and upgrade the iterations.
         "find /root/hunyuan3d/hy3dpaint -name '*.py' -exec sed -i 's/chart_options.max_iterations = 1/chart_options.max_iterations = 4/g' {} +",
         
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
@@ -97,7 +96,7 @@ image = (
     )
 )
 
-app = modal.App("hunyuan-final-fixed", image=image)
+app = modal.App("hunyuan-final-optimized", image=image)
 
 hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21", create_if_missing=True)
 cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
@@ -112,6 +111,7 @@ def generate_3d_from_image(input_img, base_name):
     import torch
     import torch.nn as nn
     import gc
+    import glob
     from omegaconf import OmegaConf
     import trimesh
     import sys
@@ -165,6 +165,23 @@ def generate_3d_from_image(input_img, base_name):
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dshape'))
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dpaint'))
     os.chdir(CODE_ROOT)
+
+    # =================================================================
+    # 🔍 XATLAS VERIFICATION SCANNER
+    # =================================================================
+    print("🔍 VERIFYING XATLAS PATCH...")
+    patch_found = False
+    for py_file in glob.glob(f"{CODE_ROOT}/hy3dpaint/**/*.py", recursive=True):
+        try:
+            with open(py_file, 'r') as f:
+                if "chart_options.max_iterations = 4" in f.read():
+                    print(f"✅ SUCCESS: Verified xatlas patch is active in -> {py_file}")
+                    patch_found = True
+        except Exception:
+            pass
+    if not patch_found:
+        print("⚠️ WARNING: Could not find the patched xatlas setting. It may still be running at 1 iteration.")
+    # =================================================================
 
     # 🛠️ MOCK 1: Torchvision functional_tensor fix
     from torchvision.transforms import functional as TF
@@ -238,7 +255,8 @@ def generate_3d_from_image(input_img, base_name):
     )
 
     print("Generating base 3D mesh...")
-    outputs = shape_pipeline(image=input_img, num_inference_steps=30, output_type='mesh')
+    # ⚡ OPTIMIZATION: Reduced inference steps from 30 to 20 for faster mesh generation
+    outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
 
     raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
     raw_mesh.mesh_f = raw_mesh.mesh_f[:, ::-1]
@@ -278,7 +296,8 @@ def generate_3d_from_image(input_img, base_name):
     cfg.model.pretrained_model_name_or_path = paint_weight_path
     OmegaConf.save(cfg, cfg_path)
 
-    conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
+    # ⚡ OPTIMIZATION: Reduced max_num_view to 6 and resolution to 512 to massively speed up rendering
+    conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
     conf.realesrgan_ckpt_path = esrgan_path
     conf.multiview_cfg_path = cfg_path
     conf.custom_pipeline = f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
