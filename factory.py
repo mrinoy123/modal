@@ -118,6 +118,7 @@ def generate_3d_from_image(input_img, base_name):
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     import torch
+    import torch.nn as nn
     import gc
     from omegaconf import OmegaConf
     import trimesh
@@ -135,10 +136,41 @@ def generate_3d_from_image(input_img, base_name):
     os.chdir(CODE_ROOT)
 
     # =================================================================
-    # 🛠️ THE FIX: Mock the removed torchvision.transforms.functional_tensor
+    # 🛠️ MOCK 1: Torchvision functional_tensor fix
     # =================================================================
     from torchvision.transforms import functional as TF
     sys.modules["torchvision.transforms.functional_tensor"] = TF
+
+    # =================================================================
+    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2 (STOPS THE CRASH)
+    # =================================================================
+    if not hasattr(nn, 'RMSNorm'):
+        class RMSNorm(nn.Module):
+            def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
+                super().__init__()
+                if isinstance(normalized_shape, int):
+                    normalized_shape = (normalized_shape,)
+                self.normalized_shape = tuple(normalized_shape)
+                self.eps = eps
+                self.elementwise_affine = elementwise_affine
+                if self.elementwise_affine:
+                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=dtype))
+                else:
+                    self.register_parameter('weight', None)
+
+            def forward(self, input):
+                input_dtype = input.dtype
+                input_fp32 = input.to(torch.float32)
+                variance = input_fp32.pow(2).mean(-1, keepdim=True)
+                input_norm = input_fp32 * torch.rsqrt(variance + self.eps)
+                if self.elementwise_affine:
+                    return (self.weight * input_norm).to(input_dtype)
+                return input_norm.to(input_dtype)
+        
+        # Inject it into PyTorch's brain
+        nn.RMSNorm = RMSNorm
+        import torch.nn.modules.normalization as norm_mod
+        norm_mod.RMSNorm = RMSNorm
     # =================================================================
 
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
@@ -165,9 +197,15 @@ def generate_3d_from_image(input_img, base_name):
             esrgan_path
         )
 
+    # =================================================================
+    # 🛠️ MOCK 3: Paint Pipeline Path Fix (STOPS THE 19 FILE DOWNLOAD)
+    # =================================================================
+    # We must point directly to the paint subfolder so it sees the local files
+    paint_weight_path = os.path.join(WEIGHT_ROOT, "hunyuan3d-paintpbr-v2-1")
+    
     cfg_path = f"{CODE_ROOT}/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
     cfg = OmegaConf.load(cfg_path)
-    cfg.model.pretrained_model_name_or_path = WEIGHT_ROOT
+    cfg.model.pretrained_model_name_or_path = paint_weight_path
     OmegaConf.save(cfg, cfg_path)
 
     conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
