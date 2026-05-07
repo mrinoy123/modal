@@ -5,23 +5,25 @@ import io
 import urllib.request
 import uuid
 
+
+import modal
+
 # ==========================================
-# IMAGE (FULLY FIXED)
+# IMAGE (STABLE + FIXED)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
 
-    # ✅ HARD ENV FIXES
     .env({
         "TORCH_CUDA_ARCH_LIST": "8.9",
         "CUDA_HOME": "/usr/local/cuda",
         "FORCE_CUDA": "1",
         "MAX_JOBS": "4",
 
-        # 🔥 CRITICAL XPU DISABLE
+        # 🔥 HARD DISABLE XPU
         "ACCELERATE_DISABLE_XPU": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
         "PYTORCH_ENABLE_MPS_FALLBACK": "0",
-        "CUDA_VISIBLE_DEVICES": "0"
     })
 
     # SYSTEM
@@ -32,12 +34,9 @@ image = (
         "libxxf86vm1","libxfixes3","libxkbcommon0"
     )
 
-    # 🔥 LOCK NUMPY FOREVER
-    .pip_install("numpy==1.26.4")
-
     .pip_install("setuptools","wheel")
 
-    # 🔥 TORCH (SAFE VERSION)
+    # TORCH (CUDA 12.1 SAFE)
     .pip_install(
         "torch==2.1.2",
         "torchvision==0.16.2",
@@ -45,21 +44,32 @@ image = (
         index_url="https://download.pytorch.org/whl/cu121"
     )
 
-    # 🔥 CRITICAL: SAFE AI STACK (NO XPU)
+    # 🔥 COMPATIBLE HF STACK
     .pip_install(
         "transformers==4.36.2",
-        "accelerate==0.25.0",
-        "diffusers==0.25.0"
+        "accelerate==0.24.1",
+        "diffusers==0.24.0",
+        "huggingface_hub==0.19.4"
     )
 
-    # OTHER LIBS
+    # OTHER LIBS (NO NUMPY HERE)
     .pip_install(
         "boto3","trimesh","pillow","einops","omegaconf","xatlas",
         "pyrender","pybind11","safetensors","scipy","pandas",
         "opencv-python","imageio","scikit-image","rembg",
         "realesrgan","basicsr","pymeshlab==2022.2.post3",
-        "pygltflib","open3d","pyyaml","configargparse",
-        "hf-transfer","timm","peft","onnxruntime"
+        "pygltflib","pyyaml","configargparse",
+        "hf-transfer","timm","peft"
+    )
+
+    # Install problematic libs BEFORE numpy lock
+    .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
+
+    # 🔥 FINAL NUMPY FIX (THIS IS THE KEY)
+    .run_commands(
+        "pip uninstall -y numpy",
+        "pip install numpy==1.26.4",
+        "python -c 'import numpy; print(numpy.__version__)'"
     )
 
     # BLENDER
@@ -67,7 +77,7 @@ image = (
         "pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/"
     )
 
-    # 🔥 TORCHMCUBES PATCH
+    # TORCHMCUBES
     .run_commands(
         "git clone https://github.com/tatsy/torchmcubes.git /tmp/torchmcubes",
         "sed -i 's/3.5;//g' /tmp/torchmcubes/CMakeLists.txt || true",
@@ -83,10 +93,15 @@ image = (
     )
 )
 
+# ==========================================
+# APP + VOLUMES (YOU WERE RIGHT)
+# ==========================================
 app = modal.App("hunyuan-final-fixed", image=image)
 
 hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21")
 cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
+
+
 
 # ==========================================
 # PIPELINE
