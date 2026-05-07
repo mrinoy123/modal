@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + PURE FP16 L4 OPTIMIZED)
+# IMAGE (STABLE TORCH 2.1.2 + L4 OPTIMIZED)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -111,6 +111,7 @@ def generate_3d_from_image(input_img, base_name):
     from omegaconf import OmegaConf
     import trimesh
     import sys
+    import numpy as np
 
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
@@ -118,7 +119,7 @@ def generate_3d_from_image(input_img, base_name):
     torch.backends.cuda.preferred_linalg_library("default")
 
     # =================================================================
-    # 🕵️ THE RESILIENT LINKER (Dynamic Path Finder)
+    # 🕵️ THE RESILIENT LINKER
     # =================================================================
     def resolve_paths():
         candidate_mounts = ["/weights", "/cache", "/mnt", "/root"]
@@ -163,7 +164,7 @@ def generate_3d_from_image(input_img, base_name):
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
     # =================================================================
-    # 🛠️ MOCK 1: PURE FP16 RMSNorm Polyfill
+    # 🛠️ MOCK 1: Flexible RMSNorm Polyfill
     # =================================================================
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
@@ -175,18 +176,16 @@ def generate_3d_from_image(input_img, base_name):
                 self.eps = eps
                 self.elementwise_affine = elementwise_affine
                 
-                # 👑 FP16 Optimization: Force weights to initialize natively in float16
                 if self.elementwise_affine:
-                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=torch.float16))
+                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=dtype))
                 else:
                     self.register_parameter('weight', None)
 
             def forward(self, input):
-                # Pure FP16 math
                 variance = input.pow(2).mean(-1, keepdim=True)
                 input_norm = input * torch.rsqrt(variance + self.eps)
                 if self.elementwise_affine:
-                    return self.weight * input_norm
+                    return (self.weight.to(input.dtype) * input_norm)
                 return input_norm
         
         nn.RMSNorm = RMSNorm
@@ -220,21 +219,38 @@ def generate_3d_from_image(input_img, base_name):
         fast_simplification.simplify_mesh = patched_simplify_mesh
 
     # =================================================================
-    # 🛠️ MOCK 3: THE ULTIMATE XATLAS ENGINE BYPASS
+    # 🛠️ MOCK 3: THE ULTIMATE XATLAS ENGINE BYPASS (Strict FP32 enforcement)
     # =================================================================
     import xatlas
     
-    # We completely hijack the baseline function and map it to the advanced Atlas engine
     def patched_parametrize(positions, indices, normals=None, uvs=None, **kwargs):
         print("✅ SUCCESS: Bypassing C++ bindings! Re-routing mesh through custom Atlas Engine (4 Iterations).")
+        
+        # Strip PyTorch tensors if they somehow leaked in here
+        if hasattr(positions, 'cpu'): positions = positions.detach().cpu().numpy()
+        if hasattr(indices, 'cpu'): indices = indices.detach().cpu().numpy()
+        
+        # Force strict types for the underlying C++ library
+        positions = np.asarray(positions, dtype=np.float32)
+        indices = np.asarray(indices, dtype=np.uint32)
+        
+        if normals is not None:
+            if hasattr(normals, 'cpu'): normals = normals.detach().cpu().numpy()
+            normals = np.asarray(normals, dtype=np.float32)
+        
+        if uvs is not None:
+            if hasattr(uvs, 'cpu'): uvs = uvs.detach().cpu().numpy()
+            uvs = np.asarray(uvs, dtype=np.float32)
+        
         atlas = xatlas.Atlas()
-        atlas.add_mesh(positions, indices)
+        atlas.add_mesh(positions, indices, normals, uvs)
         
         opts = xatlas.ChartOptions()
         opts.max_iterations = 4
-        
         atlas.generate(chart_options=opts)
-        return atlas.get_mesh(0)
+        
+        m = atlas.get_mesh(0)
+        return m.vertex_mapping, m.indices, m.uvs
         
     xatlas.parametrize = patched_parametrize
     # =================================================================
@@ -257,8 +273,7 @@ def generate_3d_from_image(input_img, base_name):
     )
 
     print("Generating base 3D mesh...")
-    
-    # 👑 FP16 Optimization: Force autocast so internal torch matmuls never fall back to fp32
+    # 👑 FP16 Optimization: DiT models thrive in half-precision. Massive speed boost here.
     with torch.autocast('cuda', dtype=torch.float16):
         outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
 
@@ -311,14 +326,13 @@ def generate_3d_from_image(input_img, base_name):
 
     print("Painting textures...")
     
-    # 👑 FP16 Optimization: Strict autocast for the texture renderer as well
-    with torch.autocast('cuda', dtype=torch.float16):
-        tex_obj = paint_pipeline(
-            mesh_path=base_obj,
-            image_path=input_img,
-            output_mesh_path=f"/tmp/text_{sid}.obj",
-            save_glb=False
-        )
+    # 🛡️ FP32 Safety: NO autocast here! The C++ Rasterizers require native FP32 to calculate geometry.
+    tex_obj = paint_pipeline(
+        mesh_path=base_obj,
+        image_path=input_img,
+        output_mesh_path=f"/tmp/text_{sid}.obj",
+        save_glb=False
+    )
 
     textures = {
         'albedo': tex_obj.replace('.obj', '.jpg'),
