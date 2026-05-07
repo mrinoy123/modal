@@ -47,9 +47,6 @@ image = (
         "diffusers==0.30.0"
     )
 
-
-
-
     .pip_install(
         "boto3","trimesh","pillow","einops","omegaconf","xatlas",
         "pyrender","pybind11","safetensors","scipy","pandas",
@@ -59,14 +56,11 @@ image = (
         "hf-transfer","timm","peft",
         "pytorch_lightning",
         "fast-simplification",
-        "cupy-cuda12x",   # <--- Essential for GPU Kernels
-        "torchmetrics",   # <--- Required by Hunyuan ShapeVAE
-        "psutil",         # <--- System monitoring
-        "tqdm"            # <--- Progress bars/General imports
+        "cupy-cuda12x",   # Essential for GPU Kernels
+        "torchmetrics",   # Required by Hunyuan ShapeVAE
+        "psutil",         # System monitoring
+        "tqdm"            # Progress bars/General imports
     )
-
-
-
 
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
 
@@ -202,6 +196,19 @@ def generate_3d_from_image(input_img, base_name):
         nn.RMSNorm = RMSNorm
         import torch.nn.modules.normalization as norm_mod
         norm_mod.RMSNorm = RMSNorm
+
+    # =================================================================
+    # 🛠️ MOCK 3: Fast-Simplification target_reduction Fix
+    # =================================================================
+    import hy3dpaint.utils.mesh_utils as mesh_utils
+    original_simplify = mesh_utils.simplify_mesh
+
+    def patched_simplify(mesh, target_face_count=10000):
+        # We ignore target_face_count and force a 90% reduction ratio (0.9)
+        # This keeps the fast-simplification library happy and avoids the 0-1 error
+        return original_simplify(mesh, target_reduction=0.9)
+
+    mesh_utils.simplify_mesh = patched_simplify
 
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
