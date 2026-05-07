@@ -112,6 +112,7 @@ def generate_3d_from_image(input_img, base_name):
     import trimesh
     import sys
     import numpy as np
+    from types import SimpleNamespace
 
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
@@ -123,8 +124,7 @@ def generate_3d_from_image(input_img, base_name):
     # =================================================================
     def resolve_paths():
         candidate_mounts = ["/weights", "/cache", "/mnt", "/root"]
-        engine_path = None
-        weights_path = None
+        engine_path, weights_path = None, None
 
         for mount in candidate_mounts:
             for root, dirs, files in os.walk(mount, topdown=True):
@@ -146,11 +146,8 @@ def generate_3d_from_image(input_img, base_name):
                     break
             if weights_path: break
 
-        if not engine_path:
-            engine_path = "/root/hunyuan3d" 
-        if not weights_path:
-            raise FileNotFoundError("Linker Failed: Could not find the model weights.")
-
+        if not engine_path: engine_path = "/root/hunyuan3d" 
+        if not weights_path: raise FileNotFoundError("Linker Failed: Missing weights.")
         return engine_path, weights_path
 
     CODE_ROOT, WEIGHT_ROOT = resolve_paths()
@@ -164,7 +161,7 @@ def generate_3d_from_image(input_img, base_name):
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
     # =================================================================
-    # 🛠️ MOCK 1: PURE FP16 RMSNorm Polyfill
+    # 🛠️ MOCK 1: FP16 RMSNorm (High Speed)
     # =================================================================
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
@@ -176,7 +173,7 @@ def generate_3d_from_image(input_img, base_name):
                 self.eps = eps
                 self.elementwise_affine = elementwise_affine
                 
-                # 👑 FP16 Optimization: Force native FP16 initialization for maximum speed
+                # Using FP16 natively as requested
                 if self.elementwise_affine:
                     self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=torch.float16))
                 else:
@@ -194,7 +191,7 @@ def generate_3d_from_image(input_img, base_name):
         norm_mod.RMSNorm = RMSNorm
 
     # =================================================================
-    # 🛠️ MOCK 2: Bulletproof Fast-Simplification
+    # 🛠️ MOCK 2: Fast-Simplification
     # =================================================================
     import fast_simplification
     _orig_simplify = fast_simplification.simplify
@@ -208,55 +205,51 @@ def generate_3d_from_image(input_img, base_name):
         return _orig_simplify(*new_args, **kwargs)
     fast_simplification.simplify = patched_simplify
 
-    if hasattr(fast_simplification, 'simplify_mesh'):
-        _orig_simplify_mesh = fast_simplification.simplify_mesh
-        def patched_simplify_mesh(*args, **kwargs):
-            if 'target_reduction' in kwargs and kwargs['target_reduction'] > 1.0:
-                kwargs['target_reduction'] = 0.9
-            new_args = list(args)
-            if len(new_args) >= 2 and new_args[1] > 1.0:
-                new_args[1] = 0.9
-            return _orig_simplify_mesh(*new_args, **kwargs)
-        fast_simplification.simplify_mesh = patched_simplify_mesh
-
     # =================================================================
-    # 🛠️ MOCK 3: THE ULTIMATE XATLAS ENGINE BYPASS (The Shield)
+    # 🛠️ MOCK 3: THE SHIELDED XATLAS BYPASS (Fixed Return Type)
     # =================================================================
     import xatlas
     
     def patched_parametrize(positions, indices, normals=None, uvs=None, **kwargs):
-        print("✅ SUCCESS: Bypassing C++ bindings! Re-routing mesh through custom Atlas Engine (4 Iterations).")
+        print("✅ SUCCESS: Xatlas intercepted. Running 4 iterations in FP32...")
         
-        # 🛡️ THE SHIELD: Strip FP16 tensors from the fast AI pipeline and force into stable FP32 numpy
-        if hasattr(positions, 'cpu'): positions = positions.detach().cpu().numpy()
-        if hasattr(indices, 'cpu'): indices = indices.detach().cpu().numpy()
+        # Strip Tensors to CPU Numpy
+        if hasattr(positions, 'detach'): positions = positions.detach().cpu().numpy()
+        if hasattr(indices, 'detach'): indices = indices.detach().cpu().numpy()
         
-        positions = np.asarray(positions, dtype=np.float32)
-        indices = np.asarray(indices, dtype=np.uint32)
+        pos_np = np.asarray(positions, dtype=np.float32)
+        ind_np = np.asarray(indices, dtype=np.uint32)
         
+        norm_np = None
         if normals is not None:
-            if hasattr(normals, 'cpu'): normals = normals.detach().cpu().numpy()
-            normals = np.asarray(normals, dtype=np.float32)
+            if hasattr(normals, 'detach'): normals = normals.detach().cpu().numpy()
+            norm_np = np.asarray(normals, dtype=np.float32)
         
+        uv_np = None
         if uvs is not None:
-            if hasattr(uvs, 'cpu'): uvs = uvs.detach().cpu().numpy()
-            uvs = np.asarray(uvs, dtype=np.float32)
+            if hasattr(uvs, 'detach'): uvs = uvs.detach().cpu().numpy()
+            uv_np = np.asarray(uvs, dtype=np.float32)
         
         atlas = xatlas.Atlas()
-        atlas.add_mesh(positions, indices, normals, uvs)
+        atlas.add_mesh(pos_np, ind_np, norm_np, uv_np)
         
         opts = xatlas.ChartOptions()
         opts.max_iterations = 4
         atlas.generate(chart_options=opts)
         
-        # 👑 THE FIX: Return the actual Mesh Object (not a tuple) so .vertex_mapping works downstream!
-        return atlas.get_mesh(0)
+        # 👑 THE FIX: Return a SimpleNamespace so .vertex_mapping doesn't error out
+        m = atlas.get_mesh(0)
+        return SimpleNamespace(
+            vmapping=m.vmapping,
+            vertex_mapping=m.vmapping, 
+            indices=m.indices,
+            uvs=m.uvs
+        )
         
     xatlas.parametrize = patched_parametrize
-    # =================================================================
 
     # =================================================================
-    # STAGE 1: SHAPE GENERATION
+    # STAGE 1: SHAPE GENERATION (FP16 Boosted)
     # =================================================================
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     
@@ -273,19 +266,16 @@ def generate_3d_from_image(input_img, base_name):
     )
 
     print("Generating base 3D mesh...")
-    # 🚀 Full FP16 Autocast for maximum shape generation speed
     with torch.autocast('cuda', dtype=torch.float16):
         outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
 
     raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
     raw_mesh.mesh_f = raw_mesh.mesh_f[:, ::-1]
-
     mesh = trimesh.Trimesh(raw_mesh.mesh_v, raw_mesh.mesh_f)
 
     sid = uuid.uuid4().hex
     base_obj = f"/tmp/{sid}.obj"
     glb = f"/tmp/{base_name}.glb"
-
     mesh.export(base_obj)
 
     print("Clearing Shape Model from VRAM...")
@@ -294,20 +284,10 @@ def generate_3d_from_image(input_img, base_name):
     torch.cuda.empty_cache()
 
     # =================================================================
-    # STAGE 2: TEXTURE PAINTING
+    # STAGE 2: TEXTURE PAINTING (FP32 Guarded)
     # =================================================================
     from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
     from convert_utils import create_glb_with_pbr_materials
-
-    esrgan_path = "/cache/RealESRGAN.pth"
-    if not os.path.exists(esrgan_path):
-        print("Downloading RealESRGAN...")
-        os.makedirs("/cache", exist_ok=True)
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-            esrgan_path
-        )
 
     paint_weight_path = os.path.join(WEIGHT_ROOT, "hunyuan3d-paintpbr-v2-1")
     cfg_path = f"{CODE_ROOT}/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
@@ -315,9 +295,8 @@ def generate_3d_from_image(input_img, base_name):
     cfg.model.pretrained_model_name_or_path = paint_weight_path
     OmegaConf.save(cfg, cfg_path)
 
-    # ⚡ Speed Optimization: 6 views at 512px
     conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
-    conf.realesrgan_ckpt_path = esrgan_path
+    conf.realesrgan_ckpt_path = "/cache/RealESRGAN.pth"
     conf.multiview_cfg_path = cfg_path
     conf.custom_pipeline = f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
 
@@ -326,8 +305,9 @@ def generate_3d_from_image(input_img, base_name):
 
     print("Painting textures...")
     
-    # 🚀 SPEED RESTORED: We put the FP16 autocast back! The Xatlas mock will protect the C++ engine.
-    with torch.autocast('cuda', dtype=torch.float16):
+    # 🛡️ THE STABILITY FIX: We explicitly disable autocast here.
+    # This prevents the C++ Rasterizer from seeing "Half" precision data.
+    with torch.cuda.amp.autocast(enabled=False):
         tex_obj = paint_pipeline(
             mesh_path=base_obj,
             image_path=input_img,
@@ -397,14 +377,11 @@ def process_cloudflare_queue(cfg: dict):
                     Body=f
                 )
             print("Successfully uploaded! Removing original from queue...")
-            
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
         except Exception as e:
             print(f"❌ ERROR processing {key}:", e)
-            
             failed_key = key.replace("queue/", "queue/failed/", 1)
-            print(f"Moving {key} to {failed_key}...")
             s3.copy_object(
                 Bucket=cfg["bucket"],
                 CopySource={'Bucket': cfg["bucket"], 'Key': key},
