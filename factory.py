@@ -105,7 +105,7 @@ image = (
 # ==========================================
 app = modal.App("hunyuan-final-fixed", image=image)
 
-hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21")
+hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21", create_if_missing=True)
 cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
 
 
@@ -120,6 +120,7 @@ def generate_3d_from_image(input_img, base_name):
     import gc
     from omegaconf import OmegaConf
     import trimesh
+    import sys
 
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
@@ -131,6 +132,13 @@ def generate_3d_from_image(input_img, base_name):
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dshape'))
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dpaint'))
     os.chdir(CODE_ROOT)
+
+    # =================================================================
+    # 🛠️ THE FIX: Mock the removed torchvision.transforms.functional_tensor
+    # =================================================================
+    from torchvision.transforms import functional as TF
+    sys.modules["torchvision.transforms.functional_tensor"] = TF
+    # =================================================================
 
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
@@ -147,6 +155,7 @@ def generate_3d_from_image(input_img, base_name):
     if not os.path.exists(esrgan_path):
         print("Downloading RealESRGAN...")
         os.makedirs("/cache", exist_ok=True)
+        import urllib.request
         urllib.request.urlretrieve(
             "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
             esrgan_path
@@ -173,6 +182,7 @@ def generate_3d_from_image(input_img, base_name):
 
     mesh = trimesh.Trimesh(raw_mesh.mesh_v, raw_mesh.mesh_f)
 
+    import uuid
     sid = uuid.uuid4().hex
     base_obj = f"/tmp/{sid}.obj"
     glb = f"/tmp/{base_name}.glb"
@@ -211,6 +221,8 @@ def generate_3d_from_image(input_img, base_name):
 def process_cloudflare_queue(cfg: dict):
     import boto3
     from PIL import Image
+    import io
+    import os
 
     print("Connecting to Cloudflare R2...")
     s3 = boto3.client(
@@ -245,6 +257,9 @@ def process_cloudflare_queue(cfg: dict):
                     Body=f
                 )
             print("Successfully uploaded!")
+            
+            # Optional: Delete the image from the queue once successfully processed
+            # s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
         except Exception as e:
             print(f"ERROR processing {key}:", e)
