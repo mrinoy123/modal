@@ -7,6 +7,7 @@ on:
 jobs:
   run-factory:
     runs-on: ubuntu-latest
+    timeout-minutes: 45 # ⏳ THE FIX: Forces GitHub to wait for the C++ Compiler
     steps:
       - name: 🛰️ Checkout Repository
         uses: actions/checkout@v4
