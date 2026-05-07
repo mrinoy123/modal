@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + FP16 L4 OPTIMIZED)
+# IMAGE (STABLE TORCH 2.1.2 + FP16 L4 OPTIMIZED + XATLAS PATCH)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -59,7 +59,7 @@ image = (
         "torchmetrics",   
         "psutil",         
         "tqdm",
-        "nvidia-ml-py"    # 👑 THE FIX: Solves the PyNVML deprecation warning
+        "nvidia-ml-py"    
     )
 
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
@@ -87,6 +87,11 @@ image = (
 
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
+        
+        # 👑 THE XATLAS PATCH (Visualbruno UV Fix)
+        # We use 'find' to locate the exact python file containing the xatlas chart options and upgrade the iterations.
+        "find /root/hunyuan3d/hy3dpaint -name '*.py' -exec sed -i 's/chart_options.max_iterations = 1/chart_options.max_iterations = 4/g' {} +",
+        
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
@@ -114,7 +119,6 @@ def generate_3d_from_image(input_img, base_name):
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
 
-    # 👑 THE FIX: Set cuSolver to use the safest backend for PyTorch 2.1.2 on CUDA 12
     torch.backends.cuda.preferred_linalg_library("default")
 
     # =================================================================
@@ -166,7 +170,7 @@ def generate_3d_from_image(input_img, base_name):
     from torchvision.transforms import functional as TF
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
-    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2 (👑 THE FIX: Full FP16 Mode)
+    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2 (Full FP16 Mode)
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
             def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
@@ -182,7 +186,6 @@ def generate_3d_from_image(input_img, base_name):
                     self.register_parameter('weight', None)
 
             def forward(self, input):
-                # We no longer cast to float32. We stay in native fp16 for max speed!
                 variance = input.pow(2).mean(-1, keepdim=True)
                 input_norm = input * torch.rsqrt(variance + self.eps)
                 if self.elementwise_affine:
@@ -248,7 +251,6 @@ def generate_3d_from_image(input_img, base_name):
 
     mesh.export(base_obj)
 
-    # 👑 THE FIX: Sequential Execution to prevent VRAM Collision (cuSolver error fix)
     print("Clearing Shape Model from VRAM...")
     del shape_pipeline
     gc.collect()
