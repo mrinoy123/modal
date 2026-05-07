@@ -4,12 +4,10 @@ import sys
 import io
 import urllib.request
 import uuid
-
-
-import modal
+import gc
 
 # ==========================================
-# IMAGE (STABLE + FIXED)
+# IMAGE (STABLE + FIXED + VERBOSE)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -85,22 +83,22 @@ image = (
         'cd /tmp/torchmcubes && TORCH_CUDA_ARCH_LIST="8.9" pip install .'
     )
 
-    # HUNYUAN BUILD
+    # HUNYUAN BUILD (Properly chained, verbose mode enabled)
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
-        'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install .',
+        # The -v flag prints the C++ compiler logs to the console to prevent GitHub Actions timeouts
+        'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
 )
 
 # ==========================================
-# APP + VOLUMES (YOU WERE RIGHT)
+# APP + VOLUMES
 # ==========================================
 app = modal.App("hunyuan-final-fixed", image=image)
 
 hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21")
 cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
-
 
 
 # ==========================================
