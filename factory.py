@@ -198,17 +198,36 @@ def generate_3d_from_image(input_img, base_name):
         norm_mod.RMSNorm = RMSNorm
 
     # =================================================================
-    # 🛠️ MOCK 3: Fast-Simplification target_reduction Fix
+    # 🛠️ MOCK 3: Bulletproof Fast-Simplification target_reduction Fix
     # =================================================================
-    import hy3dpaint.utils.mesh_utils as mesh_utils
-    original_simplify = mesh_utils.simplify_mesh
+    import fast_simplification
+    _orig_simplify = fast_simplification.simplify
 
-    def patched_simplify(mesh, target_face_count=10000):
-        # We ignore target_face_count and force a 90% reduction ratio (0.9)
-        # This keeps the fast-simplification library happy and avoids the 0-1 error
-        return original_simplify(mesh, target_reduction=0.9)
+    def patched_simplify(*args, **kwargs):
+        # Intercept and force ratio to 0.9 if it's over 1.0
+        if 'target_reduction' in kwargs and kwargs['target_reduction'] > 1.0:
+            kwargs['target_reduction'] = 0.9
+        
+        new_args = list(args)
+        if len(new_args) >= 3 and new_args[2] > 1.0:
+            new_args[2] = 0.9
+            
+        return _orig_simplify(*new_args, **kwargs)
 
-    mesh_utils.simplify_mesh = patched_simplify
+    fast_simplification.simplify = patched_simplify
+
+    if hasattr(fast_simplification, 'simplify_mesh'):
+        _orig_simplify_mesh = fast_simplification.simplify_mesh
+        def patched_simplify_mesh(*args, **kwargs):
+            if 'target_reduction' in kwargs and kwargs['target_reduction'] > 1.0:
+                kwargs['target_reduction'] = 0.9
+            new_args = list(args)
+            if len(new_args) >= 2 and new_args[1] > 1.0:
+                new_args[1] = 0.9
+            return _orig_simplify_mesh(*new_args, **kwargs)
+        fast_simplification.simplify_mesh = patched_simplify_mesh
+
+    # =================================================================
 
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
@@ -220,7 +239,6 @@ def generate_3d_from_image(input_img, base_name):
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
 
-    # 👑 THE FIX: Explicitly loading in float16 for L4 GPU optimization
     shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         WEIGHT_ROOT,
         subfolder="hunyuan3d-dit-v2-1",
