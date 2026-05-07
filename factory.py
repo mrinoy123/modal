@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE + PYTORCH 2.5.1 + DEFAULT XATLAS)
+# IMAGE (STABLE TORCH 2.1.2 + XFORMERS FIX)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -17,8 +17,6 @@ image = (
         "CUDA_HOME": "/usr/local/cuda",
         "FORCE_CUDA": "1",
         "MAX_JOBS": "4",
-
-        # 🔥 HARD DISABLE XPU
         "ACCELERATE_DISABLE_XPU": "1",
         "CUDA_VISIBLE_DEVICES": "0",
         "PYTORCH_ENABLE_MPS_FALLBACK": "0",
@@ -34,18 +32,21 @@ image = (
 
     .pip_install("setuptools","wheel")
 
-    # 2. UPGRADED TORCH (2.5.1 fixes the RMSNorm error!)
+    # 2. STABLE TORCH (2.1.2 is REQUIRED for diffusers 0.30.0 stability)
     .pip_install(
-        "torch==2.5.1",
-        "torchvision==0.20.1",
-        "torchaudio==2.5.1",
+        "torch==2.1.2",
+        "torchvision==0.16.2",
+        "torchaudio==2.1.2",
         index_url="https://download.pytorch.org/whl/cu121"
     )
     
-    # 3. DEEPSPEED
+    # 3. THE FIX: ADD XFORMERS FOR ATTENTION MECHANISM
+    .pip_install("xformers==0.0.23.post1")
+    
+    # 4. DEEPSPEED
     .pip_install("deepspeed==0.11.2")
 
-    # 4. COMPATIBLE HF STACK
+    # 5. COMPATIBLE HF STACK
     .pip_install(
         "transformers==4.46.0",
         "accelerate==1.1.1",
@@ -53,7 +54,7 @@ image = (
         "huggingface_hub==0.30.2"
     )
 
-    # 5. OTHER LIBS (Added pytorch_lightning & hf_xet)
+    # 6. OTHER LIBS
     .pip_install(
         "boto3","trimesh","pillow","einops","omegaconf","xatlas",
         "pyrender","pybind11","safetensors","scipy","pandas",
@@ -64,28 +65,28 @@ image = (
         "pytorch_lightning", "huggingface_hub[hf_xet]"
     )
 
-    # 6. Install problematic libs BEFORE numpy lock
+    # 7. Install problematic libs BEFORE numpy lock
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
 
-    # 7. FINAL NUMPY FIX (Forces 1.26.4 so Open3D doesn't crash)
+    # 8. FINAL NUMPY FIX (Forces 1.26.4 so Open3D doesn't crash)
     .run_commands(
         "pip uninstall -y numpy",
         "pip install numpy==1.26.4",
         "python -c 'import numpy; print(numpy.__version__)'"
     )
 
-    # 8. BLENDER
+    # 9. BLENDER
     .run_commands(
         "pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/"
     )
 
-    # 9. CACHE U2NET (Prevents serverless timeouts when rembg tries to download it)
+    # 10. CACHE U2NET
     .run_commands(
         "mkdir -p ~/.u2net",
         "wget https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx -O ~/.u2net/u2net.onnx"
     )
 
-    # 10. TORCHMCUBES
+    # 11. TORCHMCUBES
     .run_commands(
         "git clone https://github.com/tatsy/torchmcubes.git /tmp/torchmcubes",
         "sed -i 's/3.5;//g' /tmp/torchmcubes/CMakeLists.txt || true",
@@ -93,7 +94,7 @@ image = (
         'cd /tmp/torchmcubes && TORCH_CUDA_ARCH_LIST="8.9" pip install .'
     )
 
-    # 11. HUNYUAN BUILD
+    # 12. HUNYUAN BUILD
     .run_commands(
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
         'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
@@ -108,7 +109,6 @@ app = modal.App("hunyuan-final-fixed", image=image)
 
 hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21", create_if_missing=True)
 cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
-
 
 # ==========================================
 # PIPELINE
@@ -151,6 +151,9 @@ def generate_3d_from_image(input_img, base_name):
         subfolder="hunyuan3d-dit-v2-1",
         device="cuda"
     )
+    
+    # Force Xformers for memory-efficient attention (fixes the 0% freeze)
+    shape_pipeline.enable_xformers_memory_efficient_attention()
 
     esrgan_path = "/cache/RealESRGAN.pth"
     if not os.path.exists(esrgan_path):
@@ -207,13 +210,11 @@ def generate_3d_from_image(input_img, base_name):
     print("Combining materials into GLB...")
     create_glb_with_pbr_materials(tex_obj, textures, glb)
 
-    # Cleanup memory to prevent OOM errors on next run
     del shape_pipeline, paint_pipeline
     gc.collect()
     torch.cuda.empty_cache()
 
     return glb
-
 
 # ==========================================
 # WORKER
@@ -241,9 +242,7 @@ def process_cloudflare_queue(cfg: dict):
     for obj in res["Contents"]:
         key = obj["Key"]
         
-        # 🚨 FIX FOR INFINITE LOOP: Ignore sub-folders like queue/failed/
-        # Valid key: "queue/image.png" (length 2)
-        # Invalid key: "queue/failed/image.png" (length 3)
+        # FIX FOR INFINITE LOOP
         if len(key.split("/")) != 2 or not key.endswith((".png",".jpg",".jpeg")):
             continue
 
@@ -263,13 +262,11 @@ def process_cloudflare_queue(cfg: dict):
                 )
             print("Successfully uploaded! Removing original from queue...")
             
-            # 🚨 FIX: Delete the original to prevent looping over it again
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
         except Exception as e:
             print(f"ERROR processing {key}:", e)
             
-            # 🚨 FIX: Move broken files to a failed folder to prevent retrying the same bad file endlessly
             failed_key = key.replace("queue/", "queue/failed/", 1)
             print(f"Moving {key} to {failed_key}...")
             s3.copy_object(
@@ -280,7 +277,6 @@ def process_cloudflare_queue(cfg: dict):
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
     cache_vol.commit()
-
 
 # ==========================================
 # ENTRYPOINT
