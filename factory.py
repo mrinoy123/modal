@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + FP16 L4 OPTIMIZED + XATLAS PATCH)
+# IMAGE (STABLE TORCH 2.1.2 + PURE FP16 L4 OPTIMIZED)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -67,7 +67,6 @@ image = (
     .run_commands(
         "pip install --force-reinstall huggingface_hub==0.25.2",
         "pip install --force-reinstall numpy==1.26.4",
-        # 👑 THE FIX: Eradicate the deprecated PyNVML library to stop the warning
         "pip uninstall -y pynvml"
     )
 
@@ -126,7 +125,6 @@ def generate_3d_from_image(input_img, base_name):
         engine_path = None
         weights_path = None
 
-        print("🔍 Linker: Hunting for Engine (Hunyuan3D root)...")
         for mount in candidate_mounts:
             for root, dirs, files in os.walk(mount, topdown=True):
                 if root.count(os.sep) - mount.count(os.sep) > 3:
@@ -137,7 +135,6 @@ def generate_3d_from_image(input_img, base_name):
                     break
             if engine_path: break
 
-        print("🔍 Linker: Hunting for Weights (model.fp16.ckpt)...")
         for mount in candidate_mounts:
             for root, dirs, files in os.walk(mount, topdown=True):
                 if root.count(os.sep) - mount.count(os.sep) > 4:
@@ -153,7 +150,6 @@ def generate_3d_from_image(input_img, base_name):
         if not weights_path:
             raise FileNotFoundError("Linker Failed: Could not find the model weights.")
 
-        print(f"✅ Linker Success -> Engine: {engine_path} | Weights: {weights_path}")
         return engine_path, weights_path
 
     CODE_ROOT, WEIGHT_ROOT = resolve_paths()
@@ -163,11 +159,12 @@ def generate_3d_from_image(input_img, base_name):
     sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dpaint'))
     os.chdir(CODE_ROOT)
 
-    # 🛠️ MOCK 1: Torchvision functional_tensor fix
     from torchvision.transforms import functional as TF
     sys.modules["torchvision.transforms.functional_tensor"] = TF
 
-    # 🛠️ MOCK 2: RMSNorm Polyfill for PyTorch 2.1.2 (Full FP16 Mode)
+    # =================================================================
+    # 🛠️ MOCK 1: PURE FP16 RMSNorm Polyfill
+    # =================================================================
     if not hasattr(nn, 'RMSNorm'):
         class RMSNorm(nn.Module):
             def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True, device=None, dtype=None):
@@ -177,23 +174,28 @@ def generate_3d_from_image(input_img, base_name):
                 self.normalized_shape = tuple(normalized_shape)
                 self.eps = eps
                 self.elementwise_affine = elementwise_affine
+                
+                # 👑 FP16 Optimization: Force weights to initialize natively in float16
                 if self.elementwise_affine:
-                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=dtype))
+                    self.weight = nn.Parameter(torch.ones(self.normalized_shape, device=device, dtype=torch.float16))
                 else:
                     self.register_parameter('weight', None)
 
             def forward(self, input):
+                # Pure FP16 math
                 variance = input.pow(2).mean(-1, keepdim=True)
                 input_norm = input * torch.rsqrt(variance + self.eps)
                 if self.elementwise_affine:
-                    return (self.weight * input_norm).to(input.dtype)
-                return input_norm.to(input.dtype)
+                    return self.weight * input_norm
+                return input_norm
         
         nn.RMSNorm = RMSNorm
         import torch.nn.modules.normalization as norm_mod
         norm_mod.RMSNorm = RMSNorm
 
-    # 🛠️ MOCK 3: Bulletproof Fast-Simplification target_reduction Fix
+    # =================================================================
+    # 🛠️ MOCK 2: Bulletproof Fast-Simplification
+    # =================================================================
     import fast_simplification
     _orig_simplify = fast_simplification.simplify
 
@@ -218,22 +220,21 @@ def generate_3d_from_image(input_img, base_name):
         fast_simplification.simplify_mesh = patched_simplify_mesh
 
     # =================================================================
-    # 🛠️ MOCK 4: Python-Level XATLAS Intercept
+    # 🛠️ MOCK 3: THE ULTIMATE XATLAS ENGINE BYPASS
     # =================================================================
     import xatlas
-    _orig_parametrize = xatlas.parametrize
     
-    def patched_parametrize(*args, **kwargs):
-        # Force the engine to use 4 iterations for better UV seams
-        if 'chart_options' not in kwargs:
-            opts = xatlas.ChartOptions()
-            opts.max_iterations = 4
-            kwargs['chart_options'] = opts
-        else:
-            kwargs['chart_options'].max_iterations = 4
-            
-        print("✅ SUCCESS: Xatlas UV parametrizaton intercepted and upgraded to 4 iterations!")
-        return _orig_parametrize(*args, **kwargs)
+    # We completely hijack the baseline function and map it to the advanced Atlas engine
+    def patched_parametrize(positions, indices, normals=None, uvs=None, **kwargs):
+        print("✅ SUCCESS: Bypassing C++ bindings! Re-routing mesh through custom Atlas Engine (4 Iterations).")
+        atlas = xatlas.Atlas()
+        atlas.add_mesh(positions, indices)
+        
+        opts = xatlas.ChartOptions()
+        opts.max_iterations = 4
+        
+        atlas.generate(chart_options=opts)
+        return atlas.get_mesh(0)
         
     xatlas.parametrize = patched_parametrize
     # =================================================================
@@ -256,8 +257,10 @@ def generate_3d_from_image(input_img, base_name):
     )
 
     print("Generating base 3D mesh...")
-    # ⚡ OPTIMIZATION: Reduced inference steps from 30 to 20
-    outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
+    
+    # 👑 FP16 Optimization: Force autocast so internal torch matmuls never fall back to fp32
+    with torch.autocast('cuda', dtype=torch.float16):
+        outputs = shape_pipeline(image=input_img, num_inference_steps=20, output_type='mesh')
 
     raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
     raw_mesh.mesh_f = raw_mesh.mesh_f[:, ::-1]
@@ -297,7 +300,7 @@ def generate_3d_from_image(input_img, base_name):
     cfg.model.pretrained_model_name_or_path = paint_weight_path
     OmegaConf.save(cfg, cfg_path)
 
-    # ⚡ OPTIMIZATION: Reduced max_num_view to 6 and resolution to 512
+    # ⚡ Speed Optimization: 6 views at 512px
     conf = Hunyuan3DPaintConfig(max_num_view=6, resolution=512)
     conf.realesrgan_ckpt_path = esrgan_path
     conf.multiview_cfg_path = cfg_path
@@ -307,12 +310,15 @@ def generate_3d_from_image(input_img, base_name):
     paint_pipeline = Hunyuan3DPaintPipeline(conf)
 
     print("Painting textures...")
-    tex_obj = paint_pipeline(
-        mesh_path=base_obj,
-        image_path=input_img,
-        output_mesh_path=f"/tmp/text_{sid}.obj",
-        save_glb=False
-    )
+    
+    # 👑 FP16 Optimization: Strict autocast for the texture renderer as well
+    with torch.autocast('cuda', dtype=torch.float16):
+        tex_obj = paint_pipeline(
+            mesh_path=base_obj,
+            image_path=input_img,
+            output_mesh_path=f"/tmp/text_{sid}.obj",
+            save_glb=False
+        )
 
     textures = {
         'albedo': tex_obj.replace('.obj', '.jpg'),
