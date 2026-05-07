@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + CORRECT DIFFUSERS + STRICT LOCKS)
+# IMAGE (STABLE TORCH 2.1.2 + STRICT LOCKS)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -202,9 +202,11 @@ def generate_3d_from_image(input_img, base_name):
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
 
+    # 👑 THE FIX: Explicitly loading in float16 for L4 GPU optimization
     shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         WEIGHT_ROOT,
         subfolder="hunyuan3d-dit-v2-1",
+        torch_dtype=torch.float16,
         device="cuda"
     )
 
