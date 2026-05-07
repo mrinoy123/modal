@@ -112,7 +112,6 @@ def generate_3d_from_image(input_img, base_name):
     import trimesh
     import sys
     import numpy as np
-    from types import SimpleNamespace
 
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
     print("CUDA is available! Moving to generation...")
@@ -123,7 +122,7 @@ def generate_3d_from_image(input_img, base_name):
     # 🕵️ THE RESILIENT LINKER
     # =================================================================
     def resolve_paths():
-        candidate_mounts = ["/weights", "/cache", "/mnt", "/root"]
+        candidate_mounts =["/weights", "/cache", "/mnt", "/root"]
         engine_path, weights_path = None, None
 
         for mount in candidate_mounts:
@@ -237,14 +236,9 @@ def generate_3d_from_image(input_img, base_name):
         opts.max_iterations = 4
         atlas.generate(chart_options=opts)
         
-        # 👑 THE FIX: Return a SimpleNamespace so .vertex_mapping doesn't error out
-        m = atlas.get_mesh(0)
-        return SimpleNamespace(
-            vmapping=m.vmapping,
-            vertex_mapping=m.vmapping, 
-            indices=m.indices,
-            uvs=m.uvs
-        )
+        # 👑 THE REAL FIX: atlas.get_mesh(0) naturally returns a tuple (vmapping, indices, uvs)
+        # Hunyuan3D expects exactly this tuple. No wrapper needed.
+        return atlas.get_mesh(0)
         
     xatlas.parametrize = patched_parametrize
 
