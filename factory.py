@@ -2,227 +2,411 @@ import modal
 import os
 import sys
 import io
-import urllib.request
-import uuid
 import gc
+import uuid
+import shutil
+import urllib.request
 
-# ==========================================
-# IMAGE (COMPLETELY PATCHED & UPGRADED)
-# ==========================================
+# =========================================================
+# IMAGE
+# =========================================================
+
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
-
-    .env({
-        "TORCH_CUDA_ARCH_LIST": "8.9",
-        "CUDA_HOME": "/usr/local/cuda",
-        "FORCE_CUDA": "1",
-        "MAX_JOBS": "4",
-
-        # 🔥 HARD DISABLE XPU
-        "ACCELERATE_DISABLE_XPU": "1",
-        "CUDA_VISIBLE_DEVICES": "0",
-        "PYTORCH_ENABLE_MPS_FALLBACK": "0",
-    })
-
-    # 1. SYSTEM DEPENDENCIES (Added wget for caching u2net)
-    .apt_install(
-        "git","build-essential","clang","cmake","ninja-build",
-        "libgl1-mesa-glx","libglib2.0-0","libopengl0","libegl1",
-        "libsm6","libxext6","libxrender1","libx11-6","libxi6",
-        "libxxf86vm1","libxfixes3","libxkbcommon0", "wget"
+    modal.Image
+    .from_registry(
+        "nvidia/cuda:12.1.1-devel-ubuntu22.04",
+        add_python="3.10"
     )
 
-    .pip_install("setuptools","wheel")
+    .env({
+        "CUDA_HOME": "/usr/local/cuda",
+        "FORCE_CUDA": "1",
+        "TORCH_CUDA_ARCH_LIST": "8.9",
+        "CUDA_VISIBLE_DEVICES": "0",
 
-    # 2. UPGRADED TORCH (2.5.1 fixes the RMSNorm error!)
+        # stability
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "TOKENIZERS_PARALLELISM": "false",
+
+        # disable garbage accelerators
+        "ACCELERATE_DISABLE_XPU": "1",
+        "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+
+        # HF cache
+        "HF_HOME": "/cache/huggingface",
+        "HF_HUB_ENABLE_HF_TRANSFER": "1"
+    })
+
+    # =====================================================
+    # SYSTEM
+    # =====================================================
+
+    .apt_install(
+        "git",
+        "wget",
+        "clang",
+        "build-essential",
+        "cmake",
+        "ninja-build",
+
+        "libgl1-mesa-glx",
+        "libglib2.0-0",
+        "libsm6",
+        "libxext6",
+        "libxrender1",
+        "libx11-6",
+        "libegl1",
+        "libopengl0"
+    )
+
+    .pip_install(
+        "setuptools",
+        "wheel"
+    )
+
+    # =====================================================
+    # PYTORCH
+    # =====================================================
+
     .pip_install(
         "torch==2.5.1",
         "torchvision==0.20.1",
         "torchaudio==2.5.1",
         index_url="https://download.pytorch.org/whl/cu121"
     )
-    
-    # 3. DEEPSPEED (Community fix for Hunyuan3D to prevent internal conflicts)
-    .pip_install("deepspeed==0.11.2")
 
-    # 4. COMPATIBLE HF STACK (Upgraded to fix cached_download error)
+    # =====================================================
+    # CORE STACK
+    # =====================================================
+
     .pip_install(
         "transformers==4.46.0",
-        "accelerate==1.1.1",
         "diffusers==0.30.0",
-        "huggingface_hub==0.30.2"
+        "accelerate==1.1.1",
+        "huggingface_hub==0.30.2",
+        "deepspeed==0.11.2"
     )
 
-    # 5. OTHER LIBS (Removed xatlas from here to patch it manually later)
+    # =====================================================
+    # OTHER LIBS
+    # =====================================================
+
     .pip_install(
-        "boto3","trimesh","pillow","einops","omegaconf",
-        "pyrender","pybind11","safetensors","scipy","pandas",
-        "opencv-python","imageio","scikit-image","rembg",
-        "realesrgan","basicsr","pymeshlab==2022.2.post3",
-        "pygltflib","pyyaml","configargparse",
-        "hf-transfer","timm","peft"
+        "boto3",
+        "trimesh",
+        "pillow",
+        "einops",
+        "omegaconf",
+        "opencv-python",
+        "imageio",
+        "scikit-image",
+        "rembg",
+        "realesrgan",
+        "basicsr",
+        "pyrender",
+        "pygltflib",
+        "pyyaml",
+        "configargparse",
+        "hf-transfer",
+        "timm",
+        "peft",
+        "pybind11",
+        "safetensors",
+        "scipy",
+        "pandas",
+        "pymeshlab==2022.2.post3"
     )
 
-    # 6. Install problematic libs BEFORE numpy lock
-    .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
+    # =====================================================
+    # OPEN3D + NUMPY FIX
+    # =====================================================
 
-    # 7. FINAL NUMPY FIX (Forces 1.26.4 so Open3D doesn't crash)
+    .pip_install(
+        "open3d==0.18.0",
+        "onnxruntime==1.16.3"
+    )
+
     .run_commands(
         "pip uninstall -y numpy",
-        "pip install numpy==1.26.4",
-        "python -c 'import numpy; print(numpy.__version__)'"
+        "pip install numpy==1.26.4"
     )
 
-    # 8. BLENDER
+    # =====================================================
+    # BLENDER
+    # =====================================================
+
     .run_commands(
         "pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/"
     )
 
-    # 9. XATLAS PATCH (Secret from the ComfyUI repo to fix UV Map texturing crashes)
-    .run_commands(
-        "git clone --recursive https://github.com/mworchel/xatlas-python.git /tmp/xatlas-python",
-        "rm -rf /tmp/xatlas-python/extern/xatlas",
-        "git clone --recursive https://github.com/jpcy/xatlas /tmp/xatlas-python/extern/xatlas",
-        "sed -i 's/#if 0/\\/\\/#if 0/' /tmp/xatlas-python/extern/xatlas/source/xatlas/xatlas.cpp",
-        "sed -i 's/#endif/\\/\\/#endif/' /tmp/xatlas-python/extern/xatlas/source/xatlas/xatlas.cpp",
-        "cd /tmp/xatlas-python && pip install ."
-    )
+    # =====================================================
+    # TORCHMCUBES
+    # =====================================================
 
-    # 10. CACHE U2NET (Prevents serverless timeouts when rembg tries to download it)
-    .run_commands(
-        "mkdir -p ~/.u2net",
-        "wget https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx -O ~/.u2net/u2net.onnx"
-    )
-
-    # 11. TORCHMCUBES
     .run_commands(
         "git clone https://github.com/tatsy/torchmcubes.git /tmp/torchmcubes",
-        "sed -i 's/3.5;//g' /tmp/torchmcubes/CMakeLists.txt || true",
-        "sed -i 's/5.0;//g' /tmp/torchmcubes/CMakeLists.txt || true",
         'cd /tmp/torchmcubes && TORCH_CUDA_ARCH_LIST="8.9" pip install .'
     )
 
-    # 12. HUNYUAN BUILD
+    # =====================================================
+    # U2NET CACHE
+    # =====================================================
+
     .run_commands(
-        "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
-        'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install -v .',
+        "mkdir -p ~/.u2net",
+        "wget -q https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx -O ~/.u2net/u2net.onnx"
+    )
+
+    # =====================================================
+    # HUNYUAN
+    # =====================================================
+
+    .run_commands(
+        "rm -rf /root/hunyuan3d",
+        "git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
+
+        'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" pip install .',
+
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
 )
 
-# ==========================================
-# APP + VOLUMES
-# ==========================================
-app = modal.App("hunyuan-final-fixed", image=image)
+# =========================================================
+# APP
+# =========================================================
 
-hunyuan_vol = modal.Volume.from_name("weights-hunyuan-21")
-cache_vol = modal.Volume.from_name("ai-factory-cache", create_if_missing=True)
+app = modal.App(
+    "hunyuan3d-stable-final",
+    image=image
+)
 
+weights_vol = modal.Volume.from_name(
+    "weights-hunyuan-21",
+    create_if_missing=True
+)
 
-# ==========================================
-# PIPELINE
-# ==========================================
-def generate_3d_from_image(input_img, base_name):
-    import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+cache_vol = modal.Volume.from_name(
+    "ai-factory-cache",
+    create_if_missing=True
+)
+
+# =========================================================
+# GLOBAL MODEL CACHE
+# =========================================================
+
+shape_pipeline = None
+paint_pipeline = None
+
+# =========================================================
+# LOAD MODELS ONCE
+# =========================================================
+
+def load_models():
+
+    global shape_pipeline
+    global paint_pipeline
+
+    if shape_pipeline is not None:
+        return
 
     import torch
-    import gc
     from omegaconf import OmegaConf
-    import trimesh
-
-    assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
-    print("CUDA is available! Moving to generation...")
 
     CODE_ROOT = "/root/hunyuan3d"
     WEIGHT_ROOT = "/weights/Hunyuan3D-2.1-Weights-Dataset"
 
     sys.path.insert(0, CODE_ROOT)
-    sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dshape'))
-    sys.path.insert(0, os.path.join(CODE_ROOT, 'hy3dpaint'))
+    sys.path.insert(0, f"{CODE_ROOT}/hy3dshape")
+    sys.path.insert(0, f"{CODE_ROOT}/hy3dpaint")
+
     os.chdir(CODE_ROOT)
 
-    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
-    from textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig
-    from convert_utils import create_glb_with_pbr_materials
-
-    print("Loading Shape Pipeline...")
-    shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        WEIGHT_ROOT,
-        subfolder="hunyuan3d-dit-v2-1",
-        device="cuda"
+    from hy3dshape.pipelines import (
+        Hunyuan3DDiTFlowMatchingPipeline
     )
 
-    esrgan_path = "/cache/RealESRGAN.pth"
+    from textureGenPipeline import (
+        Hunyuan3DPaintPipeline,
+        Hunyuan3DPaintConfig
+    )
+
+    print("Loading shape pipeline...")
+
+    shape_pipeline = (
+        Hunyuan3DDiTFlowMatchingPipeline
+        .from_pretrained(
+            WEIGHT_ROOT,
+            subfolder="hunyuan3d-dit-v2-1",
+            device="cuda"
+        )
+    )
+
+    # warmup
+    torch.cuda.empty_cache()
+
+    # =====================================================
+    # ESRGAN
+    # =====================================================
+
+    esrgan_path = "/cache/RealESRGAN_x4plus.pth"
+
     if not os.path.exists(esrgan_path):
-        print("Downloading RealESRGAN...")
+
         os.makedirs("/cache", exist_ok=True)
+
         urllib.request.urlretrieve(
             "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
             esrgan_path
         )
 
-    cfg_path = f"{CODE_ROOT}/hy3dpaint/cfgs/hunyuan-paint-pbr.yaml"
-    cfg = OmegaConf.load(cfg_path)
-    cfg.model.pretrained_model_name_or_path = WEIGHT_ROOT
-    OmegaConf.save(cfg, cfg_path)
+    # =====================================================
+    # CFG
+    # =====================================================
 
-    conf = Hunyuan3DPaintConfig(max_num_view=8, resolution=768)
-    conf.realesrgan_ckpt_path = esrgan_path
-    conf.multiview_cfg_path = cfg_path
-    conf.custom_pipeline = f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
-
-    print("Loading Paint Pipeline...")
-    paint_pipeline = Hunyuan3DPaintPipeline(conf)
-
-    print("Generating base 3D mesh...")
-    outputs = shape_pipeline(image=input_img, output_type='mesh')
-
-    raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
-    raw_mesh.mesh_f = raw_mesh.mesh_f[:, ::-1]
-
-    mesh = trimesh.Trimesh(raw_mesh.mesh_v, raw_mesh.mesh_f)
-
-    sid = uuid.uuid4().hex
-    base_obj = f"/tmp/{sid}.obj"
-    glb = f"/tmp/{base_name}.glb"
-
-    mesh.export(base_obj)
-
-    print("Painting textures...")
-    tex_obj = paint_pipeline(
-        mesh_path=base_obj,
-        image_path=input_img,
-        output_mesh_path=f"/tmp/text_{sid}.obj",
-        save_glb=False
+    cfg_path = (
+        f"{CODE_ROOT}/hy3dpaint/cfgs/"
+        "hunyuan-paint-pbr.yaml"
     )
 
-    textures = {
-        'albedo': tex_obj.replace('.obj', '.jpg'),
-        'metallic': tex_obj.replace('.obj', '_metallic.jpg'),
-        'roughness': tex_obj.replace('.obj', '_roughness.jpg')
-    }
+    cfg = OmegaConf.load(cfg_path)
 
-    print("Combining materials into GLB...")
-    create_glb_with_pbr_materials(tex_obj, textures, glb)
+    cfg.model.pretrained_model_name_or_path = WEIGHT_ROOT
 
-    # Cleanup memory to prevent OOM errors on next run
-    del shape_pipeline, paint_pipeline
-    gc.collect()
-    torch.cuda.empty_cache()
+    OmegaConf.save(cfg, cfg_path)
 
-    return glb
+    # =====================================================
+    # LOWER MEMORY CONFIG
+    # =====================================================
 
+    conf = Hunyuan3DPaintConfig(
+        max_num_view=4,
+        resolution=512
+    )
 
-# ==========================================
+    conf.realesrgan_ckpt_path = esrgan_path
+    conf.multiview_cfg_path = cfg_path
+
+    conf.custom_pipeline = (
+        f"{CODE_ROOT}/hy3dpaint/hunyuanpaintpbr"
+    )
+
+    print("Loading paint pipeline...")
+
+    paint_pipeline = Hunyuan3DPaintPipeline(conf)
+
+    print("Pipelines loaded successfully.")
+
+# =========================================================
+# GENERATION
+# =========================================================
+
+def generate_3d_from_image(input_img, base_name):
+
+    import torch
+    import trimesh
+
+    from convert_utils import (
+        create_glb_with_pbr_materials
+    )
+
+    load_models()
+
+    sid = uuid.uuid4().hex
+
+    tmp_dir = f"/tmp/{sid}"
+
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    base_obj = f"{tmp_dir}/base.obj"
+
+    output_obj = f"{tmp_dir}/painted.obj"
+
+    glb_path = f"{tmp_dir}/{base_name}.glb"
+
+    try:
+
+        with torch.inference_mode():
+
+            print("Generating mesh...")
+
+            outputs = shape_pipeline(
+                image=input_img,
+                output_type='mesh'
+            )
+
+            raw_mesh = (
+                outputs[0]
+                if isinstance(outputs, list)
+                else outputs
+            )
+
+            raw_mesh.mesh_f = raw_mesh.mesh_f[:, ::-1]
+
+            mesh = trimesh.Trimesh(
+                raw_mesh.mesh_v,
+                raw_mesh.mesh_f
+            )
+
+            mesh.export(base_obj)
+
+            print("Painting textures...")
+
+            tex_obj = paint_pipeline(
+                mesh_path=base_obj,
+                image_path=input_img,
+                output_mesh_path=output_obj,
+                save_glb=False
+            )
+
+            textures = {
+                'albedo': tex_obj.replace('.obj', '.jpg'),
+                'metallic': tex_obj.replace('.obj', '_metallic.jpg'),
+                'roughness': tex_obj.replace('.obj', '_roughness.jpg')
+            }
+
+            print("Building GLB...")
+
+            create_glb_with_pbr_materials(
+                tex_obj,
+                textures,
+                glb_path
+            )
+
+        return glb_path
+
+    finally:
+
+        gc.collect()
+
+        torch.cuda.empty_cache()
+
+        torch.cuda.ipc_collect()
+
+# =========================================================
 # WORKER
-# ==========================================
-@app.function(volumes={"/weights": hunyuan_vol, "/cache": cache_vol}, gpu="L4", timeout=3600)
+# =========================================================
+
+@app.function(
+    gpu="L4",
+    timeout=3600,
+
+    # prevents multiple workers fighting for VRAM
+    concurrency_limit=1,
+
+    volumes={
+        "/weights": weights_vol,
+        "/cache": cache_vol
+    }
+)
+
 def process_cloudflare_queue(cfg: dict):
+
     import boto3
+
     from PIL import Image
 
-    print("Connecting to Cloudflare R2...")
+    print("Connecting to R2...")
+
     s3 = boto3.client(
         "s3",
         endpoint_url=cfg["endpoint"],
@@ -230,36 +414,93 @@ def process_cloudflare_queue(cfg: dict):
         aws_secret_access_key=cfg["secret_key"]
     )
 
-    res = s3.list_objects_v2(Bucket=cfg["bucket"], Prefix="queue/")
+    res = s3.list_objects_v2(
+        Bucket=cfg["bucket"],
+        Prefix="queue/"
+    )
+
     if "Contents" not in res:
-        print("Queue is empty.")
+        print("Queue empty.")
         return
 
     for obj in res["Contents"]:
+
         key = obj["Key"]
-        if not key.endswith((".png",".jpg",".jpeg")):
+
+        if not key.lower().endswith(
+            (".png", ".jpg", ".jpeg")
+        ):
             continue
 
-        print(f"Processing image: {key}")
-        data = s3.get_object(Bucket=cfg["bucket"], Key=key)
-        img = Image.open(io.BytesIO(data["Body"].read())).convert("RGBA")
+        print(f"Processing: {key}")
 
         try:
-            glb = generate_3d_from_image(img, key.split("/")[-1].split(".")[0])
 
-            print(f"Uploading 3D model {glb} back to R2...")
-            with open(glb, "rb") as f:
+            data = s3.get_object(
+                Bucket=cfg["bucket"],
+                Key=key
+            )
+
+            img = (
+                Image.open(
+                    io.BytesIO(
+                        data["Body"].read()
+                    )
+                )
+                .convert("RGBA")
+            )
+
+            base_name = (
+                os.path.basename(key)
+                .split(".")[0]
+            )
+
+            glb_path = generate_3d_from_image(
+                img,
+                base_name
+            )
+
+            output_key = (
+                f"output/{base_name}.glb"
+            )
+
+            print("Uploading GLB...")
+
+            with open(glb_path, "rb") as f:
+
                 s3.put_object(
                     Bucket=cfg["bucket"],
-                    Key=f"output/{os.path.basename(glb)}",
-                    Body=f
+                    Key=output_key,
+                    Body=f,
+                    ContentType="model/gltf-binary"
                 )
-            print("Successfully uploaded!")
+
+            print("Upload complete.")
+
+            # DELETE FROM QUEUE
+            s3.delete_object(
+                Bucket=cfg["bucket"],
+                Key=key
+            )
+
+            print("Queue item deleted.")
 
         except Exception as e:
-            print(f"ERROR processing {key}:", e)
+
+            print(f"FAILED: {key}")
+            print(str(e))
+
+        finally:
+
+            gc.collect()
+
+            try:
+                shutil.rmtree("/tmp", ignore_errors=True)
+            except:
+                pass
 
     cache_vol.commit()
+
 
 
 # ==========================================
