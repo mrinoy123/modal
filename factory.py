@@ -7,7 +7,7 @@ import uuid
 import gc
 
 # ==========================================
-# IMAGE (STABLE TORCH 2.1.2 + NATIVE SDP ATTENTION)
+# IMAGE (STABLE TORCH 2.1.2 + STRICT LOCKS)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -43,8 +43,7 @@ image = (
     .pip_install(
         "transformers==4.36.2",
         "accelerate==0.24.1",
-        "diffusers==0.24.0",
-        "huggingface_hub==0.19.4"
+        "diffusers==0.24.0"
     )
 
     .pip_install(
@@ -59,10 +58,11 @@ image = (
 
     .pip_install("open3d==0.18.0", "onnxruntime==1.16.3")
 
+    # 👑 THE FIX: Absolute Force-Reinstall Locks
+    # This guarantees basicsr finds 'cached_download' and Open3D finds the correct Numpy
     .run_commands(
-        "pip uninstall -y numpy",
-        "pip install numpy==1.26.4",
-        "python -c 'import numpy; print(numpy.__version__)'"
+        "pip install --force-reinstall huggingface_hub==0.25.2",
+        "pip install --force-reinstall numpy==1.26.4"
     )
 
     .run_commands(
@@ -206,8 +206,6 @@ def generate_3d_from_image(input_img, base_name):
         subfolder="hunyuan3d-dit-v2-1",
         device="cuda"
     )
-    # REMOVED: shape_pipeline.enable_xformers_memory_efficient_attention() 
-    # (It is handled natively by torch.backends.cuda above)
 
     esrgan_path = "/cache/RealESRGAN.pth"
     if not os.path.exists(esrgan_path):
@@ -235,7 +233,6 @@ def generate_3d_from_image(input_img, base_name):
     paint_pipeline = Hunyuan3DPaintPipeline(conf)
 
     print("Generating base 3D mesh...")
-    # Explicitly move tensors to GPU to prevent device mismatch errors
     outputs = shape_pipeline(image=input_img, num_inference_steps=30, output_type='mesh')
 
     raw_mesh = outputs[0] if isinstance(outputs, list) else outputs
