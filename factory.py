@@ -6,15 +6,20 @@ import re
 import urllib.request
 import uuid
 
+
+
 # ==========================================
-# 1. THE NATIVE IMAGE (Fixed Blender Server & Python 3.10)
+# 1. THE NATIVE IMAGE (Bulletproof Headless 3D Setup)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
     
+    # THE FIX: The comprehensive suite of headless graphics libraries for Blender/OpenCV
     .apt_install(
         "git", "build-essential", "clang", "cmake", "ninja-build", 
-        "libgl1-mesa-glx", "libglib2.0-0", "libopengl0", "libegl1"
+        "libgl1-mesa-glx", "libglib2.0-0", "libopengl0", "libegl1",
+        "libsm6", "libxext6", "libxrender1", "libx11-6", "libxi6", 
+        "libxxf86vm1", "libxfixes3", "libxkbcommon0"
     )
     
     .pip_install("setuptools", "wheel", "numpy")
@@ -25,11 +30,9 @@ image = (
         "einops", "omegaconf", "xatlas", "qwen-vl-utils", "pyrender", "ninja", "pybind11",
         "diffusers", "pytorch-lightning", "huggingface-hub", "safetensors", "scipy", "pandas",
         "opencv-python", "imageio", "scikit-image", "rembg", "realesrgan", "basicsr",
-        # THE FIX 1: Pinned PyMeshLab to the exact version Tencent used
         "pymeshlab==2022.2.post3", "pygltflib", "open3d", "pyyaml", "configargparse", "hf-transfer"
     )
     
-    # THE FIX 2: Download Blender directly from Blender's private Python server
     .run_commands("pip install bpy==4.0.0 --extra-index-url https://download.blender.org/pypi/")
     
     .run_commands(
@@ -39,6 +42,10 @@ image = (
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
 )
+
+
+
+
 
 # ==========================================
 # 2. THE VOLUMES
