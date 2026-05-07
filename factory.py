@@ -6,13 +6,13 @@ import re
 import urllib.request
 import uuid
 
-
 # ==========================================
-# 1. THE NATIVE IMAGE (The Ultimate Dependency Fix)
+# 1. THE NATIVE IMAGE (Bulletproof Headless + Snipered Architecture)
 # ==========================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
     
+    # THE FIX 1: The comprehensive suite of headless graphics libraries for Blender/OpenCV
     .apt_install(
         "git", "build-essential", "clang", "cmake", "ninja-build", 
         "libgl1-mesa-glx", "libglib2.0-0", "libopengl0", "libegl1",
@@ -29,7 +29,7 @@ image = (
         "diffusers", "pytorch-lightning", "huggingface-hub", "safetensors", "scipy", "pandas",
         "opencv-python", "imageio", "scikit-image", "rembg", "realesrgan", "basicsr",
         "pymeshlab==2022.2.post3", "pygltflib", "open3d", "pyyaml", "configargparse", "hf-transfer",
-        # THE FINAL FIX: Adding the missing vision and inference modules
+        # THE FIX 2: Added the missing vision and inference modules
         "timm", "peft", "onnxruntime"
     )
     
@@ -38,12 +38,13 @@ image = (
     .run_commands(
         "pip install git+https://github.com/tatsy/torchmcubes.git",
         "rm -rf /root/hunyuan3d && git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /root/hunyuan3d",
-        'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.0 8.6 8.9 9.0" CUDA_HOME=/usr/local/cuda pip install --no-build-isolation .',
+        
+        # THE FIX 3: Snipered TORCH_CUDA_ARCH_LIST to "8.9" for the L4 GPU to prevent Memory Crashes
+        'cd /root/hunyuan3d/hy3dpaint/custom_rasterizer && TORCH_CUDA_ARCH_LIST="8.9" CUDA_HOME=/usr/local/cuda pip install --no-build-isolation .',
+        
         'cd /root/hunyuan3d/hy3dpaint/DifferentiableRenderer && bash compile_mesh_painter.sh'
     )
 )
-
-
 
 # ==========================================
 # 2. THE VOLUMES
