@@ -19,7 +19,8 @@ image = (
         "CC": "clang",                       
         "CXX": "clang++",
         "GIT_TERMINAL_PROMPT": "0",
-        "PYTHONPATH": "/root/HunyuanWorld"   # CRITICAL FIX: Ensures 'models' is findable
+        # CRITICAL FIX: Ensure both ROOT and hy3dworld are findable globally
+        "PYTHONPATH": "/root/HunyuanWorld:/root/HunyuanWorld/hy3dworld"   
     })
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
@@ -53,9 +54,13 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     from PIL import Image
     
     ROOT = "/root/HunyuanWorld"
-    # Force this path to the top of the search list
+    HY3DWORLD_PATH = os.path.join(ROOT, "hy3dworld")
+    
+    # 🚨 CRITICAL FIX: Add BOTH the root and hy3dworld paths to sys.path
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
+    if HY3DWORLD_PATH not in sys.path:
+        sys.path.insert(0, HY3DWORLD_PATH)
     
     os.chdir(ROOT)
 
@@ -81,6 +86,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
         print(f"❌ Import Failure: {e}")
         print(f"Current sys.path: {sys.path}")
         print(f"Files in ROOT: {os.listdir(ROOT)}")
+        print(f"Files in HY3DWORLD: {os.listdir(HY3DWORLD_PATH) if os.path.exists(HY3DWORLD_PATH) else 'Not Found'}")
         raise e
 
     # STAGE 1: PanoGen
