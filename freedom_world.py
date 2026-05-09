@@ -9,7 +9,7 @@ import glob
 # =========================================================
 # APP CONFIGURATION
 # =========================================================
-app = modal.App("hyworld2-production-v4")
+app = modal.App("hyworld2-production-v5")
 
 # Volumes
 weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=True)
@@ -66,8 +66,7 @@ image = (
 # =========================================================
 def generate_world(input_image, prompt, output_name):
     import torch
-    import numpy as np
-    from PIL import Image
+    import importlib
     
     ROOT = "/root/HYWorld"
 
@@ -86,49 +85,85 @@ def generate_world(input_image, prompt, output_name):
     if ROOT not in sys.path: sys.path.insert(0, ROOT)
     os.chdir(ROOT)
 
-    # 1. Import Pipeline
-    from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
+    # 1. Import the GENERATION Pipeline (Not Mirror Reconstruction)
+    pipeline_loaded = False
+    pipeline_class = None
+    
+    # We dynamically check for the World Generation pipeline (hallucination)
+    candidate_imports = [
+        ("hyworld2.pipeline", "HunyuanWorldPipeline"),
+        ("hyworld2.world.pipeline", "HunyuanWorldPipeline"),
+        ("hyworld2.inference", "HunyuanWorldPipeline"),
+        ("hyworld.pipelines", "HYWorld2Pipeline")
+    ]
+
+    for module_name, class_name in candidate_imports:
+        try:
+            module = importlib.import_module(module_name)
+            pipeline_class = getattr(module, class_name)
+            print(f"SUCCESS: Loaded GENERATION Pipeline from {module_name}")
+            pipeline_loaded = True
+            break
+        except Exception as e:
+            continue
+
+    if not pipeline_loaded:
+        raise RuntimeError("Could not locate the World Generation pipeline in the repository.")
     
     # 2. Load Model
     model_path = f"{ROOT}/weights/HY-World-2.0"
     print(f"Loading Model from {model_path}...")
-    pipe = WorldMirrorPipeline.from_pretrained(model_path)
+    pipe = pipeline_class.from_pretrained(model_path)
 
-    # 3. Prepare Input
-    temp_input_dir = f"/tmp/input_{output_name}"
-    os.makedirs(temp_input_dir, exist_ok=True)
-    input_image.save(os.path.join(temp_input_dir, "input.png"))
+    if torch.cuda.is_available():
+        pipe = pipe.to("cuda")
 
-    # 4. Run Inference
-    print(f"--- Running HY-World Mirror Reconstruction ---")
+    # 3. Run Inference (Image to 360 Panorama to 3D World)
+    print(f"--- Hallucinating 3D World from Image and Prompt ---")
+    print(f"Prompt: {prompt}")
+    
     with torch.inference_mode():
-        output_root = pipe(temp_input_dir)
+        # The generation pipeline takes the image as a seed, and the prompt to guide the hallucination
+        output = pipe(
+            image=input_image,
+            prompt=prompt,
+            num_inference_steps=30,
+            guidance_scale=5.0,
+            generator=torch.Generator("cuda").manual_seed(42)
+        )
 
-    # 5. Locate Result
+    # 4. Locate Result
     output_dir = "/tmp/final_output"
     os.makedirs(output_dir, exist_ok=True)
     final_glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
-    print(f"Searching for 3D assets in: {output_root}")
-    
-    all_files = glob.glob(os.path.join(output_root, "**/*"), recursive=True)
-    
-    glb_files = [f for f in all_files if f.endswith(".glb")]
-    ply_files = [f for f in all_files if f.endswith("gaussians.ply") or f.endswith("points.ply")]
+    # If the pipeline returns a directory path (like WorldMirror does)
+    if isinstance(output, str) and os.path.isdir(output):
+        print(f"Searching for 3D assets in: {output}")
+        all_files = glob.glob(os.path.join(output, "**/*"), recursive=True)
+        glb_files = [f for f in all_files if f.endswith(".glb")]
+        ply_files = [f for f in all_files if f.endswith("gaussians.ply") or f.endswith("points.ply")]
 
-    if glb_files:
-        print(f"Found GLB: {glb_files[0]}")
-        shutil.copy(glb_files[0], final_glb_path)
-    elif ply_files:
-        print(f"Found PLY: {ply_files[0]}. Safely copying raw file to preserve splat properties...")
-        
-        # CRITICAL FIX: We bypass trimesh entirely. Pure file copy to prevent stripping properties.
-        final_ply_path = final_glb_path.replace(".glb", ".ply")
-        shutil.copy(ply_files[0], final_ply_path)
-        final_glb_path = final_ply_path # Update the return path
-        
+        if glb_files:
+            shutil.copy(glb_files[0], final_glb_path)
+        elif ply_files:
+            print("Safely copying raw PLY file to preserve splat properties...")
+            final_ply_path = final_glb_path.replace(".glb", ".ply")
+            shutil.copy(ply_files[0], final_ply_path)
+            final_glb_path = final_ply_path 
+        else:
+            raise RuntimeError("No 3D file (.glb or .ply) found in output directory.")
+
+    # If the pipeline returns an object with an export method (Standard Generation Pipeline)
+    elif hasattr(output, "export_glb"):
+        output.export_glb(final_glb_path)
+    elif isinstance(output, dict) and "mesh" in output:
+        output["mesh"].export(final_glb_path)
     else:
-        raise RuntimeError(f"No 3D file (.glb or .ply) found in output directory: {output_root}")
+        try:
+            output[0].export(final_glb_path)
+        except:
+            output.export(final_glb_path)
 
     # Cleanup
     del pipe
@@ -170,12 +205,11 @@ def process_cloudflare_queue(cfg: dict):
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
-            prompt = data.get("Metadata", {}).get("prompt", "cinematic 3d world")
+            prompt = data.get("Metadata", {}).get("prompt", "a sprawling, dense cyberpunk city at night, highly detailed, cinematic lighting")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
             local_file = generate_world(img, prompt, base_name)
             
-            # Extract extension of the file actually produced
             ext = os.path.splitext(local_file)[1]
             output_key = f"output/{base_name}{ext}"
             content_type = "model/gltf-binary" if ext == ".glb" else "application/octet-stream"
