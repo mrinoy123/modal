@@ -2,98 +2,207 @@ import modal
 import os
 import sys
 import io
-import urllib.request
 import uuid
 import gc
 
-# ==========================================
-# 1. IMAGE (STABLE TORCH 2.4 + L4 OPTIMIZED + MESH TOOLS)
-# ==========================================
+# =========================================================
+# IMAGE (STABLE HY-WORLD 2.0 BUILD)
+# =========================================================
+
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.10")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+        add_python="3.10"
+    )
 
     .env({
-        "TORCH_CUDA_ARCH_LIST": "8.9", # L4 Architecture
+        "TORCH_CUDA_ARCH_LIST": "8.9",
         "CUDA_HOME": "/usr/local/cuda",
         "FORCE_CUDA": "1",
         "CUDA_VISIBLE_DEVICES": "0",
+        "TOKENIZERS_PARALLELISM": "false",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
 
-    # 🏗️ ADDED libopenblas-dev for Open3D mesh mathematics
-    .apt_install("git", "build-essential", "libgl1-mesa-glx", "libglib2.0-0", "wget", "libopenblas-dev")
-    .pip_install("setuptools", "wheel")
+    .apt_install(
+        "git",
+        "wget",
+        "build-essential",
+        "clang",
+        "cmake",
+        "ninja-build",
+        "libgl1-mesa-glx",
+        "libglib2.0-0",
+        "libopenblas-dev",
+        "libsm6",
+        "libxext6",
+        "libxrender1"
+    )
 
-    # HY-World 2.0 requires Torch 2.4.0 for Flash-Attention 2.8 compatibility
     .pip_install(
-        "torch==2.4.0", "torchvision", "torchaudio", 
+        "setuptools",
+        "wheel",
+        "ninja"
+    )
+
+    # =====================================================
+    # TORCH 2.4 (Required for HY-World + FA2.8)
+    # =====================================================
+
+    .pip_install(
+        "torch==2.4.0",
+        "torchvision==0.19.0",
+        "torchaudio==2.4.0",
         index_url="https://download.pytorch.org/whl/cu124"
     )
 
-    # 🏗️ ADDED open3d and pymeshlab to sculpt the GLB mesh
+    # =====================================================
+    # CORE AI STACK
+    # =====================================================
+
     .pip_install(
-        "transformers", "accelerate", "diffusers", "boto3", "pillow", 
-        "einops", "omegaconf", "open3d", "pymeshlab"
+        "transformers==4.46.3",
+        "accelerate==1.1.1",
+        "diffusers==0.31.0",
+        "safetensors",
+        "sentencepiece",
+        "einops",
+        "omegaconf",
+        "opencv-python",
+        "imageio",
+        "scipy",
+        "numpy==1.26.4",
+        "pandas",
+        "tqdm",
+        "pillow",
+        "boto3",
     )
 
-    # 🔥 INSTALLING THE 2026 WHEELS FROM YOUR VERIFIED VOLUME
+    # =====================================================
+    # 3D STACK
+    # =====================================================
+
+    .pip_install(
+        "open3d==0.18.0",
+        "trimesh",
+        "pymeshlab==2022.2.post3",
+        "pygltflib",
+    )
+
+    # =====================================================
+    # FLASH ATTENTION + GSPLAT
+    # =====================================================
+
     .run_commands(
-        "pip install /weights/dependencies/gsplat-1.5.3+pt24cu124-cp310-cp310-linux_x86_64.whl",
-        "pip install /weights/dependencies/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+        "pip install /weights/dependencies/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl",
+        "pip install /weights/dependencies/gsplat-1.5.3+pt24cu124-cp310-cp310-linux_x86_64.whl"
+    )
+
+    # =====================================================
+    # CLEANUP
+    # =====================================================
+
+    .run_commands(
+        "pip uninstall -y pynvml || true",
+        "pip cache purge || true"
     )
 )
 
-app = modal.App("freedom-force-world", image=image)
-hy_volume = modal.Volume.from_name("weights-hy-world-2")
+# =========================================================
+# MODAL APP
+# =========================================================
 
-# ==========================================
-# 2. GENERATOR PIPELINE (SPLAT TO MESH CONVERTER)
-# ==========================================
-def generate_3d_stage(input_img, base_name, prompt):
+app = modal.App("hyworld-production")
+
+weights_vol = modal.Volume.from_name(
+    "weights-hy-world-2",
+    create_if_missing=True
+)
+
+cache_vol = modal.Volume.from_name(
+    "hyworld-cache",
+    create_if_missing=True
+)
+
+# =========================================================
+# GENERATION PIPELINE
+# =========================================================
+
+def generate_world(input_img, base_name, prompt):
+
     import torch
-    import gc
     import numpy as np
+    import trimesh
+    import gc
 
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
-    print("CUDA verified! Initializing 3D World to GLB generation...")
 
-    torch.backends.cuda.preferred_linalg_library("default")
+    print("✅ CUDA AVAILABLE")
 
-    # =================================================================
-    # 🕵️ THE RESILIENT LINKER (HY-World 2.0 Adaptation)
-    # =================================================================
+    torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+    # =====================================================
+    # RESILIENT PATH LINKER
+    # =====================================================
+
     def resolve_paths():
-        candidate_mounts = ["/weights", "/mnt", "/root"]
-        base_path = None
-        
+
+        candidate_mounts = [
+            "/weights",
+            "/cache",
+            "/mnt",
+            "/root"
+        ]
+
+        code_root = None
+        helper_root = None
+
         for mount in candidate_mounts:
-            if os.path.exists(os.path.join(mount, "HY-World-2.0")):
-                base_path = mount
+
+            target = os.path.join(mount, "HY-World-2.0")
+
+            if os.path.exists(target):
+                code_root = target
                 break
-                
-        if not base_path: 
-            raise FileNotFoundError("Linker Failed: Missing HY-World-2.0 in volumes.")
-            
-        code_root = os.path.join(base_path, "HY-World-2.0")
-        helper_root = os.path.join(base_path, "helpers")
-        
+
+        if not code_root:
+            raise FileNotFoundError(
+                "HY-World-2.0 repository missing"
+            )
+
+        helper_root = os.path.join(
+            os.path.dirname(code_root),
+            "helpers"
+        )
+
         return code_root, helper_root
 
     CODE_ROOT, HELPER_ROOT = resolve_paths()
 
-    # Add the repository to system path
+    print(f"✅ CODE ROOT: {CODE_ROOT}")
+
+    # =====================================================
+    # PATH SETUP
+    # =====================================================
+
     sys.path.insert(0, CODE_ROOT)
+
     os.chdir(CODE_ROOT)
 
-    from pipelines import HYWorld2Pipeline 
-    # 🪄 IMPORT THE MESH CONVERTER
-    from utils.meshing import splat_to_glb 
+    # =====================================================
+    # IMPORTS
+    # =====================================================
 
-    # =================================================================
-    # STAGE 1: MULTI-MODAL WORLD GENERATION 
-    # =================================================================
-    print(f"Loading HY-World 2.0 Pipeline from {CODE_ROOT}...")
-    torch.backends.cuda.enable_math_sdp(True)
-    torch.backends.cuda.enable_flash_sdp(True)
+    from pipelines import HYWorld2Pipeline
+    from utils.meshing import splat_to_glb
+
+    # =====================================================
+    # LOAD PIPELINE
+    # =====================================================
+
+    print("🚀 Loading HY-World Pipeline...")
 
     pipeline = HYWorld2Pipeline.from_pretrained(
         CODE_ROOT,
@@ -103,54 +212,92 @@ def generate_3d_stage(input_img, base_name, prompt):
         torch_dtype=torch.bfloat16
     )
 
-    print(f"🚀 Step 1: Generating high-fidelity 3D Splat for: {prompt[:50]}...")
-    
-    result = pipeline(
-        image=input_img,
-        prompt=prompt,
-        negative_prompt="photorealistic, blurry, messy, organic, trees, realistic textures",
-        target_resolution=1024,
-        output_type="3dgs" 
+    # =====================================================
+    # GENERATE SPLAT
+    # =====================================================
+
+    print("🎨 Generating Gaussian Splat...")
+
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+
+        result = pipeline(
+            image=input_img,
+            prompt=prompt,
+            negative_prompt=(
+                "blurry, messy, low quality, "
+                "photorealistic, realistic texture"
+            ),
+            target_resolution=1024,
+            output_type="3dgs"
+        )
+
+    # =====================================================
+    # OUTPUT PATHS
+    # =====================================================
+
+    output_dir = "/tmp/hyworld_output"
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    glb_path = os.path.join(
+        output_dir,
+        f"{base_name}.glb"
     )
 
-    # =================================================================
-    # STAGE 2: SHRINK-WRAP CONVERSION (SPLAT -> GLB)
-    # =================================================================
-    output_dir = "/weights/outputs/mesh"
-    glb_path = os.path.join(output_dir, f"{base_name}.glb")
-    
-    print(f"🪄 Step 2: Converting Splat into a destruction-ready .glb Mesh...")
+    # =====================================================
+    # SPLAT -> GLB
+    # =====================================================
+
+    print("🪄 Converting Splat to GLB...")
+
     splat_to_glb(
-        result, 
+        result,
         output_path=glb_path,
-        simplify_ratio=0.8,  # Keeps it light for Blender physics
-        texture_size=2048    # High quality comic textures
+        simplify_ratio=0.8,
+        texture_size=2048
     )
 
-    print(f"✅ Success: 3D Mesh created at {glb_path}")
+    # =====================================================
+    # CLEANUP
+    # =====================================================
 
-    # Clean up VRAM
     del pipeline
+
     gc.collect()
+
     torch.cuda.empty_cache()
+
+    print(f"✅ FINAL GLB: {glb_path}")
 
     return glb_path
 
-# ==========================================
-# 3. AUTOMATION WORKER
-# ==========================================
+# =========================================================
+# WORKER
+# =========================================================
+
 @app.function(
-    volumes={"/weights": hy_volume}, 
-    gpu="L4", 
+    volumes={
+        "/weights": weights_vol,
+        "/cache": cache_vol
+    },
+
+    gpu="L4",
+
     timeout=3600,
-    container_idle_timeout=60, # 🛡️ Kills GPU after 1 min of idle
-    concurrency_limit=1        # 🛡️ Max 1 GPU to protect credits
+
+    container_idle_timeout=60,
+
+    # MODAL 2026 FIX
+    max_containers=1
 )
+
 def process_cloudflare_queue(cfg: dict):
+
     import boto3
     from PIL import Image
 
-    print("Connecting to Cloudflare R2...")
+    print("🌐 Connecting to Cloudflare R2...")
+
     s3 = boto3.client(
         "s3",
         endpoint_url=cfg["endpoint"],
@@ -158,64 +305,128 @@ def process_cloudflare_queue(cfg: dict):
         aws_secret_access_key=cfg["secret_key"]
     )
 
-    res = s3.list_objects_v2(Bucket=cfg["bucket"], Prefix="queue/")
-    if "Contents" not in res:
-        print("📭 Queue is empty.")
+    response = s3.list_objects_v2(
+        Bucket=cfg["bucket"],
+        Prefix="queue/"
+    )
+
+    if "Contents" not in response:
+        print("📭 Queue Empty")
         return
 
-    processed_count = 0
+    processed = 0
 
-    for obj in res["Contents"]:
+    for obj in response["Contents"]:
+
         key = obj["Key"]
-        
-        if len(key.split("/")) != 2 or not key.lower().endswith((".png",".jpg",".jpeg")):
+
+        if (
+            len(key.split("/")) != 2 or
+            not key.lower().endswith(
+                (".png", ".jpg", ".jpeg")
+            )
+        ):
             continue
 
-        processed_count += 1
-        print(f"\n📥 Processing World Image: {key}")
-        
-        data = s3.get_object(Bucket=cfg["bucket"], Key=key)
-        img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
+        processed += 1
 
-        # 🕵️ METADATA EXTRACTION
-        prompt = data.get('Metadata', {}).get('prompt', "A bold comic book newsroom city, ink outlines, sunset")
+        print(f"📥 Processing: {key}")
+
+        data = s3.get_object(
+            Bucket=cfg["bucket"],
+            Key=key
+        )
+
+        img = Image.open(
+            io.BytesIO(data["Body"].read())
+        ).convert("RGB")
+
+        prompt = data.get(
+            "Metadata",
+            {}
+        ).get(
+            "prompt",
+            "comic cinematic city world"
+        )
 
         try:
-            base_name = key.split("/")[-1].split(".")[0]
-            # Gets the .glb file instead of .ply
-            glb_file = generate_3d_stage(img, base_name, prompt)
 
-            print(f"Uploading 3D Mesh {glb_file} back to R2...")
+            base_name = (
+                key.split("/")[-1]
+                .split(".")[0]
+            )
+
+            glb_file = generate_world(
+                img,
+                base_name,
+                prompt
+            )
+
+            print("☁️ Uploading GLB to R2...")
+
             with open(glb_file, "rb") as f:
+
                 s3.put_object(
                     Bucket=cfg["bucket"],
                     Key=f"output/{os.path.basename(glb_file)}",
                     Body=f
                 )
-            print("✅ Successfully uploaded! Removing original from queue...")
-            s3.delete_object(Bucket=cfg["bucket"], Key=key)
+
+            print("✅ Upload complete")
+
+            s3.delete_object(
+                Bucket=cfg["bucket"],
+                Key=key
+            )
 
         except Exception as e:
-            print(f"❌ ERROR processing {key}: {e}")
-            failed_key = key.replace("queue/", "queue/failed/", 1)
+
+            print(f"❌ FAILED: {e}")
+
+            failed_key = key.replace(
+                "queue/",
+                "queue/failed/",
+                1
+            )
+
             s3.copy_object(
                 Bucket=cfg["bucket"],
-                CopySource={'Bucket': cfg["bucket"], 'Key': key},
+                CopySource={
+                    "Bucket": cfg["bucket"],
+                    "Key": key
+                },
                 Key=failed_key
             )
-            s3.delete_object(Bucket=cfg["bucket"], Key=key)
 
-    if processed_count == 0:
-        print("📭 Checked R2, but found no valid images waiting in the queue/")
+            s3.delete_object(
+                Bucket=cfg["bucket"],
+                Key=key
+            )
 
-# ==========================================
-# 4. ENTRYPOINT
-# ==========================================
+    if processed == 0:
+        print("📭 No valid images found")
+
+    cache_vol.commit()
+
+# =========================================================
+# ENTRYPOINT
+# =========================================================
+
 @app.local_entrypoint()
+
 def main():
+
     process_cloudflare_queue.remote({
-        "endpoint": "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
-        "access_key": "3c33425ba6e5abbd3e63afab14dc8866",
-        "secret_key": "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8",
-        "bucket": "video-asset-files-storage-workflow"
+
+        "endpoint":
+        "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
+
+        "access_key":
+        "3c33425ba6e5abbd3e63afab14dc8866",
+
+        "secret_key":
+        "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8",
+
+        "bucket":
+        "video-asset-files-storage-workflow"
     })
