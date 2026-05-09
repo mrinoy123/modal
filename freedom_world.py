@@ -36,6 +36,15 @@ image = (
         "torch==2.4.0", "torchvision==0.19.0", 
         index_url="https://download.pytorch.org/whl/cu124"
     )
+    .run_commands(
+        "pip uninstall -y numpy",
+        "pip install numpy==1.26.4"
+    )
+    .run_commands(
+        # CRITICAL FIX: Flash Attention is mandatory for HY-World 2.0
+        "pip install flash-attn --no-build-isolation",
+        "pip install gsplat==1.5.3"
+    )
     .pip_install(
         "transformers==4.46.3",
         "accelerate==1.1.1",
@@ -44,20 +53,20 @@ image = (
         "omegaconf",
         "timm",
         "scipy",
-        "opencv-python-headless",
+        # CRITICAL FIX: Pinned to prevent numpy>=2.0 conflict
+        "opencv-python-headless==4.9.0.80", 
         "trimesh",
         "pygltflib",
-        "gsplat==1.5.3",
         "jaxtyping",
         "boto3",
         "roma",
         "pyquaternion",
-        "plyfile" # Added to prevent missing dependency errors for 3D outputs
+        "plyfile"
     )
     .run_commands(
         "rm -rf /root/HYWorld",
         "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
-        # FIX: Replaced `pip install -e .` with requirements install
+        # CRITICAL FIX: Cannot use -e . because repo lacks setup.py
         "cd /root/HYWorld && pip install -r requirements.txt || true" 
     )
 )
@@ -67,6 +76,7 @@ image = (
 # =========================================================
 def generate_world(input_image, prompt, output_name):
     import torch
+    import shutil
     
     ROOT = "/root/HYWorld"
 
@@ -90,10 +100,8 @@ def generate_world(input_image, prompt, output_name):
                 except Exception as e:
                     print(f"Resilient Linker Error for {item}: {e}")
 
-    # Link the files from the mounted volume to the local model folder
     setup_resilient_linker(volume_path="/weights", target_path=f"{ROOT}/weights")
 
-    # Ensure the code can find its own modules
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
     os.chdir(ROOT)
@@ -106,20 +114,22 @@ def generate_world(input_image, prompt, output_name):
     pipeline_loaded = False
     import importlib
 
-    # Tencent changes import paths frequently. This tries the known active paths.
+    # Tencent changes import paths frequently. The current released one is WorldMirrorPipeline.
     candidate_imports = [
-        ("hyworld.pipelines.pipeline_world", "HunyuanWorldPipeline"),
         ("hyworld2.worldrecon.pipeline", "WorldMirrorPipeline"),
+        ("hyworld.pipelines.pipeline_world", "HunyuanWorldPipeline"),
         ("hyworld2.inference", "HunyuanWorldPipeline"),
         ("pipelines", "HYWorld2Pipeline"),
     ]
 
-    for module_name, class_name in candidate_imports:
+    class_name = None
+    for module_name, c_name in candidate_imports:
         try:
             module = importlib.import_module(module_name)
-            pipeline_class = getattr(module, class_name)
-            print(f"SUCCESS IMPORT: {module_name}.{class_name}")
+            pipeline_class = getattr(module, c_name)
+            print(f"SUCCESS IMPORT: {module_name}.{c_name}")
             pipeline_loaded = True
+            class_name = c_name
             break
         except Exception as e:
             print(f"FAILED IMPORT: {module_name} -> {e}")
@@ -129,38 +139,56 @@ def generate_world(input_image, prompt, output_name):
     
     # Load Pipeline
     pipe = pipeline_class.from_pretrained(
-        f"{ROOT}/weights", # Points to the resiliently linked directory
-        torch_dtype=torch.float16,
-        use_safetensors=True
+        f"{ROOT}/weights", 
+        torch_dtype=torch.float16
     ).to("cuda")
 
-    # Enable memory optimizations
-    if torch.cuda.is_available():
-        pipe.enable_model_cpu_offload() 
-
-    print(f"--- Generating: {prompt} ---")
+    print(f"--- Generating World: {output_name} ---")
     
+    # =====================================================
+    # DYNAMIC INFERENCE ADAPTER
+    # =====================================================
     with torch.inference_mode():
-        output = pipe(
-            image=input_image,
-            prompt=prompt,
-            num_inference_steps=30,
-            guidance_scale=5.0,
-            generator=torch.Generator("cuda").manual_seed(42)
-        )
+        if class_name == "WorldMirrorPipeline":
+            # WorldMirror expects a directory containing the images
+            temp_img_dir = f"/tmp/input_{output_name}"
+            os.makedirs(temp_img_dir, exist_ok=True)
+            input_image.save(os.path.join(temp_img_dir, "input.png"))
+            output = pipe(temp_img_dir)
+        else:
+            # Future WorldGen Pipeline expects a single image and prompt
+            output = pipe(
+                image=input_image,
+                prompt=prompt,
+                num_inference_steps=30,
+                guidance_scale=5.0,
+                generator=torch.Generator("cuda").manual_seed(42)
+            )
 
-    # Output directory
+    # =====================================================
+    # EXPORT LOGIC
+    # =====================================================
     output_dir = "/tmp/output"
     os.makedirs(output_dir, exist_ok=True)
     glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
-    # Export Logic
-    if hasattr(output, "export_glb"):
+    # If the pipeline returned a directory path containing outputs
+    if isinstance(output, str) and os.path.isdir(output):
+        found = False
+        for f in os.listdir(output):
+            if f.endswith(".glb") or f.endswith(".ply"):
+                shutil.copy(os.path.join(output, f), glb_path)
+                found = True
+                break
+        if not found:
+            raise RuntimeError(f"No 3D file (.glb/.ply) found in pipeline output: {output}")
+            
+    # If the pipeline returned a 3D object directly
+    elif hasattr(output, "export_glb"):
         output.export_glb(glb_path)
     elif isinstance(output, dict) and "mesh" in output:
         output["mesh"].export(glb_path)
     else:
-        # Fallback for standard trimesh/scene objects
         try:
             output[0].export(glb_path)
         except:
@@ -209,19 +237,15 @@ def process_cloudflare_queue(cfg: dict):
 
         print(f"Processing: {key}")
         try:
-            # Download image
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
-            # Extract Metadata
             metadata = data.get("Metadata", {})
             prompt = metadata.get("prompt", "a beautiful highly detailed 3d world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
-            # Generate
             glb_local_path = generate_world(img, prompt, base_name)
 
-            # Upload result
             output_key = f"output/{base_name}.glb"
             with open(glb_local_path, "rb") as f:
                 s3.put_object(
@@ -231,13 +255,11 @@ def process_cloudflare_queue(cfg: dict):
                     ContentType="model/gltf-binary"
                 )
 
-            # Cleanup S3 queue
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
             print(f"Successfully processed {base_name}")
 
         except Exception as e:
             print(f"Error processing {key}: {str(e)}")
-            # Move to failed folder to avoid infinite loop
             failed_key = key.replace("queue/", "failed/", 1)
             try:
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
