@@ -1,3 +1,4 @@
+```python
 import modal
 import os
 import sys
@@ -5,7 +6,7 @@ import io
 import gc
 
 # =========================================================
-# MODAL IMAGE
+# IMAGE
 # =========================================================
 
 image = (
@@ -14,17 +15,22 @@ image = (
         add_python="3.10"
     )
 
+    # =====================================================
+    # ENV
+    # =====================================================
+
     .env({
         "CUDA_HOME": "/usr/local/cuda",
+        "CUDA_VISIBLE_DEVICES": "0",
         "TORCH_CUDA_ARCH_LIST": "8.9",
         "FORCE_CUDA": "1",
-        "CUDA_VISIBLE_DEVICES": "0",
         "TOKENIZERS_PARALLELISM": "false",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "PYTHONUNBUFFERED": "1",
     })
 
     # =====================================================
-    # SYSTEM DEPENDENCIES
+    # SYSTEM
     # =====================================================
 
     .apt_install(
@@ -39,21 +45,23 @@ image = (
         "libopenblas-dev",
         "libsm6",
         "libxext6",
-        "libxrender1"
+        "libxrender1",
+        "libgomp1"
     )
 
     # =====================================================
-    # BASE PYTHON TOOLS
+    # BASE
     # =====================================================
 
     .pip_install(
         "setuptools",
         "wheel",
-        "ninja"
+        "ninja",
+        "packaging"
     )
 
     # =====================================================
-    # TORCH 2.4
+    # TORCH 2.4 CUDA 12.4
     # =====================================================
 
     .pip_install(
@@ -61,6 +69,14 @@ image = (
         "torchvision==0.19.0",
         "torchaudio==2.4.0",
         index_url="https://download.pytorch.org/whl/cu124"
+    )
+
+    # =====================================================
+    # PIN NUMPY FIRST
+    # =====================================================
+
+    .pip_install(
+        "numpy==1.26.4"
     )
 
     # =====================================================
@@ -78,16 +94,13 @@ image = (
         "opencv-python",
         "imageio",
         "scipy",
-        "numpy==1.26.4",
         "pandas",
         "tqdm",
-        "pillow",
-        "boto3",
-        "botocore"
+        "pillow"
     )
 
     # =====================================================
-    # 3D STACK
+    # 3D
     # =====================================================
 
     .pip_install(
@@ -95,6 +108,32 @@ image = (
         "trimesh",
         "pymeshlab==2022.2.post3",
         "pygltflib"
+    )
+
+    # =====================================================
+    # INSTALL FLASH-ATTN + GSPLAT
+    # =====================================================
+
+    .run_commands(
+        "pip install /weights/dependencies/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl",
+        "pip install /weights/dependencies/gsplat-1.5.3+pt24cu124-cp310-cp310-linux_x86_64.whl"
+    )
+
+    # =====================================================
+    # REPAIR NUMPY AFTER GSPLAT
+    # =====================================================
+
+    .run_commands(
+        "pip install --force-reinstall numpy==1.26.4"
+    )
+
+    # =====================================================
+    # INSTALL BOTO3 LAST
+    # =====================================================
+
+    .pip_install(
+        "boto3==1.34.131",
+        "botocore==1.34.131"
     )
 
     # =====================================================
@@ -124,34 +163,7 @@ cache_vol = modal.Volume.from_name(
 )
 
 # =========================================================
-# RUNTIME INSTALLER
-# =========================================================
-
-def install_runtime_dependencies():
-
-    import subprocess
-    import os
-
-    flash_wheel = "/weights/dependencies/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
-
-    gsplat_wheel = "/weights/dependencies/gsplat-1.5.3+pt24cu124-cp310-cp310-linux_x86_64.whl"
-
-    if os.path.exists(flash_wheel):
-        print("Installing FlashAttention...")
-        subprocess.run(
-            ["pip", "install", flash_wheel],
-            check=True
-        )
-
-    if os.path.exists(gsplat_wheel):
-        print("Installing gsplat...")
-        subprocess.run(
-            ["pip", "install", gsplat_wheel],
-            check=True
-        )
-
-# =========================================================
-# WORLD GENERATION
+# GENERATOR
 # =========================================================
 
 def generate_world(input_img, base_name, prompt):
@@ -168,12 +180,12 @@ def generate_world(input_img, base_name, prompt):
     torch.backends.cuda.enable_mem_efficient_sdp(True)
 
     # =====================================================
-    # FIND REPO
+    # RESOLVE PATHS
     # =====================================================
 
     def resolve_paths():
 
-        candidates = [
+        candidate_mounts = [
             "/weights",
             "/cache",
             "/mnt",
@@ -182,20 +194,20 @@ def generate_world(input_img, base_name, prompt):
 
         code_root = None
 
-        for mount in candidates:
+        for mount in candidate_mounts:
 
-            target = os.path.join(
+            candidate = os.path.join(
                 mount,
                 "HY-World-2.0"
             )
 
-            if os.path.exists(target):
-                code_root = target
+            if os.path.exists(candidate):
+                code_root = candidate
                 break
 
         if not code_root:
-            raise Exception(
-                "HY-World-2.0 repository missing"
+            raise FileNotFoundError(
+                "HY-World-2.0 NOT FOUND"
             )
 
         helper_root = os.path.join(
@@ -207,7 +219,7 @@ def generate_world(input_img, base_name, prompt):
 
     CODE_ROOT, HELPER_ROOT = resolve_paths()
 
-    print(f"FOUND REPO: {CODE_ROOT}")
+    print(f"FOUND CODE ROOT: {CODE_ROOT}")
 
     sys.path.insert(0, CODE_ROOT)
 
@@ -224,7 +236,7 @@ def generate_world(input_img, base_name, prompt):
     # LOAD PIPELINE
     # =====================================================
 
-    print("LOADING PIPELINE")
+    print("LOADING HYWORLD2 PIPELINE")
 
     pipeline = HYWorld2Pipeline.from_pretrained(
         CODE_ROOT,
@@ -241,10 +253,10 @@ def generate_world(input_img, base_name, prompt):
     )
 
     # =====================================================
-    # GENERATION
+    # GENERATE
     # =====================================================
 
-    print("GENERATING WORLD")
+    print("GENERATING 3D WORLD")
 
     with torch.autocast(
         "cuda",
@@ -256,7 +268,7 @@ def generate_world(input_img, base_name, prompt):
             prompt=prompt,
             negative_prompt=(
                 "blurry, messy, low quality, "
-                "photorealistic"
+                "photorealistic, realistic texture"
             ),
             target_resolution=1024,
             output_type="3dgs"
@@ -275,7 +287,7 @@ def generate_world(input_img, base_name, prompt):
         f"{base_name}.glb"
     )
 
-    print("CONVERTING TO GLB")
+    print("CONVERTING SPLAT TO GLB")
 
     splat_to_glb(
         result,
@@ -304,11 +316,8 @@ def generate_world(input_img, base_name, prompt):
 
 @app.function(
     gpu="L4",
-
     timeout=3600,
-
     scaledown_window=60,
-
     max_containers=1,
 
     volumes={
@@ -319,16 +328,10 @@ def generate_world(input_img, base_name, prompt):
 
 def process_cloudflare_queue(cfg: dict):
 
-    # =====================================================
-    # INSTALL RUNTIME WHEELS
-    # =====================================================
-
-    install_runtime_dependencies()
-
     import boto3
     from PIL import Image
 
-    print("CONNECTING TO R2")
+    print("CONNECTING TO CLOUDFLARE R2")
 
     s3 = boto3.client(
         "s3",
@@ -351,8 +354,7 @@ def process_cloudflare_queue(cfg: dict):
         key = obj["Key"]
 
         if (
-            len(key.split("/")) != 2
-            or
+            len(key.split("/")) != 2 or
             not key.lower().endswith(
                 (".png", ".jpg", ".jpeg")
             )
@@ -458,3 +460,4 @@ def main():
         "bucket":
         "video-asset-files-storage-workflow"
     })
+```
