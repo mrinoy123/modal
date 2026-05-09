@@ -7,14 +7,14 @@ import gc
 # =========================================================
 # APP CONFIGURATION
 # =========================================================
-app = modal.App("hy-world-v2-production")
+app = modal.App("hyworld2-production-v2")
 
 # Volumes
 weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=True)
 cache_vol = modal.Volume.from_name("hyworld2-cache", create_if_missing=True)
 
 # =========================================================
-# IMAGE BUILD
+# IMAGE BUILD - Optimized for Flash Attention and 3DGS
 # =========================================================
 image = (
     modal.Image.from_registry(
@@ -26,48 +26,44 @@ image = (
         "FORCE_CUDA": "1",
         "PYTHONUNBUFFERED": "1",
         "HF_HOME": "/cache/huggingface",
-        "XFORMERS_FORCE_STAGES": "1"
+        "MAX_JOBS": "4",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     })
     .apt_install(
         "git", "git-lfs", "wget", "ffmpeg", "libgl1-mesa-glx", 
-        "libglib2.0-0", "build-essential", "ninja-build"
+        "libglib2.0-0", "build-essential", "ninja-build", "cmake"
     )
+    # STEP 1: Install Build Tools first to fix 'packaging' error
+    .pip_install(
+        "pip==25.0.1",
+        "setuptools==70.0.0",
+        "packaging",
+        "wheel",
+        "ninja"
+    )
+    # STEP 2: Install Torch (Flash-attn needs torch to compile)
     .pip_install(
         "torch==2.4.0", "torchvision==0.19.0", 
         index_url="https://download.pytorch.org/whl/cu124"
     )
+    # STEP 3: Install Flash Attention and GSplat
     .run_commands(
-        "pip uninstall -y numpy",
-        "pip install numpy==1.26.4"
-    )
-    .run_commands(
-        # CRITICAL FIX: Flash Attention is mandatory for HY-World 2.0
         "pip install flash-attn --no-build-isolation",
         "pip install gsplat==1.5.3"
     )
+    # STEP 4: Install AI and 3D Libraries
     .pip_install(
         "transformers==4.46.3",
         "accelerate==1.1.1",
         "diffusers==0.31.0",
-        "einops",
-        "omegaconf",
-        "timm",
-        "scipy",
-        # CRITICAL FIX: Pinned to prevent numpy>=2.0 conflict
-        "opencv-python-headless==4.9.0.80", 
-        "trimesh",
-        "pygltflib",
-        "jaxtyping",
-        "boto3",
-        "roma",
-        "pyquaternion",
-        "plyfile"
+        "einops", "omegaconf", "timm", "scipy", "trimesh",
+        "opencv-python-headless==4.9.0.80", # Prevent Numpy 2.0 issues
+        "pygltflib", "jaxtyping", "boto3", "roma", "pyquaternion", "plyfile"
     )
+    # STEP 5: Clone and Setup Repo
     .run_commands(
-        "rm -rf /root/HYWorld",
         "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
-        # CRITICAL FIX: Cannot use -e . because repo lacks setup.py
-        "cd /root/HYWorld && pip install -r requirements.txt || true" 
+        "cd /root/HYWorld && pip install -r requirements.txt || true"
     )
 )
 
@@ -77,11 +73,12 @@ image = (
 def generate_world(input_image, prompt, output_name):
     import torch
     import shutil
+    from PIL import Image
     
     ROOT = "/root/HYWorld"
 
     # =====================================================
-    # RESILIENT LINKER
+    # RESILIENT LINKER (Kept as requested)
     # =====================================================
     def setup_resilient_linker(volume_path="/weights", target_path="/root/HYWorld/weights"):
         print(f"EXECUTING RESILIENT LINKER FROM {volume_path} TO {target_path}")
@@ -102,6 +99,7 @@ def generate_world(input_image, prompt, output_name):
 
     setup_resilient_linker(volume_path="/weights", target_path=f"{ROOT}/weights")
 
+    # Path Injection
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
     os.chdir(ROOT)
@@ -109,20 +107,20 @@ def generate_world(input_image, prompt, output_name):
     print(f"--- Loading Hunyuan World 2.0 ---")
 
     # =====================================================
-    # ROBUST PIPELINE IMPORT
+    # ROBUST PIPELINE IMPORT FOR HY-WORLD 2.0
     # =====================================================
     pipeline_loaded = False
     import importlib
 
-    # Tencent changes import paths frequently. The current released one is WorldMirrorPipeline.
+    # Updated candidates based on HY-World 2.0 repo structure
     candidate_imports = [
         ("hyworld2.worldrecon.pipeline", "WorldMirrorPipeline"),
-        ("hyworld.pipelines.pipeline_world", "HunyuanWorldPipeline"),
+        ("hyworld2.pipelines.pipeline_world", "HunyuanWorldPipeline"),
         ("hyworld2.inference", "HunyuanWorldPipeline"),
-        ("pipelines", "HYWorld2Pipeline"),
     ]
 
     class_name = None
+    pipeline_class = None
     for module_name, c_name in candidate_imports:
         try:
             module = importlib.import_module(module_name)
@@ -132,12 +130,13 @@ def generate_world(input_image, prompt, output_name):
             class_name = c_name
             break
         except Exception as e:
-            print(f"FAILED IMPORT: {module_name} -> {e}")
+            print(f"TRYING NEXT - FAILED IMPORT: {module_name} -> {e}")
 
     if not pipeline_loaded:
-        raise RuntimeError("Could not locate HYWorld pipeline.")
+        raise RuntimeError("Could not locate HY-World 2.0 pipeline in repo.")
     
     # Load Pipeline
+    # It expects the 'weights' folder inside the root, linked via the resilient linker
     pipe = pipeline_class.from_pretrained(
         f"{ROOT}/weights", 
         torch_dtype=torch.float16
@@ -146,23 +145,22 @@ def generate_world(input_image, prompt, output_name):
     print(f"--- Generating World: {output_name} ---")
     
     # =====================================================
-    # DYNAMIC INFERENCE ADAPTER
+    # INFERENCE ADAPTER
     # =====================================================
     with torch.inference_mode():
         if class_name == "WorldMirrorPipeline":
-            # WorldMirror expects a directory containing the images
+            # WorldMirror usually processes a directory of images or a single path
             temp_img_dir = f"/tmp/input_{output_name}"
             os.makedirs(temp_img_dir, exist_ok=True)
             input_image.save(os.path.join(temp_img_dir, "input.png"))
-            output = pipe(temp_img_dir)
+            output = pipe(temp_img_dir, prompt=prompt)
         else:
-            # Future WorldGen Pipeline expects a single image and prompt
+            # Standard Diffusers-style pipeline
             output = pipe(
                 image=input_image,
                 prompt=prompt,
                 num_inference_steps=30,
-                guidance_scale=5.0,
-                generator=torch.Generator("cuda").manual_seed(42)
+                guidance_scale=5.0
             )
 
     # =====================================================
@@ -172,23 +170,24 @@ def generate_world(input_image, prompt, output_name):
     os.makedirs(output_dir, exist_ok=True)
     glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
-    # If the pipeline returned a directory path containing outputs
+    # Handle directory outputs (common in WorldMirror)
     if isinstance(output, str) and os.path.isdir(output):
         found = False
         for f in os.listdir(output):
-            if f.endswith(".glb") or f.endswith(".ply"):
+            if f.endswith(".glb"):
                 shutil.copy(os.path.join(output, f), glb_path)
                 found = True
                 break
         if not found:
-            raise RuntimeError(f"No 3D file (.glb/.ply) found in pipeline output: {output}")
+            raise RuntimeError(f"No .glb found in output folder: {output}")
             
-    # If the pipeline returned a 3D object directly
+    # Handle direct object outputs
     elif hasattr(output, "export_glb"):
         output.export_glb(glb_path)
     elif isinstance(output, dict) and "mesh" in output:
         output["mesh"].export(glb_path)
     else:
+        # Final fallback
         try:
             output[0].export(glb_path)
         except:
@@ -227,7 +226,7 @@ def process_cloudflare_queue(cfg: dict):
     response = s3.list_objects_v2(Bucket=cfg["bucket"], Prefix="queue/")
     
     if "Contents" not in response:
-        print("Queue Empty.")
+        print("Queue is empty.")
         return
 
     for obj in response["Contents"]:
@@ -237,15 +236,19 @@ def process_cloudflare_queue(cfg: dict):
 
         print(f"Processing: {key}")
         try:
+            # Download
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
+            # Metadata
             metadata = data.get("Metadata", {})
-            prompt = metadata.get("prompt", "a beautiful highly detailed 3d world")
+            prompt = metadata.get("prompt", "a professional high-quality 3d world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
+            # Process
             glb_local_path = generate_world(img, prompt, base_name)
 
+            # Upload
             output_key = f"output/{base_name}.glb"
             with open(glb_local_path, "rb") as f:
                 s3.put_object(
@@ -255,20 +258,22 @@ def process_cloudflare_queue(cfg: dict):
                     ContentType="model/gltf-binary"
                 )
 
+            # Cleanup
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"Successfully processed {base_name}")
+            print(f"Successfully generated: {base_name}")
 
         except Exception as e:
-            print(f"Error processing {key}: {str(e)}")
-            failed_key = key.replace("queue/", "failed/", 1)
+            print(f"FAIL: {key} -> {str(e)}")
+            # Prevent infinite loops by moving failed items
             try:
+                failed_key = key.replace("queue/", "failed/", 1)
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
                 s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            except Exception as move_e:
-                print(f"Failed to move object to failed folder: {move_e}")
+            except:
+                pass
 
 # =========================================================
-# LOCAL ENTRYPOINT
+# ENTRYPOINT
 # =========================================================
 @app.local_entrypoint()
 def main():
