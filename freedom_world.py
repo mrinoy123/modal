@@ -8,14 +8,14 @@ import gc
 # APP
 # =========================================================
 
-app = modal.App("hyworld2-world-generator")
+app = modal.App("hyworld2-production")
 
 # =========================================================
 # VOLUMES
 # =========================================================
 
 weights_vol = modal.Volume.from_name(
-    "hyworld2-weights",
+    "weights-hy-world-2", # Mapped exactly to your Modal storage
     create_if_missing=True
 )
 
@@ -29,76 +29,60 @@ cache_vol = modal.Volume.from_name(
 # =========================================================
 
 image = (
-
     modal.Image.from_registry(
         "nvidia/cuda:12.4.1-devel-ubuntu22.04",
         add_python="3.10"
     )
 
     # =====================================================
-    # ENV
+    # ENVIRONMENT
     # =====================================================
-
     .env({
         "CUDA_HOME": "/usr/local/cuda",
         "FORCE_CUDA": "1",
         "TORCH_CUDA_ARCH_LIST": "8.9",
-        "MAX_JOBS": "6",
+        "MAX_JOBS": "4",
         "PYTHONUNBUFFERED": "1",
         "HF_HOME": "/cache/huggingface",
         "TRANSFORMERS_CACHE": "/cache/huggingface",
         "HUGGINGFACE_HUB_CACHE": "/cache/huggingface",
-        "XFORMERS_FORCE_DISABLE_TRITON": "1",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     })
 
     # =====================================================
-    # SYSTEM
+    # SYSTEM PACKAGES
     # =====================================================
-
     .apt_install(
-
         "git",
         "git-lfs",
         "wget",
         "curl",
         "ffmpeg",
-
         "build-essential",
         "clang",
         "cmake",
         "ninja-build",
         "pkg-config",
-
         "mesa-utils",
         "libgl1-mesa-glx",
         "libglu1-mesa",
         "libglib2.0-0",
         "libsm6",
         "libxext6",
-        "libxrender-dev",
+        "libxrender1",
         "libgomp1",
-
         "libopenblas-dev",
         "libeigen3-dev",
-
         "python3-dev",
-
-        # OPEN3D FIXES
-        "libusb-1.0-0",
-        "libudev1",
-
-        # GSPLAT / RASTERIZATION
         "libx11-6",
         "libxi6",
         "libxxf86vm1",
         "libxrandr2"
-
     )
 
     # =====================================================
     # PYTHON CORE
     # =====================================================
-
     .pip_install(
         "pip==25.1.1",
         "setuptools==70.0.0",
@@ -110,7 +94,6 @@ image = (
     # =====================================================
     # TORCH
     # =====================================================
-
     .pip_install(
         "torch==2.4.0",
         "torchvision==0.19.0",
@@ -119,45 +102,17 @@ image = (
     )
 
     # =====================================================
-    # NUMPY ABI FIX
+    # NUMPY FIX
     # =====================================================
-
     .run_commands(
         "pip uninstall -y numpy",
         "pip install numpy==1.26.4"
     )
 
     # =====================================================
-    # XFORMERS
+    # CORE AI LIBRARIES
     # =====================================================
-
-    .run_commands(
-        "pip install xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu124"
-    )
-
-    # =====================================================
-    # FLASH ATTN
-    # =====================================================
-
-    .run_commands(
-        "pip install flash-attn==2.7.4.post1 --no-build-isolation || true"
-    )
-
-    # =====================================================
-    # GSPLAT
-    # =====================================================
-
-    .run_commands(
-        "pip install gsplat==1.5.3"
-    )
-
-    # =====================================================
-    # HY-WORLD DEPENDENCIES
-    # =====================================================
-
     .pip_install(
-
-        # AI
         "transformers==4.46.3",
         "accelerate==1.1.1",
         "diffusers==0.31.0",
@@ -165,156 +120,182 @@ image = (
         "sentencepiece",
         "einops",
         "omegaconf",
+        "timm",
+        "kornia"
+    )
 
-        # Image
+    # =====================================================
+    # IMAGE / VIDEO
+    # =====================================================
+    .pip_install(
         "opencv-python-headless",
         "pillow",
         "imageio",
-        "imageio-ffmpeg",
+        "imageio-ffmpeg"
+    )
 
-        # Math
-        "scipy",
-        "numpy==1.26.4",
-
-        # Utilities
-        "tqdm",
-        "rich",
-        "jaxtyping",
-        "typing_extensions",
-
-        # 3D
+    # =====================================================
+    # 3D / MESH
+    # =====================================================
+    .pip_install(
         "open3d==0.18.0",
         "trimesh",
         "pygltflib",
         "pymeshlab==2022.2.post3",
         "plyfile",
-        "PyMCubes",
-        "pyvista",
-        "vtk",
+        "PyMCubes"
+    )
 
-        # ML
-        "huggingface_hub",
-        "timm",
-        "kornia",
+    # =====================================================
+    # GSPLAT + NERF
+    # =====================================================
+    .run_commands(
+        "pip install gsplat==1.5.3",
+        "pip install nerfacc"
+    )
 
-        # Cloud
+    # =====================================================
+    # UTILITIES
+    # =====================================================
+    .pip_install(
+        "scipy",
+        "pandas",
+        "tqdm",
+        "rich",
+        "jaxtyping",
+        "typing_extensions",
+        "huggingface_hub"
+    )
+
+    # =====================================================
+    # CLOUD
+    # =====================================================
+    .pip_install(
         "boto3==1.34.131",
         "botocore==1.34.131"
     )
 
     # =====================================================
-    # CLONE HY-WORLD
+    # EXTRA HYWORLD FIXES
     # =====================================================
-
     .run_commands(
-
-        "rm -rf /root/HYWorld",
-
-        "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
-
-        "cd /root/HYWorld && pip install -r requirements.txt || true",
-
-        # EXTRA FIXES
-        "pip install plyfile",
         "pip install roma",
-        "pip install pyquaternion",
-        "pip install nerfacc",
-        "pip install git+https://github.com/NVlabs/nvdiffrast.git",
-
-        # VERIFY
-        "ls -la /root/HYWorld",
-        "find /root/HYWorld -maxdepth 2 -type f | head -50"
+        "pip install pyquaternion"
     )
 
+    # =====================================================
+    # CLONE HY-WORLD
+    # =====================================================
+    .run_commands(
+        "rm -rf /root/HYWorld",
+        "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
+        "cd /root/HYWorld && pip install -r requirements.txt || true",
+        "find /root/HYWorld -maxdepth 3 -type f | head -100"
+    )
 )
 
 # =========================================================
 # GENERATION
 # =========================================================
 
-def generate_world(image_input, prompt, output_name):
+def generate_world(input_image, prompt, output_name):
 
     import torch
-    from PIL import Image
-
-    # =====================================================
-    # PATHS
-    # =====================================================
 
     ROOT = "/root/HYWorld"
 
-    sys.path.insert(0, ROOT)
+    # =====================================================
+    # RESILIENT LINKER
+    # =====================================================
+    def setup_resilient_linker(volume_path="/weights", target_path="/root/HYWorld/weights"):
+        print(f"EXECUTING RESILIENT LINKER FROM {volume_path} TO {target_path}")
+        if not os.path.exists(volume_path):
+            print(f"WARNING: Volume path {volume_path} not found.")
+            return
+
+        os.makedirs(target_path, exist_ok=True)
+        for item in os.listdir(volume_path):
+            src = os.path.join(volume_path, item)
+            dst = os.path.join(target_path, item)
+            if not os.path.exists(dst):
+                try:
+                    os.symlink(src, dst)
+                    print(f"Resilient Linker: Symlinked {src} -> {dst}")
+                except Exception as e:
+                    print(f"Resilient Linker Error for {item}: {e}")
+
+    # Fire the linker to map the Modal volume files to the local execution folder
+    setup_resilient_linker(volume_path="/weights", target_path=f"{ROOT}/weights")
+
+    # =====================================================
+    # PATH INJECTION
+    # =====================================================
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
 
     os.chdir(ROOT)
 
     # =====================================================
-    # CUDA
+    # CUDA CHECK
     # =====================================================
-
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available")
+        raise RuntimeError("CUDA unavailable")
 
-    print("CUDA DEVICE:", torch.cuda.get_device_name(0))
+    print("CUDA:", torch.cuda.get_device_name(0))
 
     # =====================================================
-    # IMPORTS
+    # FIND REAL PIPELINE
     # =====================================================
+    pipeline_loaded = False
+    import importlib
 
-    try:
+    candidate_imports = [
+        ("hyworld2.inference", "HunyuanWorldPipeline"),
+        ("hyworld2.pipeline", "HunyuanWorldPipeline"),
+        ("hyworld2.world.pipeline", "HunyuanWorldPipeline"),
+        ("hyworld2.world.inference", "HunyuanWorldPipeline"),
+    ]
 
-        from hyworld2.inference import HunyuanWorldPipeline
+    for module_name, class_name in candidate_imports:
+        try:
+            module = importlib.import_module(module_name)
+            pipeline_class = getattr(module, class_name)
+            print(f"SUCCESS IMPORT: {module_name}")
+            pipeline_loaded = True
+            break
+        except Exception as e:
+            print(f"FAILED IMPORT: {module_name} -> {e}")
 
-    except Exception as e:
-
-        raise Exception(f"REAL PIPELINE IMPORT FAILED:\n{e}")
+    if not pipeline_loaded:
+        raise RuntimeError("Could not locate HYWorld pipeline.")
 
     # =====================================================
     # LOAD MODEL
     # =====================================================
+    print("LOADING MODEL")
 
-    print("LOADING HY-WORLD MODEL")
-
-    pipe = HunyuanWorldPipeline.from_pretrained(
-
-        ROOT,
-
-        torch_dtype=torch.bfloat16
-
+    pipe = pipeline_class.from_pretrained(
+        ROOT, # Uses the symlinked weights folder
+        torch_dtype=torch.float16
     ).to("cuda")
-
-    # =====================================================
-    # OPTIMIZATION
-    # =====================================================
-
-    pipe.enable_model_cpu_offload()
 
     # =====================================================
     # GENERATE
     # =====================================================
-
-    print("STARTING WORLD GENERATION")
+    print("GENERATING WORLD")
 
     with torch.inference_mode():
-
         result = pipe(
-
-            image=image_input,
+            image=input_image,
             prompt=prompt,
-
             num_inference_steps=30,
-
-            guidance_scale=5.0,
-
-            output_type="mesh"
-
+            guidance_scale=5.0
         )
 
     # =====================================================
-    # EXPORT
+    # OUTPUT
     # =====================================================
-
     output_dir = "/tmp/output"
-
     os.makedirs(output_dir, exist_ok=True)
 
     output_path = os.path.join(
@@ -322,18 +303,24 @@ def generate_world(image_input, prompt, output_name):
         f"{output_name}.glb"
     )
 
-    mesh = result["mesh"]
-
-    mesh.export(output_path)
+    # =====================================================
+    # EXPORT
+    # =====================================================
+    if isinstance(result, dict):
+        if "mesh" in result:
+            result["mesh"].export(output_path)
+        elif "scene" in result:
+            result["scene"].export(output_path)
+        else:
+            raise RuntimeError("No mesh/scene in result.")
+    else:
+        result.export(output_path)
 
     # =====================================================
     # CLEANUP
     # =====================================================
-
     del pipe
-
     gc.collect()
-
     torch.cuda.empty_cache()
 
     return output_path
@@ -343,21 +330,15 @@ def generate_world(image_input, prompt, output_name):
 # =========================================================
 
 @app.function(
-
     image=image,
-
     gpu="L4",
-
     timeout=7200,
-
     max_containers=1,
-
     volumes={
-        "/weights": weights_vol,
+        "/weights": weights_vol, # Mounts your Modal Volume to /weights
         "/cache": cache_vol
     }
 )
-
 def process_cloudflare_queue(cfg: dict):
 
     import boto3
@@ -380,7 +361,6 @@ def process_cloudflare_queue(cfg: dict):
         return
 
     for obj in response["Contents"]:
-
         key = obj["Key"]
 
         if not key.lower().endswith((".png", ".jpg", ".jpeg")):
@@ -389,7 +369,6 @@ def process_cloudflare_queue(cfg: dict):
         print(f"PROCESSING: {key}")
 
         try:
-
             data = s3.get_object(
                 Bucket=cfg["bucket"],
                 Key=key
@@ -401,7 +380,7 @@ def process_cloudflare_queue(cfg: dict):
 
             prompt = (
                 data.get("Metadata", {})
-                .get("prompt", "cinematic 3d environment")
+                .get("prompt", "cinematic 3d world")
             )
 
             base_name = os.path.splitext(
@@ -417,17 +396,11 @@ def process_cloudflare_queue(cfg: dict):
             output_key = f"output/{base_name}.glb"
 
             with open(glb_path, "rb") as f:
-
                 s3.put_object(
-
                     Bucket=cfg["bucket"],
-
                     Key=output_key,
-
                     Body=f,
-
                     ContentType="model/gltf-binary"
-
                 )
 
             s3.delete_object(
@@ -438,13 +411,25 @@ def process_cloudflare_queue(cfg: dict):
             print(f"SUCCESS: {key}")
 
         except Exception as e:
-
-            print("FAILED")
+            print("FAILED:")
             print(str(e))
+            
+            # Move failed files to failed directory to prevent infinite loops
+            try:
+                failed_key = key.replace("queue/", "queue/failed/", 1)
+                s3.copy_object(
+                    Bucket=cfg["bucket"],
+                    CopySource={"Bucket": cfg["bucket"], "Key": key},
+                    Key=failed_key
+                )
+                s3.delete_object(Bucket=cfg["bucket"], Key=key)
+            except Exception as move_error:
+                print(f"Failed to move object: {move_error}")
 
-
-
-
+    try:
+        cache_vol.commit()
+    except Exception as e:
+        print(f"Warning: cache volume commit failed: {e}")
 
 # =========================================================
 # ENTRYPOINT
@@ -452,7 +437,6 @@ def process_cloudflare_queue(cfg: dict):
 
 @app.local_entrypoint()
 def main():
-    
     config = {
         "endpoint": "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
         "access_key": "3c33425ba6e5abbd3e63afab14dc8866",
