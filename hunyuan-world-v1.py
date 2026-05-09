@@ -7,8 +7,6 @@ import shutil
 import glob
 import subprocess
 
-
-
 # =========================================================
 # 1. IMAGE CONFIGURATION (Optimized for HW-1 + L4)
 # =========================================================
@@ -24,7 +22,7 @@ image = (
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
         "libglib2.0-0", "wget", "libdraco-dev", 
-        "ninja-build" # Added ninja to speed up and stabilize C++ CUDA compilation
+        "ninja-build" # Speeds up and stabilizes C++ CUDA compilation
     )
     # Step 1: Update core Python build tools first to prevent environment bugs
     .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
@@ -47,6 +45,11 @@ image = (
     )
 )
 
+# =========================================================
+# 1.5. APP & VOLUME INITIALIZATION (Restored!)
+# =========================================================
+app = modal.App("hyworld1-hallucination-engine", image=image)
+weights_vol = modal.Volume.from_name("weights-hy-world-1")
 
 
 # =========================================================
