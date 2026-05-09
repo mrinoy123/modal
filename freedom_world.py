@@ -1,4 +1,3 @@
-```python
 import modal
 import os
 import sys
@@ -315,6 +314,7 @@ def generate_world(input_img, base_name, prompt):
 # =========================================================
 
 @app.function(
+    image=image, # <-- ADDED: Binds your custom environment to this function
     gpu="L4",
     timeout=3600,
     scaledown_window=60,
@@ -325,7 +325,6 @@ def generate_world(input_img, base_name, prompt):
         "/cache": cache_vol
     }
 )
-
 def process_cloudflare_queue(cfg: dict):
 
     import boto3
@@ -443,7 +442,6 @@ def process_cloudflare_queue(cfg: dict):
 # =========================================================
 
 @app.local_entrypoint()
-
 def main():
 
     process_cloudflare_queue.remote({
@@ -460,4 +458,3 @@ def main():
         "bucket":
         "video-asset-files-storage-workflow"
     })
-```
