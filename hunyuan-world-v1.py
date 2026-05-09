@@ -3,72 +3,72 @@ import os
 import sys
 import io
 import gc
-import shutil
-import glob
 import subprocess
 
 # =========================================================
-# 1. IMAGE CONFIGURATION (Optimized for HW-1 + L4)
+# 1. IMAGE CONFIGURATION (Fixed for GroundingDINO & HW-1)
 # =========================================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
     .env({
-        "TORCH_CUDA_ARCH_LIST": "8.9", # L4 optimization
+        "TORCH_CUDA_ARCH_LIST": "8.9",       # L4 GPU Optimization
         "FORCE_CUDA": "1",
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         "PYTHONUNBUFFERED": "1",
-        "CUDA_HOME": "/usr/local/cuda" # Crucial: Explicitly tells GroundingDINO where CUDA is
+        "CUDA_HOME": "/usr/local/cuda",
+        "CC": "clang",                       # Force use of Clang for C
+        "CXX": "clang++",                   # Force use of Clang++ for C++
     })
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
         "libglib2.0-0", "wget", "libdraco-dev", 
-        "ninja-build" # Speeds up and stabilizes C++ CUDA compilation
+        "ninja-build", "clang", "llvm"       # Added clang and llvm to fix your specific error
     )
-    # Step 1: Update core Python build tools first to prevent environment bugs
+    # Step 1: Core Build Tools
     .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
     
-    # Step 2: Install PyTorch completely separately so it is globally available
-    .pip_install("torch==2.3.1", "torchvision")
+    # Step 2: Install PyTorch (Global)
+    .pip_install("torch==2.3.1", "torchvision", "torchaudio")
     
-    # Step 3: Install the rest of the HuggingFace and 3D dependencies
+    # Step 3: Install Core Dependencies
     .pip_install(
         "transformers", "diffusers==0.30.0", "accelerate", "sentencepiece", 
         "huggingface_hub", "hf-transfer", "opencv-python", "trimesh", 
         "pillow", "einops", "omegaconf", "scipy", "onnxruntime-gpu", 
         "boto3", "segment-anything", "plyfile"
     )
-    # Step 4: Install GroundingDINO using --no-build-isolation
-    # This forces the installer to see the 'torch' installed in Step 2
+    
+    # Step 4: GroundingDINO Fix & HunyuanWorld Repo
+    # We set environment variables specifically for this RUN command to ensure it sees the compiler
     .run_commands(
+        "export PATH=/usr/local/cuda/bin:$PATH && "
         "pip install --no-build-isolation git+https://github.com/IDEA-Research/GroundingDINO.git",
-        "rm -rf /root/HunyuanWorld && git clone --depth 1 https://github.com/tencent/HunyuanWorld-1.git /root/HunyuanWorld"
+        "git clone --depth 1 https://github.com/tencent/HunyuanWorld-1.git /root/HunyuanWorld"
     )
 )
 
 # =========================================================
-# 1.5. APP & VOLUME INITIALIZATION (Restored!)
+# 2. APP & VOLUME INITIALIZATION
 # =========================================================
 app = modal.App("hyworld1-hallucination-engine", image=image)
 weights_vol = modal.Volume.from_name("weights-hy-world-1")
 
-
 # =========================================================
-# 2. GENERATION ENGINE (Hallucination + 3D Mapping)
+# 3. GENERATION LOGIC
 # =========================================================
 def generate_hallucinated_world(input_image, prompt, base_name):
     import torch
     from PIL import Image
     
     ROOT = "/root/HunyuanWorld"
-    sys.path.append(ROOT)
+    if ROOT not in sys.path:
+        sys.path.append(ROOT)
 
-    # 🕵️ THE RESILIENT LINKER (V1 Optimized)
-    # This finds your weights on the Modal Volume and symlinks them to /root/HunyuanWorld/weights
+    # Resolve Weights via Symlinks
     def resolve_and_link_weights(volume_path="/weights", project_path=f"{ROOT}/weights"):
-        print(f"🔍 Linker: Scanning {volume_path} for HunyuanWorld-1 weights...")
+        print(f"🔍 Linker: Scanning {volume_path}...")
         os.makedirs(project_path, exist_ok=True)
         
-        # We need to map the subfolders you created in the downloader script
         mapping = {
             "flux": "flux",
             "hunyuan_world": "hunyuan_world",
@@ -86,15 +86,14 @@ def generate_hallucinated_world(input_image, prompt, base_name):
                 except Exception as e:
                     print(f"⚠️ Link failed for {vol_sub}: {e}")
 
-    # Initialize paths
     resolve_and_link_weights()
     os.chdir(ROOT)
 
     from models.pano_gen_pipeline import HunyuanWorldPanoGenPipeline
     from models.scene_gen_pipeline import HunyuanWorldSceneGenPipeline
 
-    # STAGE 1: PanoGen (Hallucinate the 360-degree environment)
-    print("🚀 [Stage 1] Hallucinating 360 Panorama (FP8 Mode)...")
+    # STAGE 1: PanoGen (Image + Prompt -> 360 Panorama)
+    print("🚀 [Stage 1] Generating 360 Panorama...")
     
     pano_pipe = HunyuanWorldPanoGenPipeline.from_pretrained(
         f"{ROOT}/weights/hunyuan_world",
@@ -104,11 +103,9 @@ def generate_hallucinated_world(input_image, prompt, base_name):
         device="cuda"
     )
     
-    # L4 24GB Memory Management
     pano_pipe.enable_model_cpu_offload()
 
     with torch.inference_mode():
-        # The model uses the reference image + prompt to hallucinate the rest of the world
         hallucinated_pano = pano_pipe(
             image=input_image,
             prompt=prompt,
@@ -120,13 +117,13 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     pano_path = f"/tmp/{base_name}_pano.png"
     hallucinated_pano.save(pano_path)
 
-    # Clean up PanoGen VRAM to make room for SceneGen
+    # VRAM Cleanup
     del pano_pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    # STAGE 2: SceneGen (Convert Panorama to 3D Scene)
-    print("🚀 [Stage 2] Building 3D Geometric Scene...")
+    # STAGE 2: SceneGen (Panorama -> 3D Mesh)
+    print("🚀 [Stage 2] Building 3D Scene...")
     
     scene_pipe = HunyuanWorldSceneGenPipeline(
         model_root=f"{ROOT}/weights/hunyuan_world",
@@ -136,7 +133,6 @@ def generate_hallucinated_world(input_image, prompt, base_name):
         device="cuda"
     )
 
-    # Labels guide the segmentation of the hallucinated world
     labels = "floor, walls, ceiling, sky, furniture, windows"
 
     with torch.inference_mode():
@@ -149,7 +145,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     output_ply = f"/tmp/{base_name}_world.ply"
     world_mesh.export(output_ply)
 
-    # Final cleanup
+    # Cleanup
     del scene_pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -157,7 +153,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     return pano_path, output_ply
 
 # =========================================================
-# 3. R2 WORKER & QUEUE LOGIC
+# 4. R2 WORKER
 # =========================================================
 @app.function(
     gpu="L4",
@@ -169,7 +165,6 @@ def process_cloudflare_queue(cfg: dict):
     import boto3
     from PIL import Image
 
-    print("☁️ Connecting to Cloudflare R2...")
     s3 = boto3.client(
         "s3",
         endpoint_url=cfg["endpoint"],
@@ -187,50 +182,43 @@ def process_cloudflare_queue(cfg: dict):
         if key == "queue/" or not key.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
-        print(f"📥 Processing Image: {key}")
+        print(f"📥 Processing: {key}")
         try:
-            # 1. Download
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
-            # Check for custom prompt in metadata or use default hallucination prompt
+            # Extract prompt from metadata or fallback
             metadata = data.get("Metadata", {})
             prompt = metadata.get("prompt", "a cinematic photorealistic high-resolution 360 panoramic world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
-            # 2. Run Hallucination Pipeline
+            # Run Generation
             local_pano, local_mesh = generate_hallucinated_world(img, prompt, base_name)
             
-            # 3. Upload Results
-            print(f"📤 Uploading results for {base_name}...")
-            
-            # Upload Panorama
+            # Upload
+            print(f"📤 Uploading results...")
             with open(local_pano, "rb") as f:
                 s3.put_object(Bucket=cfg["bucket"], Key=f"output/{base_name}_panorama.png", Body=f)
-            
-            # Upload 3D PLY Scene
             with open(local_mesh, "rb") as f:
                 s3.put_object(Bucket=cfg["bucket"], Key=f"output/{base_name}_world.ply", Body=f)
 
-            # 4. Clean up queue
+            # Delete from queue
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"✅ SUCCESS: Generated world for {base_name}")
+            print(f"✅ Finished: {base_name}")
 
         except Exception as e:
-            print(f"❌ ERROR processing {key}: {str(e)}")
-            # Fail-safe move to failed folder
+            print(f"❌ ERROR: {str(e)}")
+            # Optional: Move to failed folder
             try:
-                failed_key = key.replace("queue/", "failed/", 1)
-                s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
+                s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=key.replace("queue/", "failed/"))
                 s3.delete_object(Bucket=cfg["bucket"], Key=key)
             except: pass
 
 # =========================================================
-# 4. ENTRYPOINT
+# 5. ENTRYPOINT
 # =========================================================
 @app.local_entrypoint()
 def main():
-    # Credentials from your R2 Storage configuration
     config = {
         "endpoint": "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
         "access_key": "3c33425ba6e5abbd3e63afab14dc8866",
