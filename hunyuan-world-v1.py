@@ -5,7 +5,7 @@ import io
 import gc
 
 # =========================================================
-# 1. IMAGE CONFIGURATION (Fixed for Flux & Hunyuan 1.0)
+# 1. IMAGE CONFIGURATION (Fixed for GroundingDINO Schema)
 # =========================================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -18,21 +18,20 @@ image = (
         "CC": "clang",                       
         "CXX": "clang++",
         "GIT_TERMINAL_PROMPT": "0",
-        # Ensure the repo root is in PYTHONPATH
-        "PYTHONPATH": "/root/HunyuanWorld"   
+        "PYTHONPATH": "/root/HunyuanWorld:/root/HunyuanWorld/hy3dworld"   
     })
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
         "libglib2.0-0", "wget", "libdraco-dev", 
         "ninja-build", "clang", "llvm"
     )
-    # Step 1: Install core build tools
     .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
     
-    # Step 2: Install PyTorch 2.4.1 (Fixes the Transformers warning)
-    .pip_install("torch==2.4.1", "torchvision", "torchaudio", extra_index_url="https://download.pytorch.org/whl/cu121")
+    # 🚨 CRITICAL FIX: Pinned to Torch 2.3.1 / Torchvision 0.18.1
+    # Torch 2.4+ breaks GroundingDINO's custom C++ NMS operator schemas.
+    .pip_install("torch==2.3.1", "torchvision==0.18.1", "torchaudio==2.3.1")
     
-    # Step 3: Install Diffusers 0.31.0 (Fixes FluxIPAdapterMixin error)
+    # Kept latest diffusers/transformers to prevent FluxIPAdapterMixin errors
     .pip_install(
         "diffusers>=0.31.0", 
         "transformers>=4.45.0", 
@@ -42,7 +41,6 @@ image = (
         "boto3", "segment-anything", "plyfile", "pycocotools"
     )
     
-    # Step 4: Build GroundingDINO and Clone 1.0
     .run_commands(
         "export PATH=/usr/local/cuda/bin:$PATH && "
         "pip install --no-build-isolation git+https://github.com/IDEA-Research/GroundingDINO.git",
@@ -61,17 +59,20 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     from PIL import Image
     
     ROOT = "/root/HunyuanWorld"
-    # Ensure the system looks in the correct nested folders
+    HY3DWORLD_PATH = os.path.join(ROOT, "hy3dworld")
+    
+    # Ensure the system looks in both the root and the nested module folder
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
-    
+    if HY3DWORLD_PATH not in sys.path:
+        sys.path.insert(0, HY3DWORLD_PATH)
+        
     os.chdir(ROOT)
 
-    # Weights Linker: Hunyuan 1.0 expects weights inside the repo directory
+    # Weights Linker
     def resolve_and_link_weights(volume_path="/weights", project_path=f"{ROOT}/weights"):
         print(f"🔍 Linking weights from Volume...")
         os.makedirs(project_path, exist_ok=True)
-        # These folder names must match exactly what you downloaded to your Volume
         mapping = ["flux", "hunyuan_world", "text_encoders", "annotators"]
         for folder in mapping:
             src = os.path.join(volume_path, folder)
@@ -82,8 +83,6 @@ def generate_hallucinated_world(input_image, prompt, base_name):
 
     resolve_and_link_weights()
 
-    # HUNYUAN 1.0 IMPORT FIX: 
-    # In the 1.0 repo, the 'models' folder is inside 'hy3dworld'.
     try:
         from hy3dworld.models.pano_gen_pipeline import HunyuanWorldPanoGenPipeline
         from hy3dworld.models.scene_gen_pipeline import HunyuanWorldSceneGenPipeline
@@ -102,7 +101,6 @@ def generate_hallucinated_world(input_image, prompt, base_name):
         device="cuda"
     )
     
-    # Critical for L4 24GB memory limit
     pano_pipe.enable_model_cpu_offload()
 
     with torch.inference_mode():
@@ -117,7 +115,6 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     pano_path = f"/tmp/{base_name}_pano.png"
     hallucinated_pano.save(pano_path)
 
-    # VRAM Clean
     del pano_pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -143,7 +140,6 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     output_ply = f"/tmp/{base_name}_world.ply"
     world_mesh.export(output_ply)
 
-    # Final Clean
     del scene_pipe
     gc.collect()
     torch.cuda.empty_cache()
