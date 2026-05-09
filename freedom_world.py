@@ -74,9 +74,11 @@ image = (
         "numpy==1.26.4",
         "pandas",
         "tqdm",
-        "pillow",
-        "boto3",
+        "pillow"
     )
+
+    # 🚀 THE FIX: Isolated Cache-Buster for Cloudflare connections
+    .pip_install("boto3")
 
     # =====================================================
     # 3D STACK
@@ -285,7 +287,7 @@ def generate_world(input_img, base_name, prompt):
 
     timeout=3600,
 
-    scaledown_window=60,
+    container_idle_timeout=60,
 
     # MODAL 2026 FIX
     max_containers=1
