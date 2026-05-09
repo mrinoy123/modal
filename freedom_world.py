@@ -15,7 +15,7 @@ weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=Tru
 cache_vol = modal.Volume.from_name("hyworld2-cache", create_if_missing=True)
 
 # =========================================================
-# IMAGE BUILD
+# IMAGE BUILD (Fixed Module Dependencies)
 # =========================================================
 image = (
     modal.Image.from_registry(
@@ -51,22 +51,25 @@ image = (
         "pygltflib", "jaxtyping", "boto3", "roma", "pyquaternion", "plyfile"
     )
     .run_commands(
+        "rm -rf /root/HYWorld",
         "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
         "cd /root/HYWorld && pip install -r requirements.txt || true"
     )
 )
 
 # =========================================================
-# GENERATION ENGINE (L4 Optimized)
+# GENERATION ENGINE (L4 Optimized with Smart Import)
 # =========================================================
 def generate_hallucinated_city(input_image, prompt, output_name):
     import torch
     from PIL import Image
+    import importlib
     
     ROOT = "/root/HYWorld"
     
     # 1. Resilient Linker
     def setup_weights(volume_path="/weights", target_path="/root/HYWorld/weights"):
+        print(f"Mapping Weights to {target_path}")
         os.makedirs(target_path, exist_ok=True)
         if not os.path.exists(volume_path): return
         for item in os.listdir(volume_path):
@@ -76,43 +79,68 @@ def generate_hallucinated_city(input_image, prompt, output_name):
                 except: pass
 
     setup_weights(volume_path="/weights", target_path=f"{ROOT}/weights")
+    
+    # Add ROOT and its subfolders to path to fix "ModuleNotFound"
     if ROOT not in sys.path: sys.path.insert(0, ROOT)
+    
+    # Add potential package locations (Tencent changes these between hyworld and hyworld2)
+    for folder in os.listdir(ROOT):
+        folder_path = os.path.join(ROOT, folder)
+        if os.path.isdir(folder_path) and folder.startswith("hyworld"):
+            if folder_path not in sys.path: sys.path.insert(0, folder_path)
+
     os.chdir(ROOT)
 
-    # 2. Pipeline Import
-    try:
-        from hyworld2.pipelines.pipeline_world import HunyuanWorldPipeline
-    except ImportError:
-        from hyworld2.world.pipeline import HunyuanWorldPipeline
-
-    # 3. Model Loading (VRAM Optimization)
-    model_path = f"{ROOT}/weights/HY-World-2.0"
-    print(f"Loading Hallucination Engine for L4 (24GB Mode)...")
+    # 2. Smart Pipeline Import
+    # This tries every possible Tencent import path for the Generative World pipeline
+    pipeline_class = None
+    import_errors = []
     
-    # Use float16 to save 50% VRAM immediately
-    pipe = HunyuanWorldPipeline.from_pretrained(
+    candidate_imports = [
+        ("hyworld.pipelines.pipeline_world", "HunyuanWorldPipeline"),
+        ("hyworld2.pipelines.pipeline_world", "HunyuanWorldPipeline"),
+        ("hyworld.inference", "HunyuanWorldPipeline"),
+        ("hyworld2.inference", "HunyuanWorldPipeline"),
+        ("pipelines.pipeline_world", "HunyuanWorldPipeline")
+    ]
+
+    for mod_path, cls_name in candidate_imports:
+        try:
+            module = importlib.import_module(mod_path)
+            pipeline_class = getattr(module, cls_name)
+            print(f"SUCCESS: Loaded pipeline from {mod_path}")
+            break
+        except Exception as e:
+            import_errors.append(f"{mod_path}: {str(e)}")
+
+    if not pipeline_class:
+        raise ImportError(f"Could not find HunyuanWorldPipeline. Errors: {'; '.join(import_errors)}")
+
+    # 3. Model Loading (VRAM Optimized for L4)
+    model_path = f"{ROOT}/weights/HY-World-2.0"
+    print(f"Loading Hallucination Engine (L4 24GB Optimization)...")
+    
+    # Use float16 to fit the 50GB engine into the L4
+    pipe = pipeline_class.from_pretrained(
         model_path, 
         torch_dtype=torch.float16,
         use_safetensors=True
     )
 
-    # CRITICAL: L4 Optimizations
+    # L4 Memory Management
     if torch.cuda.is_available():
-        # Moves model parts to GPU only when needed
+        # Sequential offloading is required for 50GB models on 24GB VRAM
         pipe.enable_model_cpu_offload() 
-        # Prevents VRAM spikes during image decoding
         if hasattr(pipe, "enable_vae_tiling"):
             pipe.enable_vae_tiling()
-        if hasattr(pipe, "enable_vae_slicing"):
-            pipe.enable_vae_slicing()
 
     # 4. Run Hallucination
-    print(f"--- Hallucinating City: {prompt} ---")
+    print(f"--- Hallucinating 360-Degree City: {prompt} ---")
     with torch.inference_mode():
         output = pipe(
             image=input_image,
             prompt=prompt,
-            num_inference_steps=50,
+            num_inference_steps=30, # Reduced steps for speed on L4
             guidance_scale=7.5,
             height=512,
             width=512
@@ -122,8 +150,8 @@ def generate_hallucinated_city(input_image, prompt, output_name):
     output_dir = "/tmp/final_output"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Search for output (the pipeline usually returns a directory path)
-    search_path = output if isinstance(output, str) else ROOT
+    # Locate assets (Recursive search for any produced 3D files)
+    search_path = output if isinstance(output, str) and os.path.exists(output) else ROOT
     all_files = glob.glob(os.path.join(search_path, "**/*"), recursive=True)
     glb_files = [f for f in all_files if f.endswith(".glb")]
     ply_files = [f for f in all_files if f.endswith("gaussians.ply")]
@@ -138,9 +166,17 @@ def generate_hallucinated_city(input_image, prompt, output_name):
         final_path = os.path.join(output_dir, f"{output_name}.glb")
         output.export_glb(final_path)
     else:
-        raise RuntimeError("No 3D asset found in generation output.")
+        # Check standard output location
+        fallback_output = os.path.join(ROOT, "outputs")
+        if os.path.exists(fallback_output):
+            fb_files = glob.glob(os.path.join(fallback_output, "**/*.glb"), recursive=True)
+            if fb_files:
+                final_path = os.path.join(output_dir, f"{output_name}.glb")
+                shutil.copy(fb_files[0], final_path)
+                return final_path
+        raise RuntimeError(f"No 3D asset found. Scanned: {len(all_files)} files.")
 
-    # Cleanup VRAM before next task
+    # Cleanup
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -152,7 +188,7 @@ def generate_hallucinated_city(input_image, prompt, output_name):
 # =========================================================
 @app.function(
     image=image,
-    gpu="L4", # Switched from A100 to L4 24GB
+    gpu="L4", 
     timeout=7200,
     volumes={"/weights": weights_vol, "/cache": cache_vol}
 )
@@ -175,12 +211,13 @@ def process_cloudflare_queue(cfg: dict):
         if key == "queue/" or not key.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
+        print(f"Processing File: {key}")
         try:
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
             metadata = data.get("Metadata", {})
-            prompt = metadata.get("prompt", "a detailed cinematic 3d city, futuristic style, 360 degree environment")
+            prompt = metadata.get("prompt", "a cinematic photorealistic 3d city, 360 environment")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
             local_file = generate_hallucinated_city(img, prompt, base_name)
@@ -197,10 +234,10 @@ def process_cloudflare_queue(cfg: dict):
                 )
 
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"SUCCESS: {output_key}")
+            print(f"SUCCESS: Generated {output_key}")
 
         except Exception as e:
-            print(f"ERROR: {str(e)}")
+            print(f"ERROR processing {key}: {str(e)}")
             try:
                 failed_key = key.replace("queue/", "failed/", 1)
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
