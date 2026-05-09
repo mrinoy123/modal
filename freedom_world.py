@@ -66,7 +66,6 @@ image = (
 # =========================================================
 def generate_world(input_image, prompt, output_name):
     import torch
-    import trimesh
     import numpy as np
     from PIL import Image
     
@@ -91,7 +90,6 @@ def generate_world(input_image, prompt, output_name):
     from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
     
     # 2. Load Model
-    # Note: Device placement is handled internally by WorldMirrorPipeline
     model_path = f"{ROOT}/weights/HY-World-2.0"
     print(f"Loading Model from {model_path}...")
     pipe = WorldMirrorPipeline.from_pretrained(model_path)
@@ -104,42 +102,31 @@ def generate_world(input_image, prompt, output_name):
     # 4. Run Inference
     print(f"--- Running HY-World Mirror Reconstruction ---")
     with torch.inference_mode():
-        # returns the output root directory (e.g., inference_output/...)
         output_root = pipe(temp_input_dir)
 
     # 5. Locate Result
-    # WorldMirror creates timestamped subdirectories. We need to find them.
     output_dir = "/tmp/final_output"
     os.makedirs(output_dir, exist_ok=True)
     final_glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
     print(f"Searching for 3D assets in: {output_root}")
     
-    # Search recursively for .glb or .ply files
     all_files = glob.glob(os.path.join(output_root, "**/*"), recursive=True)
     
     glb_files = [f for f in all_files if f.endswith(".glb")]
-    # WorldMirror specifically names its gaussian splats 'gaussians.ply'
     ply_files = [f for f in all_files if f.endswith("gaussians.ply") or f.endswith("points.ply")]
 
     if glb_files:
         print(f"Found GLB: {glb_files[0]}")
         shutil.copy(glb_files[0], final_glb_path)
     elif ply_files:
-        print(f"Found PLY: {ply_files[0]}. Exporting as Mesh...")
-        try:
-            pcd = trimesh.load(ply_files[0])
-            # If the result is a point cloud (standard for GSplat output), we wrap it for R2 upload
-            if isinstance(pcd, trimesh.points.PointCloud):
-                # World Generator usually generates huge point clouds. 
-                # We export the raw data if it can't be easily converted to a mesh.
-                pcd.export(final_glb_path.replace(".glb", ".ply"))
-                final_glb_path = final_glb_path.replace(".glb", ".ply")
-            else:
-                pcd.export(final_glb_path)
-        except Exception as e:
-            print(f"Meshing/Copy failed: {e}")
-            final_glb_path = ply_files[0] # Fallback to the original file
+        print(f"Found PLY: {ply_files[0]}. Safely copying raw file to preserve splat properties...")
+        
+        # CRITICAL FIX: We bypass trimesh entirely. Pure file copy to prevent stripping properties.
+        final_ply_path = final_glb_path.replace(".glb", ".ply")
+        shutil.copy(ply_files[0], final_ply_path)
+        final_glb_path = final_ply_path # Update the return path
+        
     else:
         raise RuntimeError(f"No 3D file (.glb or .ply) found in output directory: {output_root}")
 
