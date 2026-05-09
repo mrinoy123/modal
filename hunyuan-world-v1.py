@@ -7,6 +7,8 @@ import shutil
 import glob
 import subprocess
 
+
+
 # =========================================================
 # 1. IMAGE CONFIGURATION (Optimized for HW-1 + L4)
 # =========================================================
@@ -16,27 +18,36 @@ image = (
         "TORCH_CUDA_ARCH_LIST": "8.9", # L4 optimization
         "FORCE_CUDA": "1",
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
-        "PYTHONUNBUFFERED": "1"
+        "PYTHONUNBUFFERED": "1",
+        "CUDA_HOME": "/usr/local/cuda" # Crucial: Explicitly tells GroundingDINO where CUDA is
     })
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
-        "libglib2.0-0", "wget", "libdraco-dev"
+        "libglib2.0-0", "wget", "libdraco-dev", 
+        "ninja-build" # Added ninja to speed up and stabilize C++ CUDA compilation
     )
+    # Step 1: Update core Python build tools first to prevent environment bugs
+    .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
+    
+    # Step 2: Install PyTorch completely separately so it is globally available
+    .pip_install("torch==2.3.1", "torchvision")
+    
+    # Step 3: Install the rest of the HuggingFace and 3D dependencies
     .pip_install(
-        "torch==2.3.1", "torchvision", "transformers", "diffusers==0.30.0",
-        "accelerate", "sentencepiece", "huggingface_hub", "hf-transfer",
-        "opencv-python", "trimesh", "pillow", "einops", "omegaconf",
-        "scipy", "onnxruntime-gpu", "boto3", "segment-anything", "plyfile"
+        "transformers", "diffusers==0.30.0", "accelerate", "sentencepiece", 
+        "huggingface_hub", "hf-transfer", "opencv-python", "trimesh", 
+        "pillow", "einops", "omegaconf", "scipy", "onnxruntime-gpu", 
+        "boto3", "segment-anything", "plyfile"
     )
-    # Install GroundingDINO from source (Crucial for WorldGen)
+    # Step 4: Install GroundingDINO using --no-build-isolation
+    # This forces the installer to see the 'torch' installed in Step 2
     .run_commands(
-        "pip install git+https://github.com/IDEA-Research/GroundingDINO.git",
+        "pip install --no-build-isolation git+https://github.com/IDEA-Research/GroundingDINO.git",
         "rm -rf /root/HunyuanWorld && git clone --depth 1 https://github.com/tencent/HunyuanWorld-1.git /root/HunyuanWorld"
     )
 )
 
-app = modal.App("hyworld1-hallucination-engine", image=image)
-weights_vol = modal.Volume.from_name("weights-hy-world-1")
+
 
 # =========================================================
 # 2. GENERATION ENGINE (Hallucination + 3D Mapping)
