@@ -442,23 +442,22 @@ def process_cloudflare_queue(cfg: dict):
             print("FAILED")
             print(str(e))
 
+
+
+
+
 # =========================================================
 # ENTRYPOINT
 # =========================================================
 
 @app.local_entrypoint()
-
 def main():
-
+    
     config = {
-
-        "endpoint": "YOUR_R2_ENDPOINT",
-
-        "access_key": "YOUR_ACCESS_KEY",
-
-        "secret_key": "YOUR_SECRET_KEY",
-
-        "bucket": "YOUR_BUCKET"
+        "endpoint": "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
+        "access_key": "3c33425ba6e5abbd3e63afab14dc8866",
+        "secret_key": "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8",
+        "bucket": "video-asset-files-storage-workflow"
     }
 
     process_cloudflare_queue.remote(config)
