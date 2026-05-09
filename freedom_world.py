@@ -8,7 +8,7 @@ import shutil
 # =========================================================
 # APP CONFIGURATION
 # =========================================================
-app = modal.App("hyworld2-production-final")
+app = modal.App("hyworld2-production-fixed")
 
 # Volumes
 weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=True)
@@ -73,7 +73,7 @@ def generate_world(input_image, prompt, output_name):
     ROOT = "/root/HYWorld"
 
     # =====================================================
-    # RESILIENT LINKER (Kept as requested)
+    # RESILIENT LINKER
     # =====================================================
     def setup_resilient_linker(volume_path="/weights", target_path="/root/HYWorld/weights"):
         print(f"EXECUTING RESILIENT LINKER FROM {volume_path} TO {target_path}")
@@ -98,8 +98,6 @@ def generate_world(input_image, prompt, output_name):
         sys.path.insert(0, ROOT)
     os.chdir(ROOT)
 
-    print(f"--- Loading Hunyuan World 2.0 ---")
-
     # =====================================================
     # PIPELINE IMPORT
     # =====================================================
@@ -119,79 +117,86 @@ def generate_world(input_image, prompt, output_name):
             print(f"SUCCESS IMPORT: {module_name}.{class_name}")
             break
         except Exception as e:
-            print(f"Skipping {module_name}: {e}")
+            print(f"Skipping import {module_name}: {e}")
 
     if not pipeline_class:
         raise RuntimeError("Failed to import any HY-World pipeline.")
 
     # =====================================================
-    # MODEL LOADING (FIXED ARGUMENTS)
+    # MODEL LOADING
     # =====================================================
-    # Pointing to the specific subfolder linked by resilient linker
-    # Based on your logs, the weight folder is named HY-World-2.0
+    # The logs show weights are in /weights/HY-World-2.0
     model_path = f"{ROOT}/weights/HY-World-2.0"
     
-    try:
-        # First attempt: Simple path (common in HY-World 2.0)
-        pipe = pipeline_class.from_pretrained(model_path)
-    except TypeError:
-        # Fallback: Path with dtype if requested
-        pipe = pipeline_class.from_pretrained(model_path, torch_dtype=torch.float16)
+    print(f"--- Loading Model from: {model_path} ---")
     
-    # Ensure it's on GPU
+    # WorldMirror 2.0 from_pretrained typically takes the root folder
+    pipe = pipeline_class.from_pretrained(model_path)
+    
     if hasattr(pipe, "to"):
         pipe = pipe.to("cuda")
 
-    print(f"--- Generating World: {output_name} ---")
-    
     # =====================================================
     # INFERENCE
     # =====================================================
+    print(f"--- Generating World: {output_name} ---")
+    
     with torch.inference_mode():
         if class_name == "WorldMirrorPipeline":
-            # WorldMirror expects a directory containing the input image
-            temp_dir = f"/tmp/input_{output_name}"
-            os.makedirs(temp_dir, exist_ok=True)
-            input_image.save(os.path.join(temp_dir, "input.png"))
-            # The pipeline handles the generation process
-            output = pipe(temp_dir, prompt=prompt)
+            # WorldMirror is Image-to-World Reconstruction. 
+            # It does NOT accept 'prompt'. It accepts image path or directory.
+            temp_input_dir = f"/tmp/input_{output_name}"
+            os.makedirs(temp_input_dir, exist_ok=True)
+            img_path = os.path.join(temp_input_dir, "input.png")
+            input_image.save(img_path)
+            
+            # The pipeline usually returns the output directory path
+            output = pipe(temp_input_dir)
         else:
+            # Generic generator pipeline
             output = pipe(image=input_image, prompt=prompt)
 
     # =====================================================
-    # EXPORT LOGIC
+    # EXPORT & RETRIEVAL
     # =====================================================
-    output_dir = "/tmp/output"
+    output_dir = "/tmp/final_glb"
     os.makedirs(output_dir, exist_ok=True)
-    glb_path = os.path.join(output_dir, f"{output_name}.glb")
+    target_glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
-    # If output is a directory (common in WorldMirror)
+    # If the pipeline returned a path to a directory (standard for HY-World WorldMirror)
     if isinstance(output, str) and os.path.isdir(output):
+        print(f"Searching for GLB in output dir: {output}")
         found = False
-        for f in os.listdir(output):
-            if f.endswith(".glb"):
-                shutil.copy(os.path.join(output, f), glb_path)
-                found = True
-                break
+        # WorldMirror often creates subfolders like 'mesh' or 'reconstruction'
+        for root, dirs, files in os.walk(output):
+            for f in files:
+                if f.endswith(".glb"):
+                    shutil.copy(os.path.join(root, f), target_glb_path)
+                    found = True
+                    break
+            if found: break
+            
         if not found:
-            raise RuntimeError(f"No .glb found in output folder: {output}")
+            raise RuntimeError(f"Pipeline finished but no .glb was found in {output}")
+    
+    # If the pipeline returned an object with export capabilities
     elif hasattr(output, "export_glb"):
-        output.export_glb(glb_path)
+        output.export_glb(target_glb_path)
     elif isinstance(output, dict) and "mesh" in output:
-        output["mesh"].export(glb_path)
+        output["mesh"].export(target_glb_path)
     else:
-        # Final best-effort export
+        # Fallback for trimesh/list objects
         try:
-            output[0].export(glb_path)
+            output[0].export(target_glb_path)
         except:
-            output.export(glb_path)
+            output.export(target_glb_path)
 
     # Cleanup
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    return glb_path
+    return target_glb_path
 
 # =========================================================
 # MODAL WORKER
@@ -227,7 +232,7 @@ def process_cloudflare_queue(cfg: dict):
         if key == "queue/" or not key.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
-        print(f"Processing: {key}")
+        print(f"Processing File: {key}")
         try:
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
@@ -236,10 +241,10 @@ def process_cloudflare_queue(cfg: dict):
             prompt = metadata.get("prompt", "cinematic 3d world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
-            glb_local_path = generate_world(img, prompt, base_name)
+            local_glb = generate_world(img, prompt, base_name)
 
             output_key = f"output/{base_name}.glb"
-            with open(glb_local_path, "rb") as f:
+            with open(local_glb, "rb") as f:
                 s3.put_object(
                     Bucket=cfg["bucket"],
                     Key=output_key,
@@ -248,10 +253,10 @@ def process_cloudflare_queue(cfg: dict):
                 )
 
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"Successfully processed {base_name}")
+            print(f"SUCCESS: {base_name}")
 
         except Exception as e:
-            print(f"Error processing {key}: {str(e)}")
+            print(f"FAILED {key}: {str(e)}")
             failed_key = key.replace("queue/", "failed/", 1)
             try:
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
@@ -260,7 +265,7 @@ def process_cloudflare_queue(cfg: dict):
                 pass
 
 # =========================================================
-# ENTRYPOINT
+# LOCAL ENTRYPOINT
 # =========================================================
 @app.local_entrypoint()
 def main():
