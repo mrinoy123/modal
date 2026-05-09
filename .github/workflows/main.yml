@@ -1,14 +1,20 @@
 name: 🚀 Freedom Force 3D Factory
 
 on:
-  workflow_dispatch: # Allows manual trigger
-  push:
-    branches: [ main ] # Auto-updates the apps when you change code
+  workflow_dispatch:
+    inputs:
+      target_script:
+        description: 'Which part of the factory are we running?'
+        required: true
+        default: 'world'
+        type: choice
+        options:
+          - objects (factory.py)
+          - world (freedom_world.py)
 
 jobs:
-  deploy-factory:
+  execute-modal:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - name: 🛰️ Checkout Repository
         uses: actions/checkout@v4
@@ -19,15 +25,16 @@ jobs:
           python-version: '3.10'
 
       - name: 📦 Install Modal
-        run: |
-          python -m pip install --upgrade pip
-          pip install modal
+        run: pip install modal
 
-      - name: 🏭 Deploy 3D Factory Suite
+      - name: 🏭 Run Selected Script
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          # Deploying ensures n8n can trigger these anytime without you
-          modal deploy factory.py
-          modal deploy freedom_world.py
+          # Only runs the ONE file you select in the dropdown
+          if [ "${{ github.event.inputs.target_script }}" == "objects (factory.py)" ]; then
+            modal run factory.py
+          else
+            modal run freedom_world.py
+          fi
