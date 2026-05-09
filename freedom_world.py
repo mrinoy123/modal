@@ -287,7 +287,7 @@ def generate_world(input_img, base_name, prompt):
 
     timeout=3600,
 
-    container_idle_timeout=60,
+    scaledown_window=60,
 
     # MODAL 2026 FIX
     max_containers=1
