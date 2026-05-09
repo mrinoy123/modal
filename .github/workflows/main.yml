@@ -11,6 +11,7 @@ on:
         options:
           - objects (factory.py)
           - world (freedom_world.py)
+          - hallucinate (hunyuan-world-v1.py)
 
 jobs:
   execute-modal:
@@ -32,9 +33,22 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          # Isolation Logic: We only run the file you choose in the GitHub UI
-          if [ "${{ github.event.inputs.target_script }}" == "objects (factory.py)" ]; then
-            modal run factory.py
-          else
-            modal run freedom_world.py
-          fi
+          # Selection Logic to trigger the correct Modal engine
+          case "${{ github.event.inputs.target_script }}" in
+            "objects (factory.py)")
+              echo "🛠️ Launching Object Factory..."
+              modal run factory.py
+              ;;
+            "world (freedom_world.py)")
+              echo "🌍 Launching World Builder..."
+              modal run freedom_world.py
+              ;;
+            "hallucinate (hunyuan-world-v1.py)")
+              echo "✨ Launching HunyuanWorld v1 Hallucination Engine..."
+              modal run hunyuan-world-v1.py
+              ;;
+            *)
+              echo "❌ Error: Unknown script selection."
+              exit 1
+              ;;
+          esac
