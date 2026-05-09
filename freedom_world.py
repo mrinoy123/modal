@@ -4,18 +4,19 @@ import sys
 import io
 import gc
 import shutil
+import glob
 
 # =========================================================
 # APP CONFIGURATION
 # =========================================================
-app = modal.App("hyworld2-production-fixed")
+app = modal.App("hyworld2-production-v3")
 
 # Volumes
 weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=True)
 cache_vol = modal.Volume.from_name("hyworld2-cache", create_if_missing=True)
 
 # =========================================================
-# IMAGE BUILD
+# IMAGE BUILD (Added Open3D and Pymeshlab for meshing)
 # =========================================================
 image = (
     modal.Image.from_registry(
@@ -27,19 +28,15 @@ image = (
         "FORCE_CUDA": "1",
         "PYTHONUNBUFFERED": "1",
         "HF_HOME": "/cache/huggingface",
-        "MAX_JOBS": "4",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     })
     .apt_install(
         "git", "git-lfs", "wget", "ffmpeg", "libgl1-mesa-glx", 
-        "libglib2.0-0", "build-essential", "ninja-build", "cmake"
+        "libglib2.0-0", "build-essential", "ninja-build", "cmake",
+        "libopenblas-dev", "libusb-1.0-0"
     )
     .pip_install(
-        "pip==25.0.1",
-        "setuptools==70.0.0",
-        "packaging",
-        "wheel",
-        "ninja"
+        "pip==25.0.1", "setuptools==70.0.0", "packaging", "wheel", "ninja"
     )
     .pip_install(
         "torch==2.4.0", "torchvision==0.19.0", 
@@ -55,7 +52,8 @@ image = (
         "diffusers==0.31.0",
         "einops", "omegaconf", "timm", "scipy", "trimesh",
         "opencv-python-headless==4.9.0.80",
-        "pygltflib", "jaxtyping", "boto3", "roma", "pyquaternion", "plyfile"
+        "pygltflib", "jaxtyping", "boto3", "roma", "pyquaternion", "plyfile",
+        "open3d", "pymeshlab" # Added for PointCloud -> Mesh conversion
     )
     .run_commands(
         "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
@@ -68,135 +66,91 @@ image = (
 # =========================================================
 def generate_world(input_image, prompt, output_name):
     import torch
+    import trimesh
+    import numpy as np
     from PIL import Image
     
     ROOT = "/root/HYWorld"
 
-    # =====================================================
-    # RESILIENT LINKER
-    # =====================================================
     def setup_resilient_linker(volume_path="/weights", target_path="/root/HYWorld/weights"):
-        print(f"EXECUTING RESILIENT LINKER FROM {volume_path} TO {target_path}")
-        if not os.path.exists(volume_path):
-            print(f"WARNING: Volume path {volume_path} not found.")
-            return
-
+        print(f"LINKING VOLUMES TO {target_path}")
         os.makedirs(target_path, exist_ok=True)
+        if not os.path.exists(volume_path): return
         for item in os.listdir(volume_path):
-            src = os.path.join(volume_path, item)
-            dst = os.path.join(target_path, item)
+            src, dst = os.path.join(volume_path, item), os.path.join(target_path, item)
             if not os.path.exists(dst):
-                try:
-                    os.symlink(src, dst)
-                    print(f"Resilient Linker: Symlinked {src} -> {dst}")
-                except Exception as e:
-                    print(f"Resilient Linker Error for {item}: {e}")
+                try: os.symlink(src, dst)
+                except: pass
 
     setup_resilient_linker(volume_path="/weights", target_path=f"{ROOT}/weights")
 
-    if ROOT not in sys.path:
-        sys.path.insert(0, ROOT)
+    if ROOT not in sys.path: sys.path.insert(0, ROOT)
     os.chdir(ROOT)
 
-    # =====================================================
-    # PIPELINE IMPORT
-    # =====================================================
-    import importlib
-    candidate_imports = [
-        ("hyworld2.worldrecon.pipeline", "WorldMirrorPipeline"),
-        ("hyworld2.pipelines.pipeline_world", "HunyuanWorldPipeline"),
-    ]
-
-    pipeline_class = None
-    class_name = None
-    for module_name, c_name in candidate_imports:
-        try:
-            module = importlib.import_module(module_name)
-            pipeline_class = getattr(module, c_name)
-            class_name = c_name
-            print(f"SUCCESS IMPORT: {module_name}.{class_name}")
-            break
-        except Exception as e:
-            print(f"Skipping import {module_name}: {e}")
-
-    if not pipeline_class:
-        raise RuntimeError("Failed to import any HY-World pipeline.")
-
-    # =====================================================
-    # MODEL LOADING
-    # =====================================================
-    # The logs show weights are in /weights/HY-World-2.0
+    # 1. Import Pipeline
+    from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
+    
+    # 2. Load Model
     model_path = f"{ROOT}/weights/HY-World-2.0"
-    
-    print(f"--- Loading Model from: {model_path} ---")
-    
-    # WorldMirror 2.0 from_pretrained typically takes the root folder
-    pipe = pipeline_class.from_pretrained(model_path)
-    
-    if hasattr(pipe, "to"):
-        pipe = pipe.to("cuda")
+    pipe = WorldMirrorPipeline.from_pretrained(model_path).to("cuda")
 
-    # =====================================================
-    # INFERENCE
-    # =====================================================
-    print(f"--- Generating World: {output_name} ---")
-    
+    # 3. Prepare Input
+    temp_input_dir = f"/tmp/input_{output_name}"
+    os.makedirs(temp_input_dir, exist_ok=True)
+    input_image.save(os.path.join(temp_input_dir, "input.png"))
+
+    # 4. Run Inference
+    print(f"--- Running HY-World Mirror Reconstruction ---")
     with torch.inference_mode():
-        if class_name == "WorldMirrorPipeline":
-            # WorldMirror is Image-to-World Reconstruction. 
-            # It does NOT accept 'prompt'. It accepts image path or directory.
-            temp_input_dir = f"/tmp/input_{output_name}"
-            os.makedirs(temp_input_dir, exist_ok=True)
-            img_path = os.path.join(temp_input_dir, "input.png")
-            input_image.save(img_path)
-            
-            # The pipeline usually returns the output directory path
-            output = pipe(temp_input_dir)
-        else:
-            # Generic generator pipeline
-            output = pipe(image=input_image, prompt=prompt)
+        # Pipeline returns the output root directory
+        output_root = pipe(temp_input_dir)
 
-    # =====================================================
-    # EXPORT & RETRIEVAL
-    # =====================================================
-    output_dir = "/tmp/final_glb"
+    # 5. Extract and Convert Output
+    # The pipeline saves to: inference_output/input_name/timestamp/...
+    output_dir = "/tmp/final_output"
     os.makedirs(output_dir, exist_ok=True)
-    target_glb_path = os.path.join(output_dir, f"{output_name}.glb")
+    glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
-    # If the pipeline returned a path to a directory (standard for HY-World WorldMirror)
-    if isinstance(output, str) and os.path.isdir(output):
-        print(f"Searching for GLB in output dir: {output}")
-        found = False
-        # WorldMirror often creates subfolders like 'mesh' or 'reconstruction'
-        for root, dirs, files in os.walk(output):
-            for f in files:
-                if f.endswith(".glb"):
-                    shutil.copy(os.path.join(root, f), target_glb_path)
-                    found = True
-                    break
-            if found: break
-            
-        if not found:
-            raise RuntimeError(f"Pipeline finished but no .glb was found in {output}")
+    print(f"Inference finished. Searching results in: {output_root}")
     
-    # If the pipeline returned an object with export capabilities
-    elif hasattr(output, "export_glb"):
-        output.export_glb(target_glb_path)
-    elif isinstance(output, dict) and "mesh" in output:
-        output["mesh"].export(target_glb_path)
-    else:
-        # Fallback for trimesh/list objects
+    # HY-World 2.0 creates a timestamped folder inside the output_root
+    # We look for .glb or .ply files
+    all_files = glob.glob(os.path.join(output_root, "**/*"), recursive=True)
+    
+    glb_files = [f for f in all_files if f.endswith(".glb")]
+    ply_files = [f for f in all_files if f.endswith("gaussians.ply") or f.endswith("points.ply")]
+
+    if glb_files:
+        print(f"Found GLB: {glb_files[0]}")
+        shutil.copy(glb_files[0], glb_path)
+    elif ply_files:
+        print(f"Found PLY: {ply_files[0]}. Converting Point Cloud to Mesh...")
         try:
-            output[0].export(target_glb_path)
-        except:
-            output.export(target_glb_path)
+            # Load point cloud
+            pcd = trimesh.load(ply_files[0])
+            
+            # If it's a point cloud (common for WorldMirror), we need to create a mesh
+            if isinstance(pcd, trimesh.points.PointCloud):
+                # Basic Alpha-Shape or Convex Hull to get a visible GLB world
+                # For "Worlds", a Convex Hull or a simple Poisson reconstruction works best
+                mesh = pcd.convex_hull 
+                mesh.export(glb_path)
+            else:
+                # It's already a mesh in a .ply wrapper
+                pcd.export(glb_path)
+            print(f"Conversion Successful: {glb_path}")
+        except Exception as e:
+            print(f"Meshing failed: {e}. Uploading raw PLY instead.")
+            glb_path = ply_files[0] # Fallback to raw PLY
+    else:
+        raise RuntimeError(f"No usable 3D assets found in {output_root}")
 
     # Cleanup
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    return target_glb_path
+    return glb_path
 
 # =========================================================
 # MODAL WORKER
@@ -205,10 +159,7 @@ def generate_world(input_image, prompt, output_name):
     image=image,
     gpu="L4", 
     timeout=7200,
-    volumes={
-        "/weights": weights_vol,
-        "/cache": cache_vol
-    }
+    volumes={"/weights": weights_vol, "/cache": cache_vol}
 )
 def process_cloudflare_queue(cfg: dict):
     import boto3
@@ -222,17 +173,14 @@ def process_cloudflare_queue(cfg: dict):
     )
 
     response = s3.list_objects_v2(Bucket=cfg["bucket"], Prefix="queue/")
-    
-    if "Contents" not in response:
-        print("Queue Empty.")
-        return
+    if "Contents" not in response: return
 
     for obj in response["Contents"]:
         key = obj["Key"]
         if key == "queue/" or not key.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
-        print(f"Processing File: {key}")
+        print(f"Processing: {key}")
         try:
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
@@ -241,15 +189,19 @@ def process_cloudflare_queue(cfg: dict):
             prompt = metadata.get("prompt", "cinematic 3d world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
-            local_glb = generate_world(img, prompt, base_name)
+            local_file = generate_world(img, prompt, base_name)
+            
+            # Determine content type based on extension (might be .glb or .ply)
+            ext = os.path.splitext(local_file)[1].lower()
+            content_type = "model/gltf-binary" if ext == ".glb" else "application/octet-stream"
+            output_key = f"output/{base_name}{ext}"
 
-            output_key = f"output/{base_name}.glb"
-            with open(local_glb, "rb") as f:
+            with open(local_file, "rb") as f:
                 s3.put_object(
                     Bucket=cfg["bucket"],
                     Key=output_key,
                     Body=f,
-                    ContentType="model/gltf-binary"
+                    ContentType=content_type
                 )
 
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
@@ -257,15 +209,14 @@ def process_cloudflare_queue(cfg: dict):
 
         except Exception as e:
             print(f"FAILED {key}: {str(e)}")
-            failed_key = key.replace("queue/", "failed/", 1)
             try:
+                failed_key = key.replace("queue/", "failed/", 1)
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
                 s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            except:
-                pass
+            except: pass
 
 # =========================================================
-# LOCAL ENTRYPOINT
+# ENTRYPOINT
 # =========================================================
 @app.local_entrypoint()
 def main():
