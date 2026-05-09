@@ -5,9 +5,8 @@ import io
 import gc
 
 # =========================================================
-# 1. IMAGE CONFIGURATION
+# 1. IMAGE CONFIGURATION (Fixed for Flux & Hunyuan 1.0)
 # =========================================================
-# We explicitly set PYTHONPATH so the container knows where the 'models' folder is.
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
     .env({
@@ -19,27 +18,35 @@ image = (
         "CC": "clang",                       
         "CXX": "clang++",
         "GIT_TERMINAL_PROMPT": "0",
-        # CRITICAL FIX: Ensure both ROOT and hy3dworld are findable globally
-        "PYTHONPATH": "/root/HunyuanWorld:/root/HunyuanWorld/hy3dworld"   
+        # Ensure the repo root is in PYTHONPATH
+        "PYTHONPATH": "/root/HunyuanWorld"   
     })
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
         "libglib2.0-0", "wget", "libdraco-dev", 
         "ninja-build", "clang", "llvm"
     )
+    # Step 1: Install core build tools
     .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
-    .pip_install("torch==2.3.1", "torchvision", "torchaudio")
+    
+    # Step 2: Install PyTorch 2.4.1 (Fixes the Transformers warning)
+    .pip_install("torch==2.4.1", "torchvision", "torchaudio", extra_index_url="https://download.pytorch.org/whl/cu121")
+    
+    # Step 3: Install Diffusers 0.31.0 (Fixes FluxIPAdapterMixin error)
     .pip_install(
-        "transformers", "diffusers==0.30.0", "accelerate", "sentencepiece", 
+        "diffusers>=0.31.0", 
+        "transformers>=4.45.0", 
+        "accelerate", "sentencepiece", 
         "huggingface_hub", "hf-transfer", "opencv-python", "trimesh", 
         "pillow", "einops", "omegaconf", "scipy", "onnxruntime-gpu", 
         "boto3", "segment-anything", "plyfile", "pycocotools"
     )
+    
+    # Step 4: Build GroundingDINO and Clone 1.0
     .run_commands(
         "export PATH=/usr/local/cuda/bin:$PATH && "
         "pip install --no-build-isolation git+https://github.com/IDEA-Research/GroundingDINO.git",
-        "git clone --depth 1 https://github.com/Tencent-Hunyuan/HunyuanWorld-1.0.git /root/HunyuanWorld",
-        "touch /root/HunyuanWorld/__init__.py" # Ensure it's treated as a package
+        "git clone --depth 1 https://github.com/Tencent-Hunyuan/HunyuanWorld-1.0.git /root/HunyuanWorld"
     )
 )
 
@@ -54,20 +61,17 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     from PIL import Image
     
     ROOT = "/root/HunyuanWorld"
-    HY3DWORLD_PATH = os.path.join(ROOT, "hy3dworld")
-    
-    # 🚨 CRITICAL FIX: Add BOTH the root and hy3dworld paths to sys.path
+    # Ensure the system looks in the correct nested folders
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
-    if HY3DWORLD_PATH not in sys.path:
-        sys.path.insert(0, HY3DWORLD_PATH)
     
     os.chdir(ROOT)
 
-    # Weights Linker
+    # Weights Linker: Hunyuan 1.0 expects weights inside the repo directory
     def resolve_and_link_weights(volume_path="/weights", project_path=f"{ROOT}/weights"):
         print(f"🔍 Linking weights from Volume...")
         os.makedirs(project_path, exist_ok=True)
+        # These folder names must match exactly what you downloaded to your Volume
         mapping = ["flux", "hunyuan_world", "text_encoders", "annotators"]
         for folder in mapping:
             src = os.path.join(volume_path, folder)
@@ -78,19 +82,18 @@ def generate_hallucinated_world(input_image, prompt, base_name):
 
     resolve_and_link_weights()
 
-    # Deferred imports to ensure sys.path is respected
+    # HUNYUAN 1.0 IMPORT FIX: 
+    # In the 1.0 repo, the 'models' folder is inside 'hy3dworld'.
     try:
-        from models.pano_gen_pipeline import HunyuanWorldPanoGenPipeline
-        from models.scene_gen_pipeline import HunyuanWorldSceneGenPipeline
+        from hy3dworld.models.pano_gen_pipeline import HunyuanWorldPanoGenPipeline
+        from hy3dworld.models.scene_gen_pipeline import HunyuanWorldSceneGenPipeline
     except ImportError as e:
         print(f"❌ Import Failure: {e}")
-        print(f"Current sys.path: {sys.path}")
-        print(f"Files in ROOT: {os.listdir(ROOT)}")
-        print(f"Files in HY3DWORLD: {os.listdir(HY3DWORLD_PATH) if os.path.exists(HY3DWORLD_PATH) else 'Not Found'}")
+        print(f"Path Debug - sys.path: {sys.path}")
         raise e
 
-    # STAGE 1: PanoGen
-    print("🚀 [Stage 1] Generating 360 Panorama...")
+    # STAGE 1: PanoGen (Hallucinate World)
+    print("🚀 [Stage 1] Hallucinating 360 Panorama...")
     pano_pipe = HunyuanWorldPanoGenPipeline.from_pretrained(
         f"{ROOT}/weights/hunyuan_world",
         flux_model_path=f"{ROOT}/weights/flux",
@@ -98,6 +101,8 @@ def generate_hallucinated_world(input_image, prompt, base_name):
         torch_dtype=torch.float16,
         device="cuda"
     )
+    
+    # Critical for L4 24GB memory limit
     pano_pipe.enable_model_cpu_offload()
 
     with torch.inference_mode():
@@ -112,13 +117,13 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     pano_path = f"/tmp/{base_name}_pano.png"
     hallucinated_pano.save(pano_path)
 
-    # Cleanup VRAM
+    # VRAM Clean
     del pano_pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    # STAGE 2: SceneGen
-    print("🚀 [Stage 2] Building 3D Scene...")
+    # STAGE 2: SceneGen (Panorama to 3D)
+    print("🚀 [Stage 2] Building 3D Mesh...")
     scene_pipe = HunyuanWorldSceneGenPipeline(
         model_root=f"{ROOT}/weights/hunyuan_world",
         moge_path=f"{ROOT}/weights/annotators/moge",
@@ -138,6 +143,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     output_ply = f"/tmp/{base_name}_world.ply"
     world_mesh.export(output_ply)
 
+    # Final Clean
     del scene_pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -157,7 +163,6 @@ def process_cloudflare_queue(cfg: dict):
     import boto3
     from PIL import Image
 
-    print("☁️ Initializing Cloudflare R2 Connection...")
     s3 = boto3.client(
         "s3",
         endpoint_url=cfg["endpoint"],
@@ -186,7 +191,7 @@ def process_cloudflare_queue(cfg: dict):
 
             local_pano, local_mesh = generate_hallucinated_world(img, prompt, base_name)
             
-            print(f"📤 Uploading results for {base_name}...")
+            print(f"📤 Uploading results...")
             with open(local_pano, "rb") as f:
                 s3.put_object(Bucket=cfg["bucket"], Key=f"output/{base_name}_panorama.png", Body=f)
             with open(local_mesh, "rb") as f:
@@ -196,7 +201,7 @@ def process_cloudflare_queue(cfg: dict):
             print(f"✅ COMPLETED: {base_name}")
 
         except Exception as e:
-            print(f"❌ FAILED {key}: {str(e)}")
+            print(f"❌ ERROR: {str(e)}")
             try:
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=key.replace("queue/", "failed/"))
                 s3.delete_object(Bucket=cfg["bucket"], Key=key)
