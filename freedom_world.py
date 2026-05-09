@@ -3,18 +3,30 @@ import os
 import sys
 import io
 import gc
+import subprocess
 
 # =========================================================
-# MODAL APP & STORAGE
+# APP
 # =========================================================
 
-app = modal.App("hyworld-2-0-production")
-
-weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=True)
-cache_vol = modal.Volume.from_name("hyworld-cache", create_if_missing=True)
+app = modal.App("hyworld-2-production")
 
 # =========================================================
-# IMAGE DEFINITION (FIXED VERSION MISMATCH)
+# VOLUMES
+# =========================================================
+
+weights_vol = modal.Volume.from_name(
+    "weights-hyworld2",
+    create_if_missing=True
+)
+
+cache_vol = modal.Volume.from_name(
+    "hyworld-cache",
+    create_if_missing=True
+)
+
+# =========================================================
+# IMAGE
 # =========================================================
 
 image = (
@@ -22,129 +34,250 @@ image = (
         "nvidia/cuda:12.4.1-devel-ubuntu22.04",
         add_python="3.10"
     )
+
+    # -----------------------------------------------------
+    # ENV
+    # -----------------------------------------------------
+
     .env({
         "CUDA_HOME": "/usr/local/cuda",
-        "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
-        "TORCH_CUDA_ARCH_LIST": "8.9", # Optimized for L4/A10G
         "FORCE_CUDA": "1",
+        "TORCH_CUDA_ARCH_LIST": "8.9",
         "MAX_JOBS": "4",
-        "PIP_NO_CACHE_DIR": "1",
         "PYTHONUNBUFFERED": "1",
+        "PIP_NO_CACHE_DIR": "1",
+        "HF_HOME": "/cache/huggingface",
+        "TRANSFORMERS_CACHE": "/cache/huggingface",
     })
+
+    # -----------------------------------------------------
+    # SYSTEM
+    # -----------------------------------------------------
+
     .apt_install(
-        "git", "wget", "ffmpeg", "build-essential", "clang", "cmake", 
-        "ninja-build", "pkg-config", "libgl1-mesa-glx", "libglib2.0-0", 
-        "libsm6", "libxext6", "libxrender1", "libgomp1", "libopenblas-dev"
+        "git",
+        "git-lfs",
+        "wget",
+        "ffmpeg",
+        "build-essential",
+        "clang",
+        "cmake",
+        "ninja-build",
+        "pkg-config",
+        "libgl1-mesa-glx",
+        "libglib2.0-0",
+        "libsm6",
+        "libxext6",
+        "libxrender1",
+        "libgomp1",
+        "libopenblas-dev"
     )
-    .pip_install("setuptools", "wheel", "packaging", "ninja")
-    # 1. INSTALL STABLE TORCH FOR CUDA 12.4 FIRST
+
+    # -----------------------------------------------------
+    # PYTHON BUILD TOOLS
+    # -----------------------------------------------------
+
+    .pip_install(
+        "setuptools==69.5.1",
+        "wheel",
+        "packaging",
+        "ninja"
+    )
+
+    # -----------------------------------------------------
+    # TORCH FIRST
+    # -----------------------------------------------------
+
     .pip_install(
         "torch==2.4.0",
         "torchvision==0.19.0",
         "torchaudio==2.4.0",
         index_url="https://download.pytorch.org/whl/cu124"
     )
-    # 2. INSTALL PRE-COMPILED FLASH-ATTN (Bypasses the "HTTP 404" and "CUDA mismatch" error)
+
+    # -----------------------------------------------------
+    # IMPORTANT
+    # FIX NUMPY ABI
+    # -----------------------------------------------------
+
     .run_commands(
-        "pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/flash_attn-2.6.3+cu124torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+        "pip uninstall -y numpy",
+        "pip install numpy==1.26.4"
     )
-    # 3. INSTALL PRE-COMPILED GSPLAT
+
+    # -----------------------------------------------------
+    # FLASH ATTN
+    # BUILD FROM SOURCE
+    # -----------------------------------------------------
+
     .run_commands(
-        "pip install gsplat==1.4.0 --index-url https://docs.gsplat.ai/whl/pt24cu124"
+        "pip install flash-attn --no-build-isolation"
     )
-    # 4. INSTALL REMAINING AI TOOLS
+
+    # -----------------------------------------------------
+    # GSPLAT
+    # -----------------------------------------------------
+
+    .run_commands(
+        "pip install gsplat==1.5.3"
+    )
+
+    # -----------------------------------------------------
+    # AI LIBRARIES
+    # -----------------------------------------------------
+
     .pip_install(
-        "numpy==1.26.4", "scipy", "pandas", "tqdm", "pillow", "opencv-python",
-        "imageio", "einops", "sentencepiece", "omegaconf", "safetensors",
-        "accelerate==1.1.1", "transformers==4.46.3", "diffusers==0.31.0",
-        "huggingface_hub", "timm", "rich", "jaxtyping", "open3d==0.18.0",
-        "trimesh", "pygltflib", "pymeshlab==2022.2.post3", "boto3==1.34.131"
+        "transformers==4.46.3",
+        "accelerate==1.1.1",
+        "diffusers==0.31.0",
+        "safetensors",
+        "sentencepiece",
+        "einops",
+        "omegaconf",
+        "opencv-python",
+        "imageio",
+        "scipy",
+        "pandas",
+        "tqdm",
+        "pillow",
+        "open3d==0.18.0",
+        "trimesh",
+        "pygltflib",
+        "pymeshlab==2022.2.post3",
+        "boto3==1.34.131",
+        "botocore==1.34.131",
+        "jaxtyping",
+        "rich",
+        "huggingface_hub"
     )
-    # 5. CLONE REPO
+
+    # -----------------------------------------------------
+    # CLONE HY-WORLD
+    # -----------------------------------------------------
+
     .run_commands(
-        "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HunyuanWorld || true"
+        """
+        cd /root && \
+        rm -rf HY-World && \
+        git clone https://github.com/Tencent/Hunyuan3D-2.git HY-World
+        """
     )
 )
 
 # =========================================================
-# GENERATOR LOGIC
+# VALIDATE REPO
+# =========================================================
+
+def validate_repo():
+
+    root = "/root/HY-World"
+
+    if not os.path.exists(root):
+        raise Exception("HY-World repo missing.")
+
+    print("Repo validated.")
+
+    print("Repo files:")
+    print(os.listdir(root))
+
+# =========================================================
+# GENERATOR
 # =========================================================
 
 def generate_world(input_img, base_name, prompt):
+
     import torch
 
-    # FIRE LINKER: Map volume weights to where the repo expects them
-    def setup_resilient_linker(volume_path="/weights"):
-        target_path = "/root/HunyuanWorld/weights"
-        if os.path.exists(volume_path):
-            os.makedirs(target_path, exist_ok=True)
-            for item in os.listdir(volume_path):
-                src = os.path.join(volume_path, item)
-                dst = os.path.join(target_path, item)
-                if not os.path.exists(dst):
-                    try:
-                        os.symlink(src, dst)
-                        print(f"Linked: {item}")
-                    except: pass
+    validate_repo()
 
-    setup_resilient_linker()
+    # -----------------------------------------------------
+    # CUDA CHECK
+    # -----------------------------------------------------
 
     if not torch.cuda.is_available():
-        raise RuntimeError("GPU hardware not found.")
+        raise RuntimeError("CUDA unavailable.")
 
-    # REPO SETUP
-    CODE_ROOT = "/root/HunyuanWorld"
+    # -----------------------------------------------------
+    # PERFORMANCE
+    # -----------------------------------------------------
+
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_math_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+    # -----------------------------------------------------
+    # PATHS
+    # -----------------------------------------------------
+
+    CODE_ROOT = "/root/HY-World"
+
     if CODE_ROOT not in sys.path:
         sys.path.insert(0, CODE_ROOT)
+
     os.chdir(CODE_ROOT)
 
-    # DYNAMIC PIPELINE LOADING
+    # -----------------------------------------------------
+    # IMPORTS
+    # -----------------------------------------------------
+
     try:
-        # HunyuanWorld 2.0 structure
-        from hyworld.pipelines import HYWorldPipeline
-        print("Loaded HYWorldPipeline (2.0)")
-    except ImportError:
-        try:
-            from hyworld2.worldrecon.pipeline import WorldMirrorPipeline as HYWorldPipeline
-            print("Loaded WorldMirrorPipeline (2.0 Fallback)")
-        except ImportError:
-            raise Exception("Could not locate HY-World-2.0 Pipeline classes. Check your repo structure.")
 
-    from hyworld.utils.meshing import splat_to_glb
+        from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
+    except Exception as e:
+        raise Exception(f"Pipeline import failed: {e}")
+
+    # -----------------------------------------------------
     # LOAD MODEL
-    print("Loading Weights...")
-    pipeline = HYWorldPipeline.from_pretrained(
-        CODE_ROOT, # Assumes weights are linked into /weights subfolder of repo
-        device="cuda",
-        torch_dtype=torch.bfloat16
+    # -----------------------------------------------------
+
+    print("Loading HY-World pipeline...")
+
+    pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+        "tencent/Hunyuan3D-2",
+        device="cuda"
     )
 
-    # INFERENCE
-    print(f"Generating World: {prompt}")
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+    # -----------------------------------------------------
+    # GENERATE
+    # -----------------------------------------------------
+
+    print(f"Generating: {prompt}")
+
+    with torch.inference_mode():
+
         result = pipeline(
             image=input_img,
-            prompt=prompt,
-            negative_prompt="blurry, low quality, distorted",
-            target_resolution=1024,
-            output_type="3dgs"
+            num_inference_steps=30,
+            guidance_scale=5.5
         )
 
+    # -----------------------------------------------------
     # EXPORT
-    output_dir = "/tmp/hyworld_output"
+    # -----------------------------------------------------
+
+    output_dir = "/tmp/output"
+
     os.makedirs(output_dir, exist_ok=True)
-    glb_path = os.path.join(output_dir, f"{base_name}.glb")
 
-    print("Converting Splat to GLB...")
-    splat_to_glb(result, output_path=glb_path, simplify_ratio=0.8, texture_size=2048)
+    output_path = os.path.join(
+        output_dir,
+        f"{base_name}.glb"
+    )
 
-    # MEMORY CLEANUP
+    result[0].export(output_path)
+
+    # -----------------------------------------------------
+    # CLEANUP
+    # -----------------------------------------------------
+
     del pipeline
+
     gc.collect()
+
     torch.cuda.empty_cache()
 
-    return glb_path
+    return output_path
 
 # =========================================================
 # WORKER
@@ -154,11 +287,20 @@ def generate_world(input_img, base_name, prompt):
     image=image,
     gpu="L4",
     timeout=3600,
-    volumes={"/weights": weights_vol, "/cache": cache_vol}
+    max_containers=1,
+    volumes={
+        "/weights": weights_vol,
+        "/cache": cache_vol
+    }
 )
 def process_cloudflare_queue(cfg: dict):
+
     import boto3
     from PIL import Image
+
+    # -----------------------------------------------------
+    # S3
+    # -----------------------------------------------------
 
     s3 = boto3.client(
         "s3",
@@ -167,28 +309,78 @@ def process_cloudflare_queue(cfg: dict):
         aws_secret_access_key=cfg["secret_key"]
     )
 
-    response = s3.list_objects_v2(Bucket=cfg["bucket"], Prefix="queue/")
+    # -----------------------------------------------------
+    # QUEUE
+    # -----------------------------------------------------
+
+    response = s3.list_objects_v2(
+        Bucket=cfg["bucket"],
+        Prefix="queue/"
+    )
+
     if "Contents" not in response:
-        print("Queue Empty")
+        print("Queue empty.")
         return
 
+    # -----------------------------------------------------
+    # LOOP
+    # -----------------------------------------------------
+
     for obj in response["Contents"]:
+
         key = obj["Key"]
-        if key.endswith("/") or not key.lower().endswith((".png", ".jpg", ".jpeg")):
+
+        if key.endswith("/"):
             continue
 
-        print(f"--- Processing: {key} ---")
+        if not key.lower().endswith((".png", ".jpg", ".jpeg")):
+            continue
+
+        print(f"PROCESSING: {key}")
+
         try:
-            data = s3.get_object(Bucket=cfg["bucket"], Key=key)
-            img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
-            
-            prompt = data.get("Metadata", {}).get("prompt", "cinematic nature world")
-            base_name = os.path.splitext(os.path.basename(key))[0]
 
-            glb_path = generate_world(img, base_name, prompt)
+            # -------------------------------------------------
+            # DOWNLOAD
+            # -------------------------------------------------
 
-            # Upload Result
+            data = s3.get_object(
+                Bucket=cfg["bucket"],
+                Key=key
+            )
+
+            img = Image.open(
+                io.BytesIO(data["Body"].read())
+            ).convert("RGB")
+
+            prompt = data.get(
+                "Metadata",
+                {}
+            ).get(
+                "prompt",
+                "cinematic environment"
+            )
+
+            base_name = os.path.splitext(
+                os.path.basename(key)
+            )[0]
+
+            # -------------------------------------------------
+            # GENERATE
+            # -------------------------------------------------
+
+            glb_path = generate_world(
+                img,
+                base_name,
+                prompt
+            )
+
+            # -------------------------------------------------
+            # UPLOAD
+            # -------------------------------------------------
+
             with open(glb_path, "rb") as f:
+
                 s3.put_object(
                     Bucket=cfg["bucket"],
                     Key=f"output/{base_name}.glb",
@@ -196,18 +388,47 @@ def process_cloudflare_queue(cfg: dict):
                     ContentType="model/gltf-binary"
                 )
 
-            s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"--- Success: {key} ---")
+            # -------------------------------------------------
+            # DELETE SOURCE
+            # -------------------------------------------------
+
+            s3.delete_object(
+                Bucket=cfg["bucket"],
+                Key=key
+            )
+
+            print(f"SUCCESS: {key}")
 
         except Exception as e:
-            print(f"Error on {key}: {e}")
-            # Optional: move to failed/ folder
-            s3.copy_object(
-                Bucket=cfg["bucket"],
-                CopySource={'Bucket': cfg["bucket"], 'Key': key},
-                Key=key.replace("queue/", "failed/", 1)
-            )
-            s3.delete_object(Bucket=cfg["bucket"], Key=key)
+
+            print(f"FAILED: {key}")
+            print(str(e))
+
+            try:
+
+                failed_key = key.replace(
+                    "queue/",
+                    "failed/",
+                    1
+                )
+
+                s3.copy_object(
+                    Bucket=cfg["bucket"],
+                    CopySource={
+                        "Bucket": cfg["bucket"],
+                        "Key": key
+                    },
+                    Key=failed_key
+                )
+
+                s3.delete_object(
+                    Bucket=cfg["bucket"],
+                    Key=key
+                )
+
+            except Exception as move_error:
+
+                print(f"Failed moving object: {move_error}")
 
     cache_vol.commit()
 
@@ -217,10 +438,12 @@ def process_cloudflare_queue(cfg: dict):
 
 @app.local_entrypoint()
 def main():
+
     config = {
-        "endpoint": "https://4d91f4d3d0366568a54ffa32ffcb7bf4.r2.cloudflarestorage.com",
-        "access_key": "3c33425ba6e5abbd3e63afab14dc8866",
-        "secret_key": "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8",
-        "bucket": "video-asset-files-storage-workflow"
+        "endpoint": "https://YOUR-ENDPOINT",
+        "access_key": "YOUR-KEY",
+        "secret_key": "YOUR-SECRET",
+        "bucket": "YOUR-BUCKET"
     }
+
     process_cloudflare_queue.remote(config)
