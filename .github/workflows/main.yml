@@ -1,13 +1,14 @@
 name: 🚀 Freedom Force 3D Factory
 
 on:
-  # Allows you to click a button to start the factory manually
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual trigger
+  push:
+    branches: [ main ] # Auto-updates the apps when you change code
 
 jobs:
-  run-factory:
+  deploy-factory:
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # ⏳ THE FIX: Forces GitHub to wait for the C++ Compiler
+    timeout-minutes: 45
     steps:
       - name: 🛰️ Checkout Repository
         uses: actions/checkout@v4
@@ -22,10 +23,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install modal
 
-      - name: 🏭 Trigger Modal Factory
+      - name: 🏭 Deploy 3D Factory Suite
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          # This runs the factory.py file using the Modal Cloud
-          modal run factory.py
+          # Deploying ensures n8n can trigger these anytime without you
+          modal deploy factory.py
+          modal deploy freedom_world.py
