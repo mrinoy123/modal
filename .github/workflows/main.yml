@@ -32,7 +32,7 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          # Only runs the ONE file you select in the dropdown
+          # Isolation Logic: We only run the file you choose in the GitHub UI
           if [ "${{ github.event.inputs.target_script }}" == "objects (factory.py)" ]; then
             modal run factory.py
           else
