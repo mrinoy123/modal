@@ -2,11 +2,10 @@ import modal
 import os
 import sys
 import io
-import uuid
 import gc
 
 # =========================================================
-# IMAGE (STABLE HY-WORLD 2.0 BUILD)
+# MODAL IMAGE
 # =========================================================
 
 image = (
@@ -16,13 +15,17 @@ image = (
     )
 
     .env({
-        "TORCH_CUDA_ARCH_LIST": "8.9",
         "CUDA_HOME": "/usr/local/cuda",
+        "TORCH_CUDA_ARCH_LIST": "8.9",
         "FORCE_CUDA": "1",
         "CUDA_VISIBLE_DEVICES": "0",
         "TOKENIZERS_PARALLELISM": "false",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
+
+    # =====================================================
+    # SYSTEM DEPENDENCIES
+    # =====================================================
 
     .apt_install(
         "git",
@@ -39,6 +42,10 @@ image = (
         "libxrender1"
     )
 
+    # =====================================================
+    # BASE PYTHON TOOLS
+    # =====================================================
+
     .pip_install(
         "setuptools",
         "wheel",
@@ -46,7 +53,7 @@ image = (
     )
 
     # =====================================================
-    # TORCH 2.4 (Required for HY-World + FA2.8)
+    # TORCH 2.4
     # =====================================================
 
     .pip_install(
@@ -57,7 +64,7 @@ image = (
     )
 
     # =====================================================
-    # CORE AI STACK
+    # CORE AI
     # =====================================================
 
     .pip_install(
@@ -74,11 +81,10 @@ image = (
         "numpy==1.26.4",
         "pandas",
         "tqdm",
-        "pillow"
+        "pillow",
+        "boto3",
+        "botocore"
     )
-
-    # 🚀 THE FIX: Isolated Cache-Buster for Cloudflare connections
-    .pip_install("boto3")
 
     # =====================================================
     # 3D STACK
@@ -88,16 +94,7 @@ image = (
         "open3d==0.18.0",
         "trimesh",
         "pymeshlab==2022.2.post3",
-        "pygltflib",
-    )
-
-    # =====================================================
-    # FLASH ATTENTION + GSPLAT
-    # =====================================================
-
-    .run_commands(
-        "pip install /weights/dependencies/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl",
-        "pip install /weights/dependencies/gsplat-1.5.3+pt24cu124-cp310-cp310-linux_x86_64.whl"
+        "pygltflib"
     )
 
     # =====================================================
@@ -111,7 +108,7 @@ image = (
 )
 
 # =========================================================
-# MODAL APP
+# APP
 # =========================================================
 
 app = modal.App("hyworld-production")
@@ -127,31 +124,56 @@ cache_vol = modal.Volume.from_name(
 )
 
 # =========================================================
-# GENERATION PIPELINE
+# RUNTIME INSTALLER
+# =========================================================
+
+def install_runtime_dependencies():
+
+    import subprocess
+    import os
+
+    flash_wheel = "/weights/dependencies/flash_attn-2.8.3+cu12torch2.4cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+
+    gsplat_wheel = "/weights/dependencies/gsplat-1.5.3+pt24cu124-cp310-cp310-linux_x86_64.whl"
+
+    if os.path.exists(flash_wheel):
+        print("Installing FlashAttention...")
+        subprocess.run(
+            ["pip", "install", flash_wheel],
+            check=True
+        )
+
+    if os.path.exists(gsplat_wheel):
+        print("Installing gsplat...")
+        subprocess.run(
+            ["pip", "install", gsplat_wheel],
+            check=True
+        )
+
+# =========================================================
+# WORLD GENERATION
 # =========================================================
 
 def generate_world(input_img, base_name, prompt):
 
     import torch
-    import numpy as np
-    import trimesh
     import gc
 
     assert torch.cuda.is_available(), "CUDA NOT AVAILABLE"
 
-    print("✅ CUDA AVAILABLE")
+    print("CUDA VERIFIED")
 
     torch.backends.cuda.enable_math_sdp(True)
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
 
     # =====================================================
-    # RESILIENT PATH LINKER
+    # FIND REPO
     # =====================================================
 
     def resolve_paths():
 
-        candidate_mounts = [
+        candidates = [
             "/weights",
             "/cache",
             "/mnt",
@@ -159,18 +181,20 @@ def generate_world(input_img, base_name, prompt):
         ]
 
         code_root = None
-        helper_root = None
 
-        for mount in candidate_mounts:
+        for mount in candidates:
 
-            target = os.path.join(mount, "HY-World-2.0")
+            target = os.path.join(
+                mount,
+                "HY-World-2.0"
+            )
 
             if os.path.exists(target):
                 code_root = target
                 break
 
         if not code_root:
-            raise FileNotFoundError(
+            raise Exception(
                 "HY-World-2.0 repository missing"
             )
 
@@ -183,11 +207,7 @@ def generate_world(input_img, base_name, prompt):
 
     CODE_ROOT, HELPER_ROOT = resolve_paths()
 
-    print(f"✅ CODE ROOT: {CODE_ROOT}")
-
-    # =====================================================
-    # PATH SETUP
-    # =====================================================
+    print(f"FOUND REPO: {CODE_ROOT}")
 
     sys.path.insert(0, CODE_ROOT)
 
@@ -204,37 +224,46 @@ def generate_world(input_img, base_name, prompt):
     # LOAD PIPELINE
     # =====================================================
 
-    print("🚀 Loading HY-World Pipeline...")
+    print("LOADING PIPELINE")
 
     pipeline = HYWorld2Pipeline.from_pretrained(
         CODE_ROOT,
-        llm_path=os.path.join(HELPER_ROOT, "llm"),
-        vision_path=os.path.join(HELPER_ROOT, "siglip"),
+        llm_path=os.path.join(
+            HELPER_ROOT,
+            "llm"
+        ),
+        vision_path=os.path.join(
+            HELPER_ROOT,
+            "siglip"
+        ),
         device="cuda",
         torch_dtype=torch.bfloat16
     )
 
     # =====================================================
-    # GENERATE SPLAT
+    # GENERATION
     # =====================================================
 
-    print("🎨 Generating Gaussian Splat...")
+    print("GENERATING WORLD")
 
-    with torch.autocast("cuda", dtype=torch.bfloat16):
+    with torch.autocast(
+        "cuda",
+        dtype=torch.bfloat16
+    ):
 
         result = pipeline(
             image=input_img,
             prompt=prompt,
             negative_prompt=(
                 "blurry, messy, low quality, "
-                "photorealistic, realistic texture"
+                "photorealistic"
             ),
             target_resolution=1024,
             output_type="3dgs"
         )
 
     # =====================================================
-    # OUTPUT PATHS
+    # OUTPUT
     # =====================================================
 
     output_dir = "/tmp/hyworld_output"
@@ -246,11 +275,7 @@ def generate_world(input_img, base_name, prompt):
         f"{base_name}.glb"
     )
 
-    # =====================================================
-    # SPLAT -> GLB
-    # =====================================================
-
-    print("🪄 Converting Splat to GLB...")
+    print("CONVERTING TO GLB")
 
     splat_to_glb(
         result,
@@ -269,7 +294,7 @@ def generate_world(input_img, base_name, prompt):
 
     torch.cuda.empty_cache()
 
-    print(f"✅ FINAL GLB: {glb_path}")
+    print(f"FINAL GLB: {glb_path}")
 
     return glb_path
 
@@ -278,27 +303,32 @@ def generate_world(input_img, base_name, prompt):
 # =========================================================
 
 @app.function(
-    volumes={
-        "/weights": weights_vol,
-        "/cache": cache_vol
-    },
-
     gpu="L4",
 
     timeout=3600,
 
     scaledown_window=60,
 
-    # MODAL 2026 FIX
-    max_containers=1
+    max_containers=1,
+
+    volumes={
+        "/weights": weights_vol,
+        "/cache": cache_vol
+    }
 )
 
 def process_cloudflare_queue(cfg: dict):
 
+    # =====================================================
+    # INSTALL RUNTIME WHEELS
+    # =====================================================
+
+    install_runtime_dependencies()
+
     import boto3
     from PIL import Image
 
-    print("🌐 Connecting to Cloudflare R2...")
+    print("CONNECTING TO R2")
 
     s3 = boto3.client(
         "s3",
@@ -313,26 +343,23 @@ def process_cloudflare_queue(cfg: dict):
     )
 
     if "Contents" not in response:
-        print("📭 Queue Empty")
+        print("QUEUE EMPTY")
         return
-
-    processed = 0
 
     for obj in response["Contents"]:
 
         key = obj["Key"]
 
         if (
-            len(key.split("/")) != 2 or
+            len(key.split("/")) != 2
+            or
             not key.lower().endswith(
                 (".png", ".jpg", ".jpeg")
             )
         ):
             continue
 
-        processed += 1
-
-        print(f"📥 Processing: {key}")
+        print(f"PROCESSING: {key}")
 
         data = s3.get_object(
             Bucket=cfg["bucket"],
@@ -340,7 +367,9 @@ def process_cloudflare_queue(cfg: dict):
         )
 
         img = Image.open(
-            io.BytesIO(data["Body"].read())
+            io.BytesIO(
+                data["Body"].read()
+            )
         ).convert("RGB")
 
         prompt = data.get(
@@ -364,7 +393,7 @@ def process_cloudflare_queue(cfg: dict):
                 prompt
             )
 
-            print("☁️ Uploading GLB to R2...")
+            print("UPLOADING GLB")
 
             with open(glb_file, "rb") as f:
 
@@ -374,7 +403,7 @@ def process_cloudflare_queue(cfg: dict):
                     Body=f
                 )
 
-            print("✅ Upload complete")
+            print("UPLOAD COMPLETE")
 
             s3.delete_object(
                 Bucket=cfg["bucket"],
@@ -383,7 +412,7 @@ def process_cloudflare_queue(cfg: dict):
 
         except Exception as e:
 
-            print(f"❌ FAILED: {e}")
+            print(f"FAILED: {e}")
 
             failed_key = key.replace(
                 "queue/",
@@ -404,9 +433,6 @@ def process_cloudflare_queue(cfg: dict):
                 Bucket=cfg["bucket"],
                 Key=key
             )
-
-    if processed == 0:
-        print("📭 No valid images found")
 
     cache_vol.commit()
 
