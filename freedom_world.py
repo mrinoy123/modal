@@ -9,14 +9,14 @@ import glob
 # =========================================================
 # APP CONFIGURATION
 # =========================================================
-app = modal.App("hyworld2-production-v3")
+app = modal.App("hyworld2-production-v4")
 
 # Volumes
 weights_vol = modal.Volume.from_name("weights-hy-world-2", create_if_missing=True)
 cache_vol = modal.Volume.from_name("hyworld2-cache", create_if_missing=True)
 
 # =========================================================
-# IMAGE BUILD (Added Open3D and Pymeshlab for meshing)
+# IMAGE BUILD
 # =========================================================
 image = (
     modal.Image.from_registry(
@@ -53,7 +53,7 @@ image = (
         "einops", "omegaconf", "timm", "scipy", "trimesh",
         "opencv-python-headless==4.9.0.80",
         "pygltflib", "jaxtyping", "boto3", "roma", "pyquaternion", "plyfile",
-        "open3d", "pymeshlab" # Added for PointCloud -> Mesh conversion
+        "open3d==0.18.0"
     )
     .run_commands(
         "git clone https://github.com/Tencent-Hunyuan/HY-World-2.0.git /root/HYWorld",
@@ -91,8 +91,10 @@ def generate_world(input_image, prompt, output_name):
     from hyworld2.worldrecon.pipeline import WorldMirrorPipeline
     
     # 2. Load Model
+    # Note: Device placement is handled internally by WorldMirrorPipeline
     model_path = f"{ROOT}/weights/HY-World-2.0"
-    pipe = WorldMirrorPipeline.from_pretrained(model_path).to("cuda")
+    print(f"Loading Model from {model_path}...")
+    pipe = WorldMirrorPipeline.from_pretrained(model_path)
 
     # 3. Prepare Input
     temp_input_dir = f"/tmp/input_{output_name}"
@@ -102,55 +104,51 @@ def generate_world(input_image, prompt, output_name):
     # 4. Run Inference
     print(f"--- Running HY-World Mirror Reconstruction ---")
     with torch.inference_mode():
-        # Pipeline returns the output root directory
+        # returns the output root directory (e.g., inference_output/...)
         output_root = pipe(temp_input_dir)
 
-    # 5. Extract and Convert Output
-    # The pipeline saves to: inference_output/input_name/timestamp/...
+    # 5. Locate Result
+    # WorldMirror creates timestamped subdirectories. We need to find them.
     output_dir = "/tmp/final_output"
     os.makedirs(output_dir, exist_ok=True)
-    glb_path = os.path.join(output_dir, f"{output_name}.glb")
+    final_glb_path = os.path.join(output_dir, f"{output_name}.glb")
 
-    print(f"Inference finished. Searching results in: {output_root}")
+    print(f"Searching for 3D assets in: {output_root}")
     
-    # HY-World 2.0 creates a timestamped folder inside the output_root
-    # We look for .glb or .ply files
+    # Search recursively for .glb or .ply files
     all_files = glob.glob(os.path.join(output_root, "**/*"), recursive=True)
     
     glb_files = [f for f in all_files if f.endswith(".glb")]
+    # WorldMirror specifically names its gaussian splats 'gaussians.ply'
     ply_files = [f for f in all_files if f.endswith("gaussians.ply") or f.endswith("points.ply")]
 
     if glb_files:
         print(f"Found GLB: {glb_files[0]}")
-        shutil.copy(glb_files[0], glb_path)
+        shutil.copy(glb_files[0], final_glb_path)
     elif ply_files:
-        print(f"Found PLY: {ply_files[0]}. Converting Point Cloud to Mesh...")
+        print(f"Found PLY: {ply_files[0]}. Exporting as Mesh...")
         try:
-            # Load point cloud
             pcd = trimesh.load(ply_files[0])
-            
-            # If it's a point cloud (common for WorldMirror), we need to create a mesh
+            # If the result is a point cloud (standard for GSplat output), we wrap it for R2 upload
             if isinstance(pcd, trimesh.points.PointCloud):
-                # Basic Alpha-Shape or Convex Hull to get a visible GLB world
-                # For "Worlds", a Convex Hull or a simple Poisson reconstruction works best
-                mesh = pcd.convex_hull 
-                mesh.export(glb_path)
+                # World Generator usually generates huge point clouds. 
+                # We export the raw data if it can't be easily converted to a mesh.
+                pcd.export(final_glb_path.replace(".glb", ".ply"))
+                final_glb_path = final_glb_path.replace(".glb", ".ply")
             else:
-                # It's already a mesh in a .ply wrapper
-                pcd.export(glb_path)
-            print(f"Conversion Successful: {glb_path}")
+                pcd.export(final_glb_path)
         except Exception as e:
-            print(f"Meshing failed: {e}. Uploading raw PLY instead.")
-            glb_path = ply_files[0] # Fallback to raw PLY
+            print(f"Meshing/Copy failed: {e}")
+            final_glb_path = ply_files[0] # Fallback to the original file
     else:
-        raise RuntimeError(f"No usable 3D assets found in {output_root}")
+        raise RuntimeError(f"No 3D file (.glb or .ply) found in output directory: {output_root}")
 
     # Cleanup
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    return glb_path
+    return final_glb_path
 
 # =========================================================
 # MODAL WORKER
@@ -180,21 +178,20 @@ def process_cloudflare_queue(cfg: dict):
         if key == "queue/" or not key.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
-        print(f"Processing: {key}")
+        print(f"Processing File: {key}")
         try:
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
-            metadata = data.get("Metadata", {})
-            prompt = metadata.get("prompt", "cinematic 3d world")
+            prompt = data.get("Metadata", {}).get("prompt", "cinematic 3d world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
             local_file = generate_world(img, prompt, base_name)
             
-            # Determine content type based on extension (might be .glb or .ply)
-            ext = os.path.splitext(local_file)[1].lower()
-            content_type = "model/gltf-binary" if ext == ".glb" else "application/octet-stream"
+            # Extract extension of the file actually produced
+            ext = os.path.splitext(local_file)[1]
             output_key = f"output/{base_name}{ext}"
+            content_type = "model/gltf-binary" if ext == ".glb" else "application/octet-stream"
 
             with open(local_file, "rb") as f:
                 s3.put_object(
@@ -205,10 +202,10 @@ def process_cloudflare_queue(cfg: dict):
                 )
 
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"SUCCESS: {base_name}")
+            print(f"SUCCESS: {base_name}{ext}")
 
         except Exception as e:
-            print(f"FAILED {key}: {str(e)}")
+            print(f"ERROR processing {key}: {str(e)}")
             try:
                 failed_key = key.replace("queue/", "failed/", 1)
                 s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
