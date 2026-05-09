@@ -149,7 +149,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     gpu="L4",
     timeout=7200,
     volumes={"/weights": weights_vol},
-    container_idle_timeout=180
+    scaledown_window=180
 )
 def process_cloudflare_queue(cfg: dict):
     import boto3
