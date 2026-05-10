@@ -5,7 +5,7 @@ import io
 import gc
 
 # =========================================================
-# 1. IMAGE CONFIGURATION (Fixed for GroundingDINO Schema)
+# 1. IMAGE CONFIGURATION (Fixed for Transformers Bug & Open3D)
 # =========================================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -23,24 +23,29 @@ image = (
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
         "libglib2.0-0", "wget", "libdraco-dev", 
-        "ninja-build", "clang", "llvm"
+        "ninja-build", "clang", "llvm", 
+        "libgomp1" # System dependency required to prevent Open3D from crashing headless
     )
     .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
     
-    # 🚨 CRITICAL FIX: Pinned to Torch 2.3.1 / Torchvision 0.18.1
-    # Torch 2.4+ breaks GroundingDINO's custom C++ NMS operator schemas.
-    .pip_install("torch==2.3.1", "torchvision==0.18.1", "torchaudio==2.3.1")
+    # STEP 1: Use PyTorch 2.4.1 to satisfy newer Diffusers/Transformers requirements
+    .pip_install("torch==2.4.1", "torchvision==0.19.1", "torchaudio==2.4.1", extra_index_url="https://download.pytorch.org/whl/cu121")
     
-    # Kept latest diffusers/transformers to prevent FluxIPAdapterMixin errors
+    # 🚨 STEP 2: THE MAGIC FIXES
+    # - transformers==4.46.3 bypasses the brand new bug in transformers 4.48+ that breaks PyTorch 2.4.1
+    # - open3d is explicitly added for the 3D Mesh generation stage
+    # - timm is explicitly added for GroundingDINO/SAM vision backbones
     .pip_install(
-        "diffusers>=0.31.0", 
-        "transformers>=4.45.0", 
+        "diffusers==0.31.0", 
+        "transformers==4.46.3", 
         "accelerate", "sentencepiece", 
         "huggingface_hub", "hf-transfer", "opencv-python", "trimesh", 
         "pillow", "einops", "omegaconf", "scipy", "onnxruntime-gpu", 
-        "boto3", "segment-anything", "plyfile", "pycocotools"
+        "boto3", "segment-anything", "plyfile", "pycocotools",
+        "open3d", "timm" 
     )
     
+    # STEP 3: Clone and Install
     .run_commands(
         "export PATH=/usr/local/cuda/bin:$PATH && "
         "pip install --no-build-isolation git+https://github.com/IDEA-Research/GroundingDINO.git",
