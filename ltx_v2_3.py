@@ -22,7 +22,7 @@ image = (
         "hf_transfer",
         "xformers",
         "peft",
-        "bitsandbytes>=0.45.0", # Required for stable 8-bit/FP8 logic
+        "bitsandbytes>=0.45.0",
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
@@ -30,7 +30,7 @@ image = (
     })
 )
 
-app = modal.App("freedom-force-ltx-v2-3-stable")
+app = modal.App("freedom-force-ltx-pro-optimized")
 
 # =========================================================
 # 2. MODEL CLASS
@@ -46,37 +46,56 @@ class LTXVideoGenerator:
     @modal.enter()
     def load_model(self):
         import torch
-        from diffusers import LTXImageToVideoPipeline, BitsAndBytesConfig
-        from transformers import T5EncoderModel
+        from diffusers import LTXImageToVideoPipeline, LTXVideoTransformer3DModel, AutoencoderKLVideo
+        from transformers import T5EncoderModel, T5Tokenizer, BitsAndBytesConfig
 
-        print("🚀 Loading LTX-Video with 8-bit Quantized Transformer (FP8-equivalent memory)...")
+        print("🚀 Loading LTX-Video Components with manual quantization...")
         
-        # 1. Configure Quantization for the 11B Transformer
-        # This replaces the manual FP8 load and fixes the mat1/mat2 dtype error
+        # 1. 8-bit Quantization Config (Saves ~10GB VRAM)
         quant_config = BitsAndBytesConfig(
             load_in_8bit=True,
-            llm_int8_enable_fp32_cpu_offload=True
+            bnb_8bit_compute_dtype=torch.bfloat16,
+            bnb_8bit_quant_type="fp8" # Community optimization for L4/H100
         )
 
-        # 2. Load Pipeline
-        # We load the whole pipeline in BF16, and use the quant_config 
-        # specifically for the transformer to fit in VRAM.
+        # 2. Load Transformer separately (The heavy part)
+        print("📦 Loading Quantized Transformer...")
+        transformer = LTXVideoTransformer3DModel.from_pretrained(
+            "Lightricks/LTX-Video",
+            subfolder="transformer",
+            quantization_config=quant_config,
+            torch_dtype=torch.bfloat16,
+            device_map="auto"
+        )
+
+        # 3. Load T5 Text Encoder separately (The second heavy part)
+        print("📦 Loading Quantized Text Encoder...")
+        text_encoder = T5EncoderModel.from_pretrained(
+            "Lightricks/LTX-Video",
+            subfolder="text_encoder",
+            quantization_config=quant_config,
+            torch_dtype=torch.bfloat16,
+            device_map="auto"
+        )
+
+        # 4. Assemble the Pipeline manually to bypass 'PipelineQuantizationConfig' validation
+        print("🔧 Assembling Pipeline...")
         self.pipe = LTXImageToVideoPipeline.from_pretrained(
             "Lightricks/LTX-Video",
-            quantization_config=quant_config,
+            transformer=transformer,
+            text_encoder=text_encoder,
             torch_dtype=torch.bfloat16,
         )
 
-        # 3. Aggressive Memory Management for 24GB L4
-        # LTX-Video has a massive T5 Text Encoder (11GB) and a Transformer (11GB).
-        # cpu_offload is mandatory to run both + VAE on a single 24GB card.
+        # 5. Peak Memory Optimization
+        # enable_model_cpu_offload is the most stable way to run 11B models on 24GB
         self.pipe.enable_model_cpu_offload()
         self.pipe.vae.enable_tiling()
         self.pipe.vae.enable_slicing()
         
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
-            print("⚡ xformers enabled")
+            print("⚡ xformers active")
         except:
             pass
 
@@ -85,7 +104,6 @@ class LTXVideoGenerator:
         import gc
         import torch
         import boto3
-        from botocore.exceptions import ClientError
         from PIL import Image
         from diffusers.utils import export_to_video
 
@@ -98,59 +116,47 @@ class LTXVideoGenerator:
             region_name="auto",
         )
 
-        # 1. Download Input
         input_path = "/tmp/input.png"
         target_file = "queue/f22_raptor_raw.png"
         
         print(f"📥 Downloading: {target_file}")
-        try:
-            s3.download_file(bucket, target_file, input_path)
-        except ClientError as e:
-            return {"status": "error", "reason": f"S3 Download Failed: {str(e)}"}
+        s3.download_file(bucket, target_file, input_path)
 
-        # 2. Process Image
-        image = Image.open(input_path).convert("RGB")
-        # 768x512 (divisible by 64) is the optimal resolution for LTX
-        input_image = image.resize((768, 512)) 
+        # Dimensions: Must be multiples of 32
+        image = Image.open(input_path).convert("RGB").resize((768, 512))
 
-        # 3. Generate
         prompt = (
             "cinematic aerial combat, F22 fighter jet flying through a 3D futuristic city, "
-            "extreme motion blur, camera tracking the jet, explosions in background, 4k, high quality"
+            "extreme motion blur, camera tracking the jet, explosions in background, 4k"
         )
         
-        print("🎬 Starting Inference (8-bit Optimized)...")
+        print("🎬 Generating High-Fidelity Video...")
         torch.cuda.empty_cache()
         gc.collect()
 
         try:
             with torch.inference_mode():
-                # LTX Parameters: num_frames must be (8n + 1)
-                # 73 frames = ~3 seconds at 24fps
+                # num_frames = (n * 8) + 1
                 video_frames = self.pipe(
-                    image=input_image,
+                    image=image,
                     prompt=prompt,
-                    negative_prompt="low quality, blurry, static, distorted, watermark, deformed",
+                    negative_prompt="low quality, blurry, static, watermark, distorted",
                     width=768,
                     height=512,
                     num_frames=73,
                     num_inference_steps=30,
-                    guidance_scale=3.0,
+                    guidance_scale=3.5,
                 ).frames[0]
 
-            # 4. Export & Upload
             output_path = "/tmp/output.mp4"
             export_to_video(video_frames, output_path, fps=24)
             
-            output_key = "output/ltx_final_result.mp4"
-            print(f"☁️ Uploading to R2: {output_key}")
+            output_key = "output/ltx_v2_3_final.mp4"
             s3.upload_file(output_path, bucket, output_key)
-            
             return {"status": "success", "video_key": output_key}
             
         except Exception as e:
-            # Catching locally to avoid serialization errors
-            return {"status": "error", "reason": f"Generation failed: {str(e)}"}
+            return {"status": "error", "reason": str(e)}
 
 # =========================================================
 # 3. TERMINAL ENTRYPOINT
@@ -165,11 +171,11 @@ def main():
         "bucket": "video-asset-files-storage-workflow"
     }
 
-    print("🛰️ Initializing Modal Remote Task (LTX-Video Optimized)...")
+    print("🛰️ Initializing Modal Remote Task...")
     gen = LTXVideoGenerator()
     result = gen.generate.remote(**config)
     
     if result["status"] == "success":
-        print(f"🏁 Finished! Video available at R2 Key: {result['video_key']}")
+        print(f"🏁 Video uploaded to: {result['video_key']}")
     else:
-        print(f"❌ Process Failed: {result['reason']}")
+        print(f"❌ Failed: {result['reason']}")
