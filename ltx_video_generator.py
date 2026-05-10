@@ -11,7 +11,7 @@ image = (
     .pip_install(
         "torch==2.5.1",
         "torchvision",
-        "diffusers>=0.36.1", # CRITICAL: LTX-Video needs 0.35.0+
+        "diffusers>=0.36.1", 
         "transformers>=4.48.0",
         "accelerate>=1.2.0",
         "sentencepiece",
@@ -36,44 +36,38 @@ app = modal.App("freedom-force-ltx-stable")
 # =========================================================
 
 @app.cls(
-    gpu="L4", # 24GB VRAM is tight but sufficient with offloading
+    gpu="L4",
     image=image,
     timeout=7200,
-    scaledown_window=300,
 )
 class LTXVideoGenerator:
 
     @modal.enter()
     def load_model(self):
         import torch
-        # Now this import will succeed because diffusers is updated
         from diffusers import LTXImageToVideoPipeline
 
-        print("🚀 Loading LTX Video Pipeline (Lightricks/LTX-Video)...")
-        
-        # Load in bfloat16 to save memory and maintain quality
+        print("🚀 Loading LTX Video Pipeline...")
         self.pipe = LTXImageToVideoPipeline.from_pretrained(
             "Lightricks/LTX-Video",
             torch_dtype=torch.bfloat16,
         )
 
-        # Memory Optimizations for L4 GPU
-        # enable_model_cpu_offload is better than .to("cuda") for 24GB cards
+        # Optimization for L4 (24GB)
         self.pipe.enable_model_cpu_offload()
         self.pipe.vae.enable_tiling()
-        self.pipe.vae.enable_slicing()
         
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
-            print("⚡ xformers enabled")
-        except Exception as e:
-            print(f"⚠️ xformers notice: {e}")
+        except Exception:
+            pass
 
     @modal.method()
     def generate(self, endpoint: str, access_key: str, secret_key: str, bucket: str):
         import gc
         import torch
         import boto3
+        from botocore.exceptions import ClientError
         from PIL import Image
         from diffusers.utils import export_to_video
 
@@ -86,15 +80,32 @@ class LTXVideoGenerator:
             region_name="auto",
         )
 
-        # 1. Download Input
-        print("📥 Downloading input image...")
+        # 1. Robust Download with Error Handling
         input_path = "/tmp/input.png"
-        # Note: Using your hardcoded key from the original script
-        s3.download_file(bucket, "queue/f22_raptor_raw.png", input_path)
+        target_file = "queue/f22_raptor_raw.png"
+        
+        print(f"📥 Attempting to download: {target_file}")
+        try:
+            s3.download_file(bucket, target_file, input_path)
+        except ClientError as e:
+            # Catching locally to prevent "Deserialization Error" on the user's terminal
+            error_code = e.response.get("Error", {}).get("Code")
+            if error_code == "404":
+                print(f"❌ Error: {target_file} not found in bucket '{bucket}'")
+                # Debug: List what IS in the bucket
+                objs = s3.list_objects_v2(Bucket=bucket, Prefix="queue/", MaxKeys=5)
+                files = [obj['Key'] for obj in objs.get('Contents', [])]
+                return {
+                    "status": "error", 
+                    "reason": f"File Not Found: {target_file}",
+                    "found_instead": files
+                }
+            return {"status": "error", "reason": str(e)}
 
-        # 2. Process Image (LTX-Video likes multiples of 32 or 64)
+        # 2. Process Image
         image = Image.open(input_path).convert("RGB")
-        image = image.resize((768, 448)) # Adjusted to 448 (divisible by 64)
+        # Dimensions MUST be divisible by 64 for LTX-Video
+        image = image.resize((768, 448)) 
 
         # 3. Generate
         prompt = (
@@ -102,32 +113,33 @@ class LTXVideoGenerator:
             "extreme motion blur, camera tracking the jet, explosions in background, 4k"
         )
         
-        print("🎬 Generating Action Video (this may take a few minutes)...")
+        print("🎬 Generating Video...")
         torch.cuda.empty_cache()
         gc.collect()
 
-        with torch.inference_mode():
-            # LTX-Video specific parameters
-            video_frames = self.pipe(
-                image=image,
-                prompt=prompt,
-                negative_prompt="low quality, static, 2d, blurry, watermark, deformed, ugly",
-                width=768,
-                height=448,
-                num_frames=73,
-                num_inference_steps=30,
-                guidance_scale=3.0,
-            ).frames[0]
+        try:
+            with torch.inference_mode():
+                video_frames = self.pipe(
+                    image=image,
+                    prompt=prompt,
+                    negative_prompt="low quality, static, blurry, watermark",
+                    width=768,
+                    height=448,
+                    num_frames=73, # ~3 seconds at 24fps
+                    num_inference_steps=30,
+                    guidance_scale=3.0,
+                ).frames[0]
 
-        # 4. Export & Upload
-        output_path = "/tmp/output.mp4"
-        export_to_video(video_frames, output_path, fps=24)
-        
-        output_key = "output/ltx_freedom_force.mp4"
-        print(f"☁️ Uploading to R2: {output_key}")
-        s3.upload_file(output_path, bucket, output_key)
-
-        return {"status": "success", "video_key": output_key}
+            # 4. Export & Upload
+            output_path = "/tmp/output.mp4"
+            export_to_video(video_frames, output_path, fps=24)
+            
+            output_key = "output/ltx_freedom_force.mp4"
+            s3.upload_file(output_path, bucket, output_key)
+            return {"status": "success", "video_key": output_key}
+            
+        except Exception as e:
+            return {"status": "error", "reason": f"Inference failed: {str(e)}"}
 
 # =========================================================
 # 3. TERMINAL ENTRYPOINT
@@ -143,15 +155,14 @@ def main():
     }
 
     print("🛰️ Initializing Modal Remote Task...")
-    # Instantiate the class
     gen = LTXVideoGenerator()
     
-    # Call the remote method
-    result = gen.generate.remote(
-        endpoint=config["endpoint"],
-        access_key=config["access_key"],
-        secret_key=config["secret_key"],
-        bucket=config["bucket"]
-    )
+    # We use a standard dictionary return to avoid local environment dependency issues
+    result = gen.generate.remote(**config)
     
-    print(f"🏁 Process Finished: {result}")
+    if result["status"] == "success":
+        print(f"✅ Finished! Video uploaded to: {result['video_key']}")
+    else:
+        print(f"❌ Task Failed: {result['reason']}")
+        if "found_instead" in result:
+            print(f"📂 Files found in /queue: {result['found_instead']}")
