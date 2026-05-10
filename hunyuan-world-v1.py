@@ -5,7 +5,7 @@ import io
 import gc
 
 # =========================================================
-# 1. IMAGE CONFIGURATION (Fixed for Transformers Bug & Open3D)
+# 1. IMAGE CONFIGURATION (Fixed Versioning & Force Upgrade)
 # =========================================================
 image = (
     modal.Image.from_registry("nvidia/cuda:12.1.1-devel-ubuntu22.04", add_python="3.10")
@@ -18,34 +18,38 @@ image = (
         "CC": "clang",                       
         "CXX": "clang++",
         "GIT_TERMINAL_PROMPT": "0",
-        "PYTHONPATH": "/root/HunyuanWorld:/root/HunyuanWorld/hy3dworld"   
+        # Ensure the system looks inside the repository structure correctly
+        "PYTHONPATH": "/root/HunyuanWorld"   
     })
     .apt_install(
         "git", "build-essential", "cmake", "libgl1-mesa-glx", 
         "libglib2.0-0", "wget", "libdraco-dev", 
-        "ninja-build", "clang", "llvm", 
-        "libgomp1" # System dependency required to prevent Open3D from crashing headless
+        "ninja-build", "clang", "llvm", "libgomp1"
     )
     .pip_install("pip>=24.0", "wheel", "setuptools", "ninja")
     
-    # STEP 1: Use PyTorch 2.4.1 to satisfy newer Diffusers/Transformers requirements
-    .pip_install("torch==2.4.1", "torchvision==0.19.1", "torchaudio==2.4.1", extra_index_url="https://download.pytorch.org/whl/cu121")
-    
-    # 🚨 STEP 2: THE MAGIC FIXES
-    # - transformers==4.46.3 bypasses the brand new bug in transformers 4.48+ that breaks PyTorch 2.4.1
-    # - open3d is explicitly added for the 3D Mesh generation stage
-    # - timm is explicitly added for GroundingDINO/SAM vision backbones
+    # 1. Install Torch 2.4.1 first
     .pip_install(
-        "diffusers==0.31.0", 
-        "transformers==4.46.3", 
-        "accelerate", "sentencepiece", 
-        "huggingface_hub", "hf-transfer", "opencv-python", "trimesh", 
-        "pillow", "einops", "omegaconf", "scipy", "onnxruntime-gpu", 
-        "boto3", "segment-anything", "plyfile", "pycocotools",
-        "open3d", "timm" 
+        "torch==2.4.1", 
+        "torchvision==0.19.1", 
+        "torchaudio==2.4.1", 
+        extra_index_url="https://download.pytorch.org/whl/cu121"
     )
     
-    # STEP 3: Clone and Install
+    # 2. Force Upgrade Diffusers and Transformers to specific stable versions
+    # Adding 'peft' is critical for Flux IP-Adapters
+    .run_commands(
+        "pip install --upgrade --force-reinstall diffusers==0.31.0 transformers==4.46.3 peft accelerate"
+    )
+    
+    # 3. Install remaining dependencies
+    .pip_install(
+        "sentencepiece", "huggingface_hub", "hf-transfer", "opencv-python", 
+        "trimesh", "pillow", "einops", "omegaconf", "scipy", "onnxruntime-gpu", 
+        "boto3", "segment-anything", "plyfile", "pycocotools", "open3d", "timm"
+    )
+    
+    # 4. Build GroundingDINO and Clone Repo
     .run_commands(
         "export PATH=/usr/local/cuda/bin:$PATH && "
         "pip install --no-build-isolation git+https://github.com/IDEA-Research/GroundingDINO.git",
@@ -64,13 +68,9 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     from PIL import Image
     
     ROOT = "/root/HunyuanWorld"
-    HY3DWORLD_PATH = os.path.join(ROOT, "hy3dworld")
-    
-    # Ensure the system looks in both the root and the nested module folder
+    # Essential: insert ROOT at index 0 so 'hy3dworld' and 'models' are found immediately
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
-    if HY3DWORLD_PATH not in sys.path:
-        sys.path.insert(0, HY3DWORLD_PATH)
         
     os.chdir(ROOT)
 
@@ -88,15 +88,16 @@ def generate_hallucinated_world(input_image, prompt, base_name):
 
     resolve_and_link_weights()
 
+    # In HunyuanWorld 1.0, the core logic is inside the hy3dworld module
     try:
         from hy3dworld.models.pano_gen_pipeline import HunyuanWorldPanoGenPipeline
         from hy3dworld.models.scene_gen_pipeline import HunyuanWorldSceneGenPipeline
     except ImportError as e:
         print(f"❌ Import Failure: {e}")
-        print(f"Path Debug - sys.path: {sys.path}")
+        print(f"sys.path is: {sys.path}")
         raise e
 
-    # STAGE 1: PanoGen (Hallucinate World)
+    # STAGE 1: PanoGen (Hallucinate 360 Panorama)
     print("🚀 [Stage 1] Hallucinating 360 Panorama...")
     pano_pipe = HunyuanWorldPanoGenPipeline.from_pretrained(
         f"{ROOT}/weights/hunyuan_world",
@@ -106,6 +107,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
         device="cuda"
     )
     
+    # Memory Management for L4 (24GB)
     pano_pipe.enable_model_cpu_offload()
 
     with torch.inference_mode():
@@ -120,12 +122,13 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     pano_path = f"/tmp/{base_name}_pano.png"
     hallucinated_pano.save(pano_path)
 
+    # Cleanup VRAM for the next stage
     del pano_pipe
     gc.collect()
     torch.cuda.empty_cache()
 
-    # STAGE 2: SceneGen (Panorama to 3D)
-    print("🚀 [Stage 2] Building 3D Mesh...")
+    # STAGE 2: SceneGen (Panorama to 3D Mesh)
+    print("🚀 [Stage 2] Building 3D Mesh Scene...")
     scene_pipe = HunyuanWorldSceneGenPipeline(
         model_root=f"{ROOT}/weights/hunyuan_world",
         moge_path=f"{ROOT}/weights/annotators/moge",
@@ -145,6 +148,7 @@ def generate_hallucinated_world(input_image, prompt, base_name):
     output_ply = f"/tmp/{base_name}_world.ply"
     world_mesh.export(output_ply)
 
+    # Final Cleanup
     del scene_pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -164,6 +168,7 @@ def process_cloudflare_queue(cfg: dict):
     import boto3
     from PIL import Image
 
+    print("☁️ Connecting to Cloudflare R2...")
     s3 = boto3.client(
         "s3",
         endpoint_url=cfg["endpoint"],
@@ -181,30 +186,34 @@ def process_cloudflare_queue(cfg: dict):
         if key == "queue/" or not key.lower().endswith((".png", ".jpg", ".jpeg")):
             continue
 
-        print(f"📥 Found Image: {key}")
+        print(f"📥 Processing: {key}")
         try:
             data = s3.get_object(Bucket=cfg["bucket"], Key=key)
             img = Image.open(io.BytesIO(data["Body"].read())).convert("RGB")
             
             metadata = data.get("Metadata", {})
-            prompt = metadata.get("prompt", "a cinematic photorealistic 360 panoramic world")
+            prompt = metadata.get("prompt", "a cinematic photorealistic high-resolution 360 panoramic world")
             base_name = os.path.splitext(os.path.basename(key))[0]
 
+            # Generate the world
             local_pano, local_mesh = generate_hallucinated_world(img, prompt, base_name)
             
-            print(f"📤 Uploading results...")
+            # Upload results
+            print(f"📤 Uploading results for {base_name}...")
             with open(local_pano, "rb") as f:
                 s3.put_object(Bucket=cfg["bucket"], Key=f"output/{base_name}_panorama.png", Body=f)
             with open(local_mesh, "rb") as f:
                 s3.put_object(Bucket=cfg["bucket"], Key=f"output/{base_name}_world.ply", Body=f)
 
+            # Cleanup R2 Queue
             s3.delete_object(Bucket=cfg["bucket"], Key=key)
-            print(f"✅ COMPLETED: {base_name}")
+            print(f"✅ SUCCESS: {base_name}")
 
         except Exception as e:
-            print(f"❌ ERROR: {str(e)}")
+            print(f"❌ ERROR processing {key}: {str(e)}")
             try:
-                s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=key.replace("queue/", "failed/"))
+                failed_key = key.replace("queue/", "failed/", 1)
+                s3.copy_object(Bucket=cfg["bucket"], CopySource={"Bucket": cfg["bucket"], "Key": key}, Key=failed_key)
                 s3.delete_object(Bucket=cfg["bucket"], Key=key)
             except: pass
 
