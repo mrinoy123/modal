@@ -9,18 +9,18 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "ffmpeg", "libgl1", "libglib2.0-0", "libsm6", "libxext6", "wget")
     .pip_install(
-        "torch",
+        "torch==2.5.1",
         "torchvision",
-        # Install diffusers from main to get latest LTX-2.3 support
+        # We need the cutting-edge diffusers branch that supports LTX-2.3
         "git+https://github.com/huggingface/diffusers.git",
-        "transformers>=4.51.0",
-        "accelerate>=1.6.0",
+        "transformers>=4.48.2",
+        "accelerate>=1.3.0",
         "sentencepiece",
         "imageio[ffmpeg]",
         "pillow",
         "boto3",
         "hf_transfer",
-        "gguf",      # Required for GGUF loading
+        "gguf",      # Required for loading the GGUF transformer
         "xformers",
         "peft"
     )
@@ -46,39 +46,40 @@ class LTXVideoGenerator:
     @modal.enter()
     def load_model(self):
         import torch
-        # LTX-2.3 specific imports from latest diffusers
+        # LTX2 classes are for the 2.3 version
         from diffusers import LTX2Pipeline, LTX2VideoTransformer3DModel, GGUFQuantizationConfig
         from huggingface_hub import hf_hub_download
 
-        print("🚀 Loading LTX-2.3 (19B) GGUF Optimized Model...")
+        print("🚀 Loading LTX-2.3 (22B) GGUF Optimized Model...")
         
-        # 1. Download the GGUF Transformer (using Q5_0 for best quality/size balance)
-        # Using Unsloth or city96 community quants to fit in 24GB VRAM
+        # 1. Download the LTX-2.3 GGUF file
+        # Using Unsloth's Q4_K_M quant which fits perfectly on L4 (approx 14GB)
         model_path = hf_hub_download(
-            repo_id="unsloth/LTX-2-GGUF",
-            filename="ltx-2-19b-dev-Q5_0.gguf"
+            repo_id="unsloth/LTX-2.3-GGUF",
+            filename="ltx-2.3-22b-dev-Q4_K_M.gguf"
         )
 
-        # 2. Load the GGUF Transformer
-        transformer = LTXVideoTransformer3DModel.from_single_file(
+        # 2. Load the GGUF Transformer specifically
+        # Note the class name: LTX2VideoTransformer3DModel
+        transformer = LTX2VideoTransformer3DModel.from_single_file(
             model_path,
             quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
             torch_dtype=torch.bfloat16,
         )
 
-        # 3. Load full pipeline (handles VAE and Text Encoder internally)
-        # We point to the base Lightricks/LTX-2 repo for components, but swap the transformer
+        # 3. Load the full LTX2 Pipeline (Text-to-Audio-Video)
+        # We use the official Lightricks repo for components (VAE, Scheduler) but our GGUF transformer
         self.pipe = LTX2Pipeline.from_pretrained(
-            "Lightricks/LTX-2",
+            "Lightricks/LTX-2.3",
             transformer=transformer,
-            torch_dtype=torch.bfloat16
+            torch_dtype=torch.bfloat16,
         )
 
-        # 4. Memory Optimization
-        self.pipe.enable_model_cpu_offload()
+        # 4. Memory Optimization for 24GB
+        self.pipe.enable_model_cpu_offload() # Offloads Gemma 3 (12B) text encoder
         self.pipe.vae.enable_tiling()
         
-        print("✅ LTX-2.3 Pipeline Ready!")
+        print("✅ LTX-2.3 GGUF Pipeline Ready!")
 
     @modal.method()
     def generate(self, endpoint: str, access_key: str, secret_key: str, bucket: str):
@@ -99,20 +100,19 @@ class LTXVideoGenerator:
         input_path = "/tmp/input.png"
         s3.download_file(bucket, "queue/f22_raptor_raw.png", input_path)
 
-        # LTX-2.3 Resolution: Must be divisible by 32
+        # Process Image (multiples of 32/64)
         image = Image.open(input_path).convert("RGB").resize((768, 512))
 
         prompt = (
             "Cinematic aerial combat, F22 fighter jet flying through a 3D futuristic city, "
-            "extreme motion blur, camera tracking the jet, explosions in background, 4k. "
-            "Sound of jet engines roaring and distant explosions."
+            "extreme motion blur, camera tracking the jet, explosions in background, 4k"
         )
         
         print("🎬 Generating LTX-2.3 Synchronized Video + Audio...")
         
         with torch.inference_mode():
-            # LTX-2.3 returns both video and audio latents
-            # num_frames must be divisible by 8 + 1 (e.g., 121)
+            # LTX-2.3 generates video AND audio in one pass
+            # frames formula: divisible by 8 + 1 (e.g., 97, 121)
             video, audio = self.pipe(
                 image=image,
                 prompt=prompt,
@@ -125,10 +125,10 @@ class LTXVideoGenerator:
                 return_dict=False
             )
 
-        # Export & Upload
+        # 4. Combine Video and Audio using LTX2 utilities
         output_path = "/tmp/output.mp4"
-        # LTX-2 has a special utility to combine the generated video and audio
         video_tensor = torch.from_numpy(video[0] * 255).round().to(torch.uint8)
+        
         encode_video(
             video_tensor,
             fps=24.0,
@@ -137,8 +137,10 @@ class LTXVideoGenerator:
             output_path=output_path,
         )
         
-        output_key = "output/ltx_2_3_gguf_final.mp4"
+        output_key = "output/ltx_2_3_final.mp4"
+        print(f"☁️ Uploading to R2: {output_key}")
         s3.upload_file(output_path, bucket, output_key)
+
         return {"status": "success", "video_key": output_key}
 
 # =========================================================
@@ -154,7 +156,7 @@ def main():
         "bucket": "video-asset-files-storage-workflow"
     }
 
-    print("🛰️ Initializing LTX-2.3 Task...")
+    print("🛰️ Initializing Modal Task...")
     gen = LTXVideoGenerator()
     result = gen.generate.remote(**config)
-    print(f"🏁 Result: {result}")
+    print(f"🏁 Finished: {result}")
