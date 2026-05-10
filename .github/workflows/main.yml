@@ -12,6 +12,7 @@ on:
           - objects (factory.py)
           - world (freedom_world.py)
           - hallucinate (hunyuan-world-v1.py)
+          - ltx (ltx_video_generator.py) # <--- NEW OPTION
 
 jobs:
   execute-modal:
@@ -33,7 +34,6 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          # Selection Logic to trigger the correct Modal engine
           case "${{ github.event.inputs.target_script }}" in
             "objects (factory.py)")
               echo "🛠️ Launching Object Factory..."
@@ -46,6 +46,10 @@ jobs:
             "hallucinate (hunyuan-world-v1.py)")
               echo "✨ Launching HunyuanWorld v1 Hallucination Engine..."
               modal run hunyuan-world-v1.py
+              ;;
+            "ltx (ltx_video_generator.py)")
+              echo "🎥 Launching LTX-Video High-Motion Engine..."
+              modal run ltx_video_generator.py
               ;;
             *)
               echo "❌ Error: Unknown script selection."
