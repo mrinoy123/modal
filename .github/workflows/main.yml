@@ -12,7 +12,8 @@ on:
           - objects (factory.py)
           - world (freedom_world.py)
           - hallucinate (hunyuan-world-v1.py)
-          - ltx (ltx_video_generator.py) # <--- NEW OPTION
+          - ltx (ltx_video_generator.py)
+          - ltx-v-2.3 (ltx_v2_3.py) # <--- NEW v2.3 STABLE OPTION
 
 jobs:
   execute-modal:
@@ -48,8 +49,12 @@ jobs:
               modal run hunyuan-world-v1.py
               ;;
             "ltx (ltx_video_generator.py)")
-              echo "🎥 Launching LTX-Video High-Motion Engine..."
+              echo "🎥 Launching LTX-Video Base Engine..."
               modal run ltx_video_generator.py
+              ;;
+            "ltx-v-2.3 (ltx_v2_3.py)")
+              echo "🚀 Launching LTX v2.3 High-Motion Master..."
+              modal run ltx_v2_3.py
               ;;
             *)
               echo "❌ Error: Unknown script selection."
