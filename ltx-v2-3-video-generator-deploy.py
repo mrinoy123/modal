@@ -16,7 +16,7 @@ weights_volume = modal.Volume.from_name("ltx-video-weights")
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0", "build-essential")
-    .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu121")
+    .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu124")
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.0.0") 
     .run_commands(
         # 2a. Install SageAttention 2.2.0 using the precompiled HuggingFace wheel for Python 3.12 Linux
