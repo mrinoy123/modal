@@ -12,20 +12,36 @@ from typing import Optional
 # 1. MOUNT THE CORRECT VOLUME
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
-# 2. Build the Python 3.11 Image
+# 2. Build the Python 3.11 Image with New Optimization Nodes
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
+    # Added build-essential so SageAttention can compile its C++/CUDA kernels
+    .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0", "build-essential")
     .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu121")
-    .pip_install("fastapi", "aiohttp", "boto3") # Boto3 is installed in the container
+    # Added triton for SageAttention support
+    .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.0.0") 
     .run_commands(
+        # 2a. Install SageAttention 2.2.0 explicitly
+        "pip install sageattention==2.2.0 --no-build-isolation",
+        
+        # 2b. Clone Core ComfyUI
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
+        
+        # 2c. Base Nodes (GGUF, VHS, RIFE)
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt",
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt"
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
+        
+        # 2d. NEW: KJNodes (Provides the LTX2 Sage Attention Patch)
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt",
+        
+        # 2e. NEW: Impact Pack (Provides the ToMe Patch Model)
+        "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt"
     )
 )
 
@@ -111,7 +127,9 @@ class LTXEngine:
             res = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
             history = json.loads(res.read())
             if prompt_id in history: break
-            if time.time() - start_time > 600: raise HTTPException(status_code=504, detail="Timeout")
+            
+            # Bumped timeout to 800s to safely accommodate 65 frames + RIFE interpolation
+            if time.time() - start_time > 800: raise HTTPException(status_code=504, detail="Timeout")
             time.sleep(4)
             
         # 6. Return Result
