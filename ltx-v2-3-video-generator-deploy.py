@@ -38,7 +38,7 @@ app = modal.App("ltx-v2-3-api")
     image=image, 
     # We mount the volume to a safe data folder first
     volumes={"/mnt/weights": weights_volume},
-    container_idle_timeout=60 # SHUT DOWN EXACTLY 1 MINUTE AFTER n8n FINISHES
+    scaledown_window=60 # SHUT DOWN EXACTLY 1 MINUTE AFTER n8n FINISHES
 )
 class LTXEngine:
     @modal.enter()
