@@ -7,7 +7,7 @@ import urllib.request
 import shutil
 from fastapi import Request, Response
 
-# 1. MOUNT THE CORRECT VOLUME FOR SONIC (From your screenshot)
+# 1. MOUNT THE CORRECT VOLUME FOR SONIC
 weights_volume = modal.Volume.from_name("sonic-video-weights")
 
 # 2. Build the Python 3.10 Image (Crucial for Sonic stability)
@@ -20,9 +20,9 @@ image = (
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
-        # Sonic Specific Nodes
+        # Sonic Specific Nodes (FIXED GITHUB URL HERE)
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
-        "git clone https://github.com/comfyanonymous/ComfyUI_Sonic.git /workspace/ComfyUI/custom_nodes/ComfyUI_Sonic",
+        "git clone https://github.com/smthemex/ComfyUI_Sonic.git /workspace/ComfyUI/custom_nodes/ComfyUI_Sonic",
         
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI_Sonic/requirements.txt"
     )
@@ -34,14 +34,13 @@ app = modal.App("sonic-lypsync-api")
 @app.cls(
     gpu="L4", 
     image=image, 
-    volumes={"/mnt/weights": weights_volume}, # Safe mount path
+    volumes={"/mnt/weights": weights_volume},
     scaledown_window=60 # MODERN SYNTAX: SHUT DOWN EXACTLY 1 MINUTE LATER
 )
 class SonicEngine:
     @modal.enter()
     def start_comfy(self):
         print("🔗 Linking Sonic Models from Volume...")
-        # Using the exact folders shown in your sonic-video-weights volume screenshot
         folders_to_link = ["checkpoints", "clip_vision", "face_detection", "sonic", "vae", "unet", "clip"]
         
         for folder in folders_to_link:
@@ -66,15 +65,13 @@ class SonicEngine:
             except:
                 time.sleep(1)
 
-    # MODERN SYNTAX: fastapi_endpoint instead of web_endpoint
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request):
         data = await request.json()
         image_url = data.get("image_url")
-        audio_url = data.get("audio_url") # Sonic requires an audio file
+        audio_url = data.get("audio_url") 
         workflow = data.get("workflow")
         
-        # Ensure the ComfyUI LoadImage and LoadAudio nodes expect these exact filenames
         urllib.request.urlretrieve(image_url, "/workspace/ComfyUI/input/master_face.png")
         urllib.request.urlretrieve(audio_url, "/workspace/ComfyUI/input/narration.wav")
         
