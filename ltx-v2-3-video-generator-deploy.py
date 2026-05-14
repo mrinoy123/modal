@@ -7,7 +7,7 @@ import urllib.request
 import shutil
 from fastapi import Request, Response
 
-# 1. MOUNT THE CORRECT VOLUME (From your screenshots)
+# 1. MOUNT THE CORRECT VOLUME
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
 # 2. Build the Python 3.11 Image
@@ -20,7 +20,6 @@ image = (
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
-        # LTX Specific Nodes
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
@@ -36,32 +35,26 @@ app = modal.App("ltx-v2-3-api")
 @app.cls(
     gpu="L4", 
     image=image, 
-    # We mount the volume to a safe data folder first
     volumes={"/mnt/weights": weights_volume},
-    scaledown_window=60 # SHUT DOWN EXACTLY 1 MINUTE AFTER n8n FINISHES
+    scaledown_window=60 # MODERN SYNTAX: SHUT DOWN EXACTLY 1 MINUTE LATER
 )
 class LTXEngine:
     @modal.enter()
     def start_comfy(self):
         print("🔗 Linking Models from Volume...")
-        # Automatically link the folders from your comfyui_models path to the active ComfyUI path
         folders_to_link = ["unet", "vae", "clip", "loras", "text_encoders", "upscale_models"]
         
         for folder in folders_to_link:
             src = f"/mnt/weights/comfyui_models/{folder}"
             dest = f"/workspace/ComfyUI/models/{folder}"
-            
-            # If ComfyUI created an empty default folder, remove it
             if os.path.exists(dest) and not os.path.islink(dest):
                 shutil.rmtree(dest)
-                
-            # Create the symlink to your Modal Volume
             if not os.path.exists(dest):
                 try:
                     os.symlink(src, dest)
                     print(f"✅ Linked: {folder}")
                 except Exception as e:
-                    print(f"⚠️ Warning: Could not link {folder}: {e}")
+                    pass
 
         print("🚀 Booting LTX ComfyUI Server...")
         self.process = subprocess.Popen(["python", "main.py"], cwd="/workspace/ComfyUI")
@@ -72,13 +65,13 @@ class LTXEngine:
             except:
                 time.sleep(1)
 
-    @modal.web_endpoint(method="POST")
+    # MODERN SYNTAX: fastapi_endpoint instead of web_endpoint
+    @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request):
         data = await request.json()
         image_url = data.get("image_url")
         workflow = data.get("workflow")
         
-        # Ensure the ComfyUI LoadImage node expects "master_plane.png"
         urllib.request.urlretrieve(image_url, "/workspace/ComfyUI/input/master_plane.png")
         
         prompt_data = json.dumps({"prompt": workflow}).encode('utf-8')
