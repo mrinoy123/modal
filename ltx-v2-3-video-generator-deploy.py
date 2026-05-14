@@ -32,14 +32,13 @@ image = (
 
 app = modal.App("ltx-v2-3-api")
 
-# 3. The Serverless Engine with Security Integration
 @app.cls(
     gpu="L4", 
     image=image, 
     volumes={"/mnt/weights": weights_volume},
-    # Link the secret you created in the Modal dashboard
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    scaledown_window=60 
+    scaledown_window=60,
+    timeout=600 # 10 minute timeout for long renders
 )
 class LTXEngine:
     @modal.enter()
@@ -52,62 +51,97 @@ class LTXEngine:
             dest = f"/workspace/ComfyUI/models/{folder}"
             if os.path.exists(dest) and not os.path.islink(dest):
                 shutil.rmtree(dest)
-            if not os.path.exists(dest):
+            if not os.path.exists(dest) and os.path.exists(src):
                 try:
                     os.symlink(src, dest)
                     print(f"✅ Linked: {folder}")
                 except Exception as e:
-                    pass
+                    print(f"❌ Failed to link {folder}: {e}")
 
         print("🚀 Booting LTX ComfyUI Server...")
-        self.process = subprocess.Popen(["python", "main.py"], cwd="/workspace/ComfyUI")
-        while True:
+        # Run main.py with --listen to ensure accessibility within the container
+        self.process = subprocess.Popen(["python", "main.py", "--listen", "127.0.0.1"], cwd="/workspace/ComfyUI")
+        
+        # Wait for server to be ready
+        for i in range(30):
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/")
+                print("⚡ ComfyUI is Ready!")
                 break
             except:
-                time.sleep(1)
+                time.sleep(2)
 
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
-        # Security Gate: Verify the API Key against the environment variable from the secret
+        # 1. Security Gate
         expected_key = os.environ.get("API_KEY")
-        
-        if x_api_key != expected_key:
-            print("🚫 Unauthorized request attempt.")
-            raise HTTPException(
-                status_code=403, 
-                detail="Unauthorized: GPU Access Denied."
-            )
+        if not x_api_key or x_api_key != expected_key:
+            print(f"🚫 Unauthorized. Key provided: {x_api_key}")
+            raise HTTPException(status_code=403, detail="Unauthorized: GPU Access Denied.")
 
-        # Proceed with generation logic after successful authentication
-        data = await request.json()
-        image_url = data.get("image_url")
-        workflow = data.get("workflow")
+        # 2. Parse Incoming Data
+        body = await request.json()
+        image_url = body.get("image_url")
+        workflow_raw = body.get("workflow")
         
-        print(f"🎬 Processing render request for: {image_url}")
+        # Handle n8n sending workflow as a string
+        if isinstance(workflow_raw, str):
+            workflow = json.loads(workflow_raw)
+        else:
+            workflow = workflow_raw
+
+        # 3. Clean Output Folder (Important: Don't return old videos)
+        out_dir = "/workspace/ComfyUI/output"
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
+        os.makedirs(out_dir)
+        
+        # 4. Download Input Image
+        print(f"🎬 Downloading start frame: {image_url}")
+        # Some CDNs block default python user-agents
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+        urllib.request.install_opener(opener)
         urllib.request.urlretrieve(image_url, "/workspace/ComfyUI/input/master_plane.png")
         
+        # 5. Send Prompt to ComfyUI
+        print("🌀 Injecting Workflow into Engine...")
         prompt_data = json.dumps({"prompt": workflow}).encode('utf-8')
         req = urllib.request.Request("http://127.0.0.1:8188/prompt", data=prompt_data)
-        prompt_id = json.loads(urllib.request.urlopen(req).read())['prompt_id']
+        try:
+            response = urllib.request.urlopen(req)
+            prompt_id = json.loads(response.read())['prompt_id']
+            print(f"✅ Render Started. Prompt ID: {prompt_id}")
+        except Exception as e:
+            print(f"❌ ComfyUI API Error: {e}")
+            raise HTTPException(status_code=500, detail="ComfyUI refused the workflow.")
         
+        # 6. Wait for Completion
+        start_time = time.time()
         while True:
             res = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
             history = json.loads(res.read())
             if prompt_id in history:
                 break
-            time.sleep(2)
             
-        out_dir = "/workspace/ComfyUI/output"
+            # Timeout after 8 minutes
+            if time.time() - start_time > 480:
+                raise HTTPException(status_code=504, detail="Render Timeout.")
+            
+            time.sleep(3)
+            
+        # 7. Find and Return Video
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-        
         if not videos:
-            raise HTTPException(status_code=500, detail="Video generation failed.")
+            print("❌ No video found in output folder.")
+            raise HTTPException(status_code=500, detail="Generation complete but video file missing.")
 
-        with open(os.path.join(out_dir, videos[0]), "rb") as f:
+        # Sort by newest
+        videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
+        video_path = os.path.join(out_dir, videos[0])
+        
+        with open(video_path, "rb") as f:
             video_bytes = f.read()
             
-        print("✅ Render complete. Sending file.")
+        print(f"🔥 Successfully rendered {videos[0]}. Sending back to n8n.")
         return Response(content=video_bytes, media_type="video/mp4")
