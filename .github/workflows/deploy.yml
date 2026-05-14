@@ -3,7 +3,7 @@ name: 🚀 Deploy n8n API Engines to Modal
 on:
   push:
     branches:
-      - main # Auto-deploys when you push code updates
+      - main
   workflow_dispatch:
     inputs:
       target:
@@ -28,11 +28,9 @@ jobs:
         with:
           python-version: '3.11'
 
-      # FIX 1: We install 'fastapi' alongside modal so the deploy script can read your imports without crashing.
       - name: 📦 Install Modal & Dependencies
         run: pip install modal fastapi
 
-      # FIX 2: Removed the ${{ }} brackets from the 'if' statements. GitHub Actions syntax requires raw conditions here.
       - name: 🚀 Deploy LTX v2.3 Engine
         if: github.event.inputs.target == 'both' || github.event.inputs.target == 'ltx-v2-3' || github.event_name == 'push'
         env:
