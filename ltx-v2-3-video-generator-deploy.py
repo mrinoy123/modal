@@ -5,7 +5,7 @@ import os
 import json
 import urllib.request
 import shutil
-import boto3 # Required for private R2 access
+# Do NOT import boto3 here at the top
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
@@ -17,15 +17,13 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
     .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu121")
-    .pip_install("fastapi", "aiohttp", "boto3") # Added boto3
+    .pip_install("fastapi", "aiohttp", "boto3") # Boto3 is installed in the container
     .run_commands(
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
-        
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
-        
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt"
     )
@@ -44,6 +42,8 @@ app = modal.App("ltx-v2-3-api")
 class LTXEngine:
     @modal.enter()
     def start_comfy(self):
+        import boto3 # IMPORT INSIDE THE METHOD
+        
         # Symlink weights
         print("🔗 Linking Models from Volume...")
         folders = ["unet", "vae", "clip", "loras", "text_encoders", "upscale_models"]
@@ -79,12 +79,11 @@ class LTXEngine:
 
         # 2. Parse Request
         data = await request.json()
-        image_url = data.get("image_url") # e.g. https://...dev/2026-05-14/plane.png
+        image_url = data.get("image_url") 
         workflow_raw = data.get("workflow")
         workflow = json.loads(workflow_raw) if isinstance(workflow_raw, str) else workflow_raw
 
         # 3. Secure Download via Boto3 (Private Storage)
-        # Extract the Key (path) from the URL: everything after the domain
         file_key = image_url.split(".dev/")[-1] 
         local_input_path = "/workspace/ComfyUI/input/master_plane.png"
         
@@ -94,7 +93,7 @@ class LTXEngine:
             print("✅ Image downloaded securely via Boto3")
         except Exception as e:
             print(f"❌ R2 Download Error: {e}")
-            raise HTTPException(status_code=500, detail="Failed to fetch private asset")
+            raise HTTPException(status_code=500, detail=f"R2 Private Fetch Failed: {str(e)}")
 
         # 4. Cleanup Output
         out_dir = "/workspace/ComfyUI/output"
@@ -121,5 +120,4 @@ class LTXEngine:
         
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
-            print(f"🔥 Sending video: {videos[0]}")
             return Response(content=f.read(), media_type="video/mp4")
