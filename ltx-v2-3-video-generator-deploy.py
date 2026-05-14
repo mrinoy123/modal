@@ -4,10 +4,11 @@ import time
 import os
 import json
 import urllib.request
+import shutil
 from fastapi import Request, Response
 
-# 1. Mount the exact storage volume you confirmed
-weights_volume = modal.Volume.from_name("modal-comfyui-storage")
+# 1. MOUNT THE CORRECT VOLUME (From your screenshots)
+weights_volume = modal.Volume.from_name("ltx-video-weights")
 
 # 2. Build the Python 3.11 Image
 image = (
@@ -35,17 +36,33 @@ app = modal.App("ltx-v2-3-api")
 @app.cls(
     gpu="L4", 
     image=image, 
-    # Mount specific folders so ComfyUI finds the GGUF at the root of your volume
-    volumes={
-        "/workspace/ComfyUI/models/unet": weights_volume,
-        "/workspace/ComfyUI/models/vae": weights_volume,
-        "/workspace/ComfyUI/models/clip": weights_volume
-    },
-    container_idle_timeout=60 # SHUT DOWN 1 MINUTE AFTER n8n FINISHES
+    # We mount the volume to a safe data folder first
+    volumes={"/mnt/weights": weights_volume},
+    container_idle_timeout=60 # SHUT DOWN EXACTLY 1 MINUTE AFTER n8n FINISHES
 )
 class LTXEngine:
     @modal.enter()
     def start_comfy(self):
+        print("🔗 Linking Models from Volume...")
+        # Automatically link the folders from your comfyui_models path to the active ComfyUI path
+        folders_to_link = ["unet", "vae", "clip", "loras", "text_encoders", "upscale_models"]
+        
+        for folder in folders_to_link:
+            src = f"/mnt/weights/comfyui_models/{folder}"
+            dest = f"/workspace/ComfyUI/models/{folder}"
+            
+            # If ComfyUI created an empty default folder, remove it
+            if os.path.exists(dest) and not os.path.islink(dest):
+                shutil.rmtree(dest)
+                
+            # Create the symlink to your Modal Volume
+            if not os.path.exists(dest):
+                try:
+                    os.symlink(src, dest)
+                    print(f"✅ Linked: {folder}")
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not link {folder}: {e}")
+
         print("🚀 Booting LTX ComfyUI Server...")
         self.process = subprocess.Popen(["python", "main.py"], cwd="/workspace/ComfyUI")
         while True:
