@@ -13,7 +13,7 @@ on:
         type: choice
         options:
           - both
-          - ltx-v2-3 # Changed . to -
+          - ltx-v2-3
           - sonic-lypsync
 
 jobs:
@@ -38,10 +38,10 @@ jobs:
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
           echo "Deploying LTX v2.3 Video API..."
-          modal deploy ltx-v2-3-video-generator-deploy.py # Clean filename
+          modal deploy ltx-v2-3-video-generator-deploy.py
 
       - name: 🗣️ Deploy Sonic Lip-Sync Engine
-        if: ${{ github.event.inputs.target == 'both' || ${{ github.event.inputs.target == 'sonic-lypsync' || github.event_name == 'push' }}
+        if: ${{ github.event.inputs.target == 'both' || github.event.inputs.target == 'sonic-lypsync' || github.event_name == 'push' }}
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
