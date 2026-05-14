@@ -5,7 +5,8 @@ import os
 import json
 import urllib.request
 import shutil
-from fastapi import Request, Response
+from fastapi import Request, Response, HTTPException, Header
+from typing import Optional
 
 # 1. MOUNT THE CORRECT VOLUME
 weights_volume = modal.Volume.from_name("ltx-video-weights")
@@ -25,19 +26,20 @@ image = (
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
         
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt",
-        # FIX IS HERE: The author uses a custom text file name for requirements
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt"
     )
 )
 
 app = modal.App("ltx-v2-3-api")
 
-# 3. The Serverless Engine
+# 3. The Serverless Engine with Security Integration
 @app.cls(
     gpu="L4", 
     image=image, 
     volumes={"/mnt/weights": weights_volume},
-    scaledown_window=60 # SHUT DOWN EXACTLY 1 MINUTE LATER
+    # Link the secret you created in the Modal dashboard
+    secrets=[modal.Secret.from_name("video-generator-workflow")], 
+    scaledown_window=60 
 )
 class LTXEngine:
     @modal.enter()
@@ -67,11 +69,23 @@ class LTXEngine:
                 time.sleep(1)
 
     @modal.fastapi_endpoint(method="POST")
-    async def generate(self, request: Request):
+    async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
+        # Security Gate: Verify the API Key against the environment variable from the secret
+        expected_key = os.environ.get("API_KEY")
+        
+        if x_api_key != expected_key:
+            print("🚫 Unauthorized request attempt.")
+            raise HTTPException(
+                status_code=403, 
+                detail="Unauthorized: GPU Access Denied."
+            )
+
+        # Proceed with generation logic after successful authentication
         data = await request.json()
         image_url = data.get("image_url")
         workflow = data.get("workflow")
         
+        print(f"🎬 Processing render request for: {image_url}")
         urllib.request.urlretrieve(image_url, "/workspace/ComfyUI/input/master_plane.png")
         
         prompt_data = json.dumps({"prompt": workflow}).encode('utf-8')
@@ -89,7 +103,11 @@ class LTXEngine:
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         
+        if not videos:
+            raise HTTPException(status_code=500, detail="Video generation failed.")
+
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
             video_bytes = f.read()
             
+        print("✅ Render complete. Sending file.")
         return Response(content=video_bytes, media_type="video/mp4")
