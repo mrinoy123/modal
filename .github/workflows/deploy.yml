@@ -1,0 +1,50 @@
+name: 🚀 Deploy n8n API Engines to Modal
+
+on:
+  push:
+    branches:
+      - main # Auto-deploys when you push code updates
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which API engine to deploy?'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - ltx-v2.3
+          - sonic-lypsync
+
+jobs:
+  deploy-modal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛰️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install Modal
+        run: pip install modal
+
+      - name: 🚀 Deploy LTX v2.3 Engine
+        if: ${{ github.event.inputs.target == 'both' || github.event.inputs.target == 'ltx-v2.3' || github.event_name == 'push' }}
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          echo "Deploying LTX v2.3 Video API..."
+          modal deploy ltx-v2.3-video-generator-deploy.py
+
+      - name: 🗣️ Deploy Sonic Lip-Sync Engine
+        if: ${{ github.event.inputs.target == 'both' || github.event.inputs.target == 'sonic-lypsync' || github.event_name == 'push' }}
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          echo "Deploying Sonic Lip-Sync API..."
+          modal deploy sonic-lypsync-deploy.py
