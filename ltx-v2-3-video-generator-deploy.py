@@ -69,7 +69,7 @@ app = modal.App("ltx-v2-3-api")
     timeout=1200 
 )
 class LTXEngine:
-    @modal.enter()
+@modal.enter()
     def start_comfy(self):
         import boto3
         print("🔗 Mapping Models...")
@@ -90,16 +90,20 @@ class LTXEngine:
         )
 
         print("🚀 Starting ComfyUI...")
+        # CHANGED: Switched from --highvram to --normalvram
+        # CHANGED: Removed --disable-smart-memory to allow offloading
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--use-sage-attention", "--highvram", "--bf16-vae", "--disable-smart-memory"
+            "--use-sage-attention", 
+            "--normalvram", 
+            "--bf16-vae"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         
         start_wait = time.time()
         while time.time() - start_wait < 180:
             if self.process.poll() is not None:
                 print(f"❌ ComfyUI died:\n{self.process.stdout.read()}")
-                sys.exit(1) # Kill container to stop billing
+                sys.exit(1)
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1)
                 print("⚡ Online")
