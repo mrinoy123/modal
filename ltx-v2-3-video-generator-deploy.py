@@ -9,19 +9,25 @@ import sys
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# 1. Setup Volume for weights
+# 1. Setup Volume
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
 # 2. Build the Image
 image = (
     modal.Image.from_registry("nvidia/cuda:12.5.1-devel-ubuntu24.04", add_python="3.12")
-    .apt_install("git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "ninja-build")
+    .apt_install(
+        "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
+        "build-essential", "ninja-build", "cmake", "clang", "llvm"
+    )
     .env({
         "CUDA_HOME": "/usr/local/cuda",
         "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
         "FORCE_CUDA": "1",
-        "TORCH_CUDA_ARCH_LIST": "8.9",  # Target architecture for NVIDIA L4
-        "MAX_JOBS": "1"                  # CRITICAL: Prevents OOM by compiling one file at a time
+        "TORCH_CUDA_ARCH_LIST": "8.9", 
+        "MAX_JOBS": "1",
+        # FORCE the system to use GCC/G++ to avoid the "clang++ not found" error
+        "CC": "gcc",
+        "CXX": "g++",
     })
     .pip_install(
         "torch==2.5.1", 
@@ -32,15 +38,14 @@ image = (
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0") 
     .run_commands(
         # BUILD SageAttention from source
-        # Using MAX_JOBS=1 via env var above to ensure it doesn't crash the builder
         "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
         "cd /workspace/SageAttention && pip install --no-build-isolation .",
         
-        # Setup ComfyUI Core
+        # Setup ComfyUI
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
-        # Install Custom Nodes
+        # Install Nodes
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
@@ -48,7 +53,7 @@ image = (
         "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
         "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
         
-        # Automatic requirement install for all nodes
+        # Dependency check for nodes
         "find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
     )
 )
@@ -60,14 +65,13 @@ app = modal.App("ltx-v2-3-api")
     image=image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    scaledown_window=30, 
+    scaledown_window=30, # Stop billing 30s after work is done
     timeout=1200 
 )
 class LTXEngine:
     @modal.enter()
     def start_comfy(self):
         import boto3
-        
         print("🔗 Mapping Models...")
         for d in ["unet", "vae", "clip", "text_encoders", "upscale_models"]:
             src, dest = f"/mnt/weights/comfyui_models/{d}", f"/workspace/ComfyUI/models/{d}"
@@ -95,7 +99,7 @@ class LTXEngine:
         while time.time() - start_wait < 180:
             if self.process.poll() is not None:
                 print(f"❌ ComfyUI died:\n{self.process.stdout.read()}")
-                sys.exit(1)
+                sys.exit(1) # Kill container to stop billing
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1)
                 print("⚡ Online")
@@ -115,8 +119,7 @@ class LTXEngine:
             raise HTTPException(status_code=403, detail="Unauthorized")
 
         data = await request.json()
-        image_url = data.get("image_url")
-        workflow = data.get("workflow")
+        image_url, workflow = data.get("image_url"), data.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
         local_input = "/workspace/ComfyUI/input/master_plane.png"
@@ -141,7 +144,7 @@ class LTXEngine:
 
         start_time = time.time()
         while True:
-            # STOP STREAMING / BILLING if process dies
+            # STOP BILLING if process crashes during generation
             if self.process.poll() is not None:
                 print("❌ Server crashed during render!")
                 sys.exit(1) 
@@ -157,7 +160,7 @@ class LTXEngine:
             time.sleep(5)
 
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        if not videos: raise HTTPException(status_code=500, detail="No video")
+        if not videos: raise HTTPException(status_code=500, detail="No video produced")
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
