@@ -9,18 +9,19 @@ import sys
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# 1. Setup Volume for weights
+# 1. Setup Volume
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
 # 2. Build the Image
 image = (
     modal.Image.from_registry("nvidia/cuda:12.5.1-devel-ubuntu24.04", add_python="3.12")
     .apt_install("git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "ninja-build")
-    # Set environment variables for the compiler
+    # CRITICAL: Set environment variables for the CPU builder to compile CUDA kernels
     .env({
         "CUDA_HOME": "/usr/local/cuda",
         "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
-        "FORCE_CUDA": "1"
+        "FORCE_CUDA": "1",
+        "TORCH_CUDA_ARCH_LIST": "8.9",  # Target architecture for NVIDIA L4
     })
     .pip_install(
         "torch==2.5.1", 
@@ -30,7 +31,7 @@ image = (
     )
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools", "wheel") 
     .run_commands(
-        # BUILD SageAttention with build isolation DISABLED so it can see torch
+        # BUILD SageAttention from source with architecture explicitly set
         "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
         "cd /workspace/SageAttention && pip install --no-build-isolation .",
         
@@ -46,7 +47,7 @@ image = (
         "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
         "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
         
-        # Install all requirements for all cloned nodes
+        # Final dependency sweep for nodes
         "find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
     )
 )
@@ -58,7 +59,7 @@ app = modal.App("ltx-v2-3-api")
     image=image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    scaledown_window=30, # Shuts down quickly when idle to save GPU cost
+    scaledown_window=30, 
     timeout=1200 
 )
 class LTXEngine:
@@ -90,18 +91,16 @@ class LTXEngine:
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         
         start_wait = time.time()
-        while time.time() - start_wait < 180: # 3 minute boot allowance
+        while time.time() - start_wait < 180:
             if self.process.poll() is not None:
-                log = self.process.stdout.read()
-                print(f"❌ ComfyUI died on boot:\n{log}")
-                sys.exit(1) # KILL CONTAINER TO STOP GPU BILLING
+                print(f"❌ ComfyUI died:\n{self.process.stdout.read()}")
+                sys.exit(1)
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1)
-                print("⚡ ComfyUI Online")
+                print("⚡ Online")
                 return
             except:
                 time.sleep(2)
-        print("❌ ComfyUI boot timed out.")
         sys.exit(1)
 
     @modal.exit()
@@ -137,28 +136,25 @@ class LTXEngine:
             req = urllib.request.Request("http://127.0.0.1:8188/prompt", data=prompt_payload)
             prompt_id = json.loads(urllib.request.urlopen(req).read())['prompt_id']
         except Exception as e:
-            raise HTTPException(status_code=500, detail="ComfyUI Prompt Failed")
+            raise HTTPException(status_code=500, detail="Prompt Failed")
 
         start_time = time.time()
         while True:
-            # 🚨 WATCHDOG: Stop streaming/billing if ComfyUI crashes
             if self.process.poll() is not None:
-                print("❌ Server crashed during render!")
-                sys.exit(1) 
+                sys.exit(1) # Stop Billing
 
             try:
                 check = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
-                history = json.loads(check.read())
-                if prompt_id in history: break
+                if prompt_id in json.loads(check.read()): break
             except:
                 pass 
 
             if time.time() - start_time > 1100:
-                raise HTTPException(status_code=504, detail="Render Timeout")
+                raise HTTPException(status_code=504, detail="Timeout")
             time.sleep(5)
 
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        if not videos: raise HTTPException(status_code=500, detail="No video produced")
+        if not videos: raise HTTPException(status_code=500, detail="No video")
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
