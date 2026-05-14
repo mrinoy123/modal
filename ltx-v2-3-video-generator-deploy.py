@@ -20,6 +20,7 @@ image = (
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
+        # EXACT NODES FOR YOUR LTX WORKFLOW A:
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
@@ -36,7 +37,7 @@ app = modal.App("ltx-v2-3-api")
     gpu="L4", 
     image=image, 
     volumes={"/mnt/weights": weights_volume},
-    scaledown_window=60 # MODERN SYNTAX: SHUT DOWN EXACTLY 1 MINUTE LATER
+    scaledown_window=60 # SHUT DOWN EXACTLY 1 MINUTE LATER
 )
 class LTXEngine:
     @modal.enter()
@@ -65,7 +66,6 @@ class LTXEngine:
             except:
                 time.sleep(1)
 
-    # MODERN SYNTAX: fastapi_endpoint instead of web_endpoint
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request):
         data = await request.json()
