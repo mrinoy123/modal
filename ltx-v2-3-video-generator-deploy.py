@@ -13,33 +13,33 @@ from typing import Optional
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
 # 2. Build the Modern Image (CUDA 12.4 + Python 3.12)
-# We use the devel image to ensure Triton and SageAttention have access to the CUDA compiler (nvcc)
+# The 'devel' version is required so Triton can compile kernels for the L4 architecture
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.12")
-    .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
-    # Install PyTorch 2.5.1 with cu124 support
+    .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0", "build-essential")
+    # Install PyTorch 2.5.1 for CUDA 12.4 compatibility
     .pip_install("torch==2.5.1", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu124")
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0") 
     .run_commands(
-        # 2a. Install SageAttention 2.2.0 via precompiled wheel
+        # 2a. Install SageAttention 2.2.0 via precompiled Linux wheel
         "pip install https://huggingface.co/Kijai/PrecompiledWheels/resolve/main/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl",
         
         # 2b. Clone Core ComfyUI
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
-        # 2c. Base Nodes (GGUF, VHS, RIFE)
+        # 2c. Install Required Custom Nodes
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt",
+        
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
+        
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
         
-        # 2d. KJNodes (Provides the LTX2 Sage Attention Patch)
         "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt",
         
-        # 2e. Impact Pack (Provides the ToMe Patch Model)
         "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt"
     )
@@ -68,7 +68,7 @@ class LTXEngine:
             if os.path.exists(dest) and not os.path.islink(dest): shutil.rmtree(dest)
             if not os.path.exists(dest) and os.path.exists(src): os.symlink(src, dest)
 
-        # Initialize Boto3 Client for Private R2
+        # Initialize Boto3 Client
         self.s3 = boto3.client(
             service_name='s3',
             endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
@@ -78,12 +78,20 @@ class LTXEngine:
         )
 
         print("🚀 Booting LTX ComfyUI Server...")
-        # Added --fp8_base for extra memory headroom on the L4
-        self.process = subprocess.Popen(["python", "main.py", "--listen", "127.0.0.1", "--fp8_base"], cwd="/workspace/ComfyUI")
+        # Corrected flags: removed --fp8_base, added specific hardware optimizations
+        self.process = subprocess.Popen([
+            "python", "main.py", 
+            "--listen", "127.0.0.1", 
+            "--use-sage-attention",
+            "--highvram",
+            "--bf16-vae",
+            "--disable-smart-memory"
+        ], cwd="/workspace/ComfyUI")
+        
         for i in range(40):
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/")
-                print("⚡ ComfyUI is Ready!")
+                print("⚡ Server Ready!")
                 break
             except:
                 time.sleep(2)
@@ -123,7 +131,6 @@ class LTXEngine:
             res = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
             history = json.loads(res.read())
             if prompt_id in history: break
-            
             if time.time() - start_time > 1100: raise HTTPException(status_code=504, detail="Timeout")
             time.sleep(5)
             
