@@ -4,12 +4,13 @@ import time
 import os
 import json
 import urllib.request
+import shutil
 from fastapi import Request, Response
 
-# 1. Mount the exact storage volume you confirmed
-weights_volume = modal.Volume.from_name("modal-comfyui-storage")
+# 1. MOUNT THE CORRECT VOLUME FOR SONIC (From your screenshot)
+weights_volume = modal.Volume.from_name("sonic-video-weights")
 
-# 2. Build the Python 3.10 Image
+# 2. Build the Python 3.10 Image (Crucial for Sonic stability)
 image = (
     modal.Image.debian_slim(python_version="3.10")
     .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
@@ -19,7 +20,7 @@ image = (
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
-        # Sonic Specific Nodes (NO RIFE)
+        # Sonic Specific Nodes
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/comfyanonymous/ComfyUI_Sonic.git /workspace/ComfyUI/custom_nodes/ComfyUI_Sonic",
         
@@ -33,13 +34,29 @@ app = modal.App("sonic-lypsync-api")
 @app.cls(
     gpu="L4", 
     image=image, 
-    # Mount the entire models directory so Sonic can find SVD and its specific checkpoints
-    volumes={"/workspace/ComfyUI/models": weights_volume},
-    container_idle_timeout=60 # SHUT DOWN 1 MINUTE AFTER n8n FINISHES
+    volumes={"/mnt/weights": weights_volume}, # Safe mount path
+    scaledown_window=60 # MODERN SYNTAX: SHUT DOWN EXACTLY 1 MINUTE LATER
 )
 class SonicEngine:
     @modal.enter()
     def start_comfy(self):
+        print("🔗 Linking Sonic Models from Volume...")
+        # Using the exact folders shown in your sonic-video-weights volume screenshot
+        folders_to_link = ["checkpoints", "clip_vision", "face_detection", "sonic", "vae", "unet", "clip"]
+        
+        for folder in folders_to_link:
+            src = f"/mnt/weights/comfyui_models/{folder}"
+            dest = f"/workspace/ComfyUI/models/{folder}"
+            
+            if os.path.exists(dest) and not os.path.islink(dest):
+                shutil.rmtree(dest)
+            if not os.path.exists(dest):
+                try:
+                    os.symlink(src, dest)
+                    print(f"✅ Linked: {folder}")
+                except Exception as e:
+                    pass
+
         print("🗣️ Booting Sonic Lip-Sync Server...")
         self.process = subprocess.Popen(["python", "main.py"], cwd="/workspace/ComfyUI")
         while True:
@@ -49,11 +66,12 @@ class SonicEngine:
             except:
                 time.sleep(1)
 
-    @modal.web_endpoint(method="POST")
+    # MODERN SYNTAX: fastapi_endpoint instead of web_endpoint
+    @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request):
         data = await request.json()
         image_url = data.get("image_url")
-        audio_url = data.get("audio_url") # Sonic needs an audio file URL from n8n
+        audio_url = data.get("audio_url") # Sonic requires an audio file
         workflow = data.get("workflow")
         
         # Ensure the ComfyUI LoadImage and LoadAudio nodes expect these exact filenames
