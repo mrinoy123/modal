@@ -9,19 +9,19 @@ import sys
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# 1. Setup Volume
+# 1. Setup Volume for weights
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
 # 2. Build the Image
 image = (
     modal.Image.from_registry("nvidia/cuda:12.5.1-devel-ubuntu24.04", add_python="3.12")
     .apt_install("git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "ninja-build")
-    # CRITICAL: Set environment variables for the CPU builder to compile CUDA kernels
     .env({
         "CUDA_HOME": "/usr/local/cuda",
         "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
         "FORCE_CUDA": "1",
         "TORCH_CUDA_ARCH_LIST": "8.9",  # Target architecture for NVIDIA L4
+        "MAX_JOBS": "1"                  # CRITICAL: Prevents OOM by compiling one file at a time
     })
     .pip_install(
         "torch==2.5.1", 
@@ -29,13 +29,14 @@ image = (
         "torchaudio", 
         index_url="https://download.pytorch.org/whl/cu124"
     )
-    .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools", "wheel") 
+    .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0") 
     .run_commands(
-        # BUILD SageAttention from source with architecture explicitly set
+        # BUILD SageAttention from source
+        # Using MAX_JOBS=1 via env var above to ensure it doesn't crash the builder
         "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
         "cd /workspace/SageAttention && pip install --no-build-isolation .",
         
-        # Setup ComfyUI
+        # Setup ComfyUI Core
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
         
@@ -47,7 +48,7 @@ image = (
         "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
         "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
         
-        # Final dependency sweep for nodes
+        # Automatic requirement install for all nodes
         "find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
     )
 )
@@ -140,8 +141,10 @@ class LTXEngine:
 
         start_time = time.time()
         while True:
+            # STOP STREAMING / BILLING if process dies
             if self.process.poll() is not None:
-                sys.exit(1) # Stop Billing
+                print("❌ Server crashed during render!")
+                sys.exit(1) 
 
             try:
                 check = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
