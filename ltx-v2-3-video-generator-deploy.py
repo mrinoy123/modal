@@ -12,17 +12,15 @@ from typing import Optional
 # 1. MOUNT THE CORRECT VOLUME
 weights_volume = modal.Volume.from_name("ltx-video-weights")
 
-# 2. Build the Python 3.11 Image with New Optimization Nodes
+# 2. Build the Python 3.12 Image (Upgraded from 3.11 for the precompiled wheel)
 image = (
-    modal.Image.debian_slim(python_version="3.11")
-    # Added build-essential so SageAttention can compile its C++/CUDA kernels
+    modal.Image.debian_slim(python_version="3.12")
     .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0", "build-essential")
     .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu121")
-    # Added triton for SageAttention support
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.0.0") 
     .run_commands(
-        # 2a. Install SageAttention 2.2.0 explicitly
-        "pip install sageattention==2.2.0 --no-build-isolation",
+        # 2a. Install SageAttention 2.2.0 using the precompiled HuggingFace wheel for Python 3.12 Linux
+        "pip install https://huggingface.co/Kijai/PrecompiledWheels/resolve/main/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl",
         
         # 2b. Clone Core ComfyUI
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
@@ -35,11 +33,11 @@ image = (
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
         
-        # 2d. NEW: KJNodes (Provides the LTX2 Sage Attention Patch)
+        # 2d. KJNodes (Provides the LTX2 Sage Attention Patch)
         "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes/requirements.txt",
         
-        # 2e. NEW: Impact Pack (Provides the ToMe Patch Model)
+        # 2e. Impact Pack (Provides the ToMe Patch Model)
         "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack/requirements.txt"
     )
@@ -128,7 +126,7 @@ class LTXEngine:
             history = json.loads(res.read())
             if prompt_id in history: break
             
-            # Bumped timeout to 800s to safely accommodate 65 frames + RIFE interpolation
+            # Bumped timeout to 800s
             if time.time() - start_time > 800: raise HTTPException(status_code=504, detail="Timeout")
             time.sleep(4)
             
