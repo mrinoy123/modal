@@ -5,6 +5,7 @@ import os
 import json
 import urllib.request
 import shutil
+import boto3 # Required for private R2 access
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
@@ -16,7 +17,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("git", "wget", "ffmpeg", "libgl1-mesa-glx", "libglib2.0-0")
     .pip_install("torch", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu121")
-    .pip_install("fastapi", "aiohttp")
+    .pip_install("fastapi", "aiohttp", "boto3") # Added boto3
     .run_commands(
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt",
@@ -38,31 +39,30 @@ app = modal.App("ltx-v2-3-api")
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
     scaledown_window=60,
-    timeout=600 # 10 minute timeout for long renders
+    timeout=900 
 )
 class LTXEngine:
     @modal.enter()
     def start_comfy(self):
+        # Symlink weights
         print("🔗 Linking Models from Volume...")
-        folders_to_link = ["unet", "vae", "clip", "loras", "text_encoders", "upscale_models"]
-        
-        for folder in folders_to_link:
-            src = f"/mnt/weights/comfyui_models/{folder}"
-            dest = f"/workspace/ComfyUI/models/{folder}"
-            if os.path.exists(dest) and not os.path.islink(dest):
-                shutil.rmtree(dest)
-            if not os.path.exists(dest) and os.path.exists(src):
-                try:
-                    os.symlink(src, dest)
-                    print(f"✅ Linked: {folder}")
-                except Exception as e:
-                    print(f"❌ Failed to link {folder}: {e}")
+        folders = ["unet", "vae", "clip", "loras", "text_encoders", "upscale_models"]
+        for f in folders:
+            src, dest = f"/mnt/weights/comfyui_models/{f}", f"/workspace/ComfyUI/models/{f}"
+            if os.path.exists(dest) and not os.path.islink(dest): shutil.rmtree(dest)
+            if not os.path.exists(dest) and os.path.exists(src): os.symlink(src, dest)
+
+        # Initialize Boto3 Client for Private R2
+        self.s3 = boto3.client(
+            service_name='s3',
+            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
+            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
+            region_name="auto"
+        )
 
         print("🚀 Booting LTX ComfyUI Server...")
-        # Run main.py with --listen to ensure accessibility within the container
         self.process = subprocess.Popen(["python", "main.py", "--listen", "127.0.0.1"], cwd="/workspace/ComfyUI")
-        
-        # Wait for server to be ready
         for i in range(30):
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/")
@@ -73,75 +73,53 @@ class LTXEngine:
 
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
-        # 1. Security Gate
-        expected_key = os.environ.get("API_KEY")
-        if not x_api_key or x_api_key != expected_key:
-            print(f"🚫 Unauthorized. Key provided: {x_api_key}")
-            raise HTTPException(status_code=403, detail="Unauthorized: GPU Access Denied.")
+        # 1. Security check
+        if x_api_key != os.environ.get("API_KEY"):
+            raise HTTPException(status_code=403, detail="Unauthorized")
 
-        # 2. Parse Incoming Data
-        body = await request.json()
-        image_url = body.get("image_url")
-        workflow_raw = body.get("workflow")
+        # 2. Parse Request
+        data = await request.json()
+        image_url = data.get("image_url") # e.g. https://...dev/2026-05-14/plane.png
+        workflow_raw = data.get("workflow")
+        workflow = json.loads(workflow_raw) if isinstance(workflow_raw, str) else workflow_raw
+
+        # 3. Secure Download via Boto3 (Private Storage)
+        # Extract the Key (path) from the URL: everything after the domain
+        file_key = image_url.split(".dev/")[-1] 
+        local_input_path = "/workspace/ComfyUI/input/master_plane.png"
         
-        # Handle n8n sending workflow as a string
-        if isinstance(workflow_raw, str):
-            workflow = json.loads(workflow_raw)
-        else:
-            workflow = workflow_raw
+        print(f"🎬 Private Fetch: {file_key}")
+        try:
+            self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input_path)
+            print("✅ Image downloaded securely via Boto3")
+        except Exception as e:
+            print(f"❌ R2 Download Error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to fetch private asset")
 
-        # 3. Clean Output Folder (Important: Don't return old videos)
+        # 4. Cleanup Output
         out_dir = "/workspace/ComfyUI/output"
-        if os.path.exists(out_dir):
-            shutil.rmtree(out_dir)
+        if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
-        
-        # 4. Download Input Image
-        print(f"🎬 Downloading start frame: {image_url}")
-        # Some CDNs block default python user-agents
-        opener = urllib.request.build_opener()
-        opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
-        urllib.request.install_opener(opener)
-        urllib.request.urlretrieve(image_url, "/workspace/ComfyUI/input/master_plane.png")
-        
-        # 5. Send Prompt to ComfyUI
-        print("🌀 Injecting Workflow into Engine...")
+
+        # 5. Execute Render
+        print("🌀 Starting GPU Render...")
         prompt_data = json.dumps({"prompt": workflow}).encode('utf-8')
         req = urllib.request.Request("http://127.0.0.1:8188/prompt", data=prompt_data)
-        try:
-            response = urllib.request.urlopen(req)
-            prompt_id = json.loads(response.read())['prompt_id']
-            print(f"✅ Render Started. Prompt ID: {prompt_id}")
-        except Exception as e:
-            print(f"❌ ComfyUI API Error: {e}")
-            raise HTTPException(status_code=500, detail="ComfyUI refused the workflow.")
+        prompt_id = json.loads(urllib.request.urlopen(req).read())['prompt_id']
         
-        # 6. Wait for Completion
         start_time = time.time()
         while True:
             res = urllib.request.urlopen(f"http://127.0.0.1:8188/history/{prompt_id}")
             history = json.loads(res.read())
-            if prompt_id in history:
-                break
+            if prompt_id in history: break
+            if time.time() - start_time > 600: raise HTTPException(status_code=504, detail="Timeout")
+            time.sleep(4)
             
-            # Timeout after 8 minutes
-            if time.time() - start_time > 480:
-                raise HTTPException(status_code=504, detail="Render Timeout.")
-            
-            time.sleep(3)
-            
-        # 7. Find and Return Video
+        # 6. Return Result
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        if not videos:
-            print("❌ No video found in output folder.")
-            raise HTTPException(status_code=500, detail="Generation complete but video file missing.")
-
-        # Sort by newest
-        videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-        video_path = os.path.join(out_dir, videos[0])
+        if not videos: raise HTTPException(status_code=500, detail="Render failed")
         
-        with open(video_path, "rb") as f:
-            video_bytes = f.read()
-            
-        print(f"🔥 Successfully rendered {videos[0]}. Sending back to n8n.")
-        return Response(content=video_bytes, media_type="video/mp4")
+        videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
+        with open(os.path.join(out_dir, videos[0]), "rb") as f:
+            print(f"🔥 Sending video: {videos[0]}")
+            return Response(content=f.read(), media_type="video/mp4")
