@@ -7,13 +7,13 @@ import shutil
 import threading
 import aiohttp
 import urllib.request
+import asyncio
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION (Resolved GLIBCXX Conflicts)
+# 1. IMAGE DEFINITION
 # ==========================================
-# We use Ubuntu 24.04 to match the modern libstdc++ requirements
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
     add_python="3.12"
@@ -22,12 +22,11 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Set build environment for CUDA compilation
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
     "FORCE_CUDA": "1",
-    "TORCH_CUDA_ARCH_LIST": "8.9", # Optimized for L4
+    "TORCH_CUDA_ARCH_LIST": "8.9", 
     "MAX_JOBS": "1",
     "CC": "gcc",
     "CXX": "g++"
@@ -39,13 +38,12 @@ build_image = base_image.env({
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
 )
 
-# Compile SageAttention from source to ensure binary compatibility
 compiled_image = build_image.run_commands(
     "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
-# Finalize ComfyUI and Custom Nodes
+# Merged Custom Nodes: Easy-Use (for your error) + Impact-Pack (from v2.3)
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -55,8 +53,9 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
-    # Official Lightricks Node for 19B Looping
-    "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo"
+    "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
+    "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
+    "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack"
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;")
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -67,7 +66,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=16384,          # 16GB System RAM for 19B stability
+    memory=16384,          
     scaledown_window=60,
     timeout=3600 
 )
@@ -80,20 +79,26 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        # Linker Logic for 19B Weights
-        src_root = "/mnt/weights"
-        dest_root = "/workspace/ComfyUI/models"
-        mapping = {"unet": "unet", "clip": "clip", "vae": "vae", "vfi": "vfi"}
+        # --- SMART LINKER (Brought back from your v2.3 script) ---
+        weights_root = None
+        for mount in ["/mnt/weights", "/mnt"]:
+            if os.path.exists(mount):
+                for root, dirs, _ in os.walk(mount):
+                    if any(x in dirs for x in ["unet", "vae", "clip"]):
+                        weights_root = root
+                        break
+                if weights_root: break
 
-        for src_folder, dest_folder in mapping.items():
-            src = os.path.join(src_root, src_folder)
-            dest = os.path.join(dest_root, dest_folder)
-            if os.path.exists(src):
-                if os.path.exists(dest):
-                    shutil.rmtree(dest) if not os.path.islink(dest) else os.unlink(dest)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                os.symlink(src, dest)
-                print(f"🔗 Linked {src} -> {dest}")
+        if weights_root:
+            for m_type in ["unet", "vae", "clip", "text_encoders", "upscale_models", "vfi"]:
+                src = os.path.join(weights_root, m_type)
+                dest = f"/workspace/ComfyUI/models/{m_type}"
+                if os.path.exists(src):
+                    if os.path.exists(dest):
+                        shutil.rmtree(dest) if not os.path.islink(dest) else os.unlink(dest)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    os.symlink(src, dest)
+                    print(f"🔗 Linked {src} -> {dest}")
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -103,21 +108,22 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (Optimized)...")
+        print("🚀 Launching LTX-2 19B Engine (Merged V2.3 Logic)...")
         
+        # --- MEMORY STABILITY (Brought back from your v2.3 script) ---
         env_vars = os.environ.copy()
-        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
+        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
-        # Launch with 19B survival flags
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--lowvram",            # Swaps Joint Audio/Video latents
-            "--cache-none",         # Immediate VRAM purge
+            "--lowvram",            
+            "--cache-none",         
             "--use-sage-attention", 
             "--bf16-vae",
-            "--mmap",               # Saves system RAM by reading from disk
-            "--disable-smart-memory"
+            "--mmap",               # Required for 19B
+            "--disable-smart-memory",
+            "--disable-xformers"    # Brought back from v2.3
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -159,12 +165,19 @@ class LTXEngine:
             print(f"🎨 Processing 19B Joint Audio-Video Workflow...")
             async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                 res_json = await resp.json()
+                
+                # --- SAFE ERROR HANDLING ---
+                if "error" in res_json or "prompt_id" not in res_json:
+                    error_msg = res_json.get("error", res_json)
+                    print(f"❌ ComfyUI Rejected Prompt: {error_msg}")
+                    raise HTTPException(status_code=400, detail=f"Invalid Workflow JSON: {error_msg}")
+                
                 prompt_id = res_json['prompt_id']
 
             start_time = time.time()
             while True:
                 if self.process.poll() is not None:
-                    print("❌ GPU CRASHED.")
+                    print("❌ GPU CRASHED. Check Modal Logs.")
                     os._exit(1) 
 
                 async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
@@ -176,6 +189,9 @@ class LTXEngine:
                 await asyncio.sleep(5)
 
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
+        if not videos:
+            raise HTTPException(status_code=500, detail="Generation finished but no MP4 was found in output folder.")
+            
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
