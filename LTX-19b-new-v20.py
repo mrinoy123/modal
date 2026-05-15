@@ -92,7 +92,8 @@ class LTXEngine:
         print("🔗 Running Flattening Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        for folder in ["unet", "vae", "clip", "text_encoders", "vfi", "audio_vae"]:
+        # 🔥 FIXED: Added "checkpoints" to the folder creation list
+        for folder in ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints"]:
             os.makedirs(os.path.join(base_models_dir, folder), exist_ok=True)
 
         def safe_link(source, destination):
@@ -110,9 +111,11 @@ class LTXEngine:
                     elif "clip" in lower_path or "text_encoder" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "clip", filename))
                         safe_link(src_path, os.path.join(base_models_dir, "text_encoders", filename))
+                    # 🔥 FIXED: Audio VAE explicitly routed to the "checkpoints" folder
+                    elif "audio_vae" in lower_path:
+                        safe_link(src_path, os.path.join(base_models_dir, "checkpoints", filename))
                     elif "vae" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "vae", filename))
-                        safe_link(src_path, os.path.join(base_models_dir, "audio_vae", filename))
                     elif "vfi" in lower_path or "rife" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "vfi", filename))
 
@@ -144,10 +147,10 @@ class LTXEngine:
             "--mmap",                 
             "--temp-directory", "/tmp/comfy_swap", 
             "--disable-smart-memory", 
-            "--use-sage-attention", 
             "--bf16-vae",
             "--disable-xformers",
-            "--fp8_e4m3fn-text-enc"   # 🔥 CORE FIX: Forbids ComfyUI from expanding FP8 into FP16 inside VRAM
+            "--fp8_e4m3fn-text-enc"   
+            # 🔥 FIXED: Removed --use-sage-attention
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
