@@ -66,16 +66,15 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,               # 💰 Hard locked to 8GB RAM Cost-Saver Tier
+    memory=8192,
     scaledown_window=60,
-    timeout=10000 
+    timeout=3600 
 )
 class LTXEngine:
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
 
-    # RAM SQUEEZER Watchdog (Keeps the 8GB RAM from filling up with OS cache)
     async def _ram_squeezer(self):
         print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
@@ -127,16 +126,12 @@ class LTXEngine:
 
         print("🚀 Launching LTX-2 19B Engine (Direct GPU Safetensors Streaming)...")
         
-        # 🔥 ADDED OPTIMIZATION: Setup scratch directories on default free 512GB NVMe SSD
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
-        
-        # 🔥 ADDED OPTIMIZATION: Choke CPU threads to block background memory footprint bloat
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["OMP_NUM_THREADS"] = "1"
-        
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
@@ -144,14 +139,15 @@ class LTXEngine:
         
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--gpu-only",             # Forbids ComfyUI from pulling models to CPU staging RAM
-            "--cache-none",           # Forces deletion of the model from VRAM immediately after use
-            "--mmap",                 # Streams directly from SSD file pointers to GPU VRAM
-            "--temp-directory", "/tmp/comfy_swap", # 🔥 ADDED: Route internal model-swapping directly to SSD
-            "--disable-smart-memory", # Stops ComfyUI from tracking and caching tensors in RAM
+            "--gpu-only",             
+            "--cache-none",           
+            "--mmap",                 
+            "--temp-directory", "/tmp/comfy_swap", 
+            "--disable-smart-memory", 
             "--use-sage-attention", 
             "--bf16-vae",
-            "--disable-xformers"    
+            "--disable-xformers",
+            "--fp8_e4m3fn-text-enc"   # 🔥 CORE FIX: Forbids ComfyUI from expanding FP8 into FP16 inside VRAM
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -189,7 +185,6 @@ class LTXEngine:
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        # Start the RAM Watchdog
         ram_task = asyncio.create_task(self._ram_squeezer())
 
         try:
@@ -228,5 +223,4 @@ class LTXEngine:
             with open(os.path.join(out_dir, videos[0]), "rb") as f:
                 return Response(content=f.read(), media_type="video/mp4")
         finally:
-            # Stop the RAM watchdog when done
             ram_task.cancel()
