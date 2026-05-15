@@ -13,7 +13,7 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION (IDENTICAL TO PRESERVE CACHE)
+# 1. IMAGE DEFINITION (PRESERVED AS REQUESTED)
 # ==========================================
 base_image = modal.Image.from_registry("nvidia/cuda:12.5.1-devel-ubuntu24.04", add_python="3.12").apt_install("git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "ninja-build", "cmake", "clang", "llvm")
 deps_image = base_image.env({"CUDA_HOME": "/usr/local/cuda", "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""), "FORCE_CUDA": "1", "TORCH_CUDA_ARCH_LIST": "8.9", "MAX_JOBS": "1", "CC": "gcc", "CXX": "g++"}).pip_install("torch==2.5.1", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu124").pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0")
@@ -39,7 +39,7 @@ class LTXEngine:
     @modal.enter()
     def start_comfy(self):
         import boto3
-        # 1. Resilient Linker (Ensuring weights are visible)
+        # Linker Logic (Preserved)
         weights_root = None
         for mount in ["/mnt/weights", "/mnt"]:
             if os.path.exists(mount):
@@ -59,26 +59,31 @@ class LTXEngine:
 
         self.s3 = boto3.client(service_name='s3', endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], region_name="auto")
 
-        # 2. Launch ComfyUI
-        print("🚀 Launching ComfyUI Server...")
+        print("🚀 Launching Optimized ComfyUI Server...")
+        
+        # FIX: We set PYTORCH_CUDA_ALLOC_CONF to handle memory fragmentation
+        # FIX: We switch to --lowvram to prevent Xid 43 page faults on the 22B model
+        env_vars = os.environ.copy()
+        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--normalvram", "--use-sage-attention", "--bf16-vae"
-        ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            "--lowvram",            # Prevents GPU Page Faults (Xid 43)
+            "--use-sage-attention", # Uses your compiled kernels
+            "--bf16-vae",           # Prevents color banding
+            "--disable-xformers"    # SageAttention handles attention; disabling xformers prevents driver conflicts
+        ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
 
-        # 3. CRITICAL: DYNAMIC HEALTH CHECK
-        # Wait until the port actually responds before allowing FastAPI to start
-        print("⏳ Waiting for ComfyUI to initialize (this can take up to 2 mins)...")
+        print("⏳ Waiting for ComfyUI to initialize...")
         start_time = time.time()
-        while time.time() - start_time < 300: # 5 minute timeout
+        while time.time() - start_time < 300:
             if self.process.poll() is not None:
                 print("❌ ComfyUI process died during startup!")
                 os._exit(1)
             try:
-                # Use a standard urllib request to check if the server is up
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
                     if response.status == 200:
                         print("⚡ ComfyUI is ONLINE and Ready!")
@@ -86,7 +91,7 @@ class LTXEngine:
             except Exception:
                 time.sleep(2)
         
-        print("❌ Timeout: ComfyUI failed to start within 5 minutes.")
+        print("❌ Timeout: ComfyUI failed to start.")
         os._exit(1)
 
     @modal.fastapi_endpoint(method="POST")
@@ -116,9 +121,7 @@ class LTXEngine:
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        # Async Session
         async with aiohttp.ClientSession() as session:
-            # 1. Queue Prompt
             print(f"🎨 Sending prompt to ComfyUI API...")
             async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                 if resp.status != 200:
@@ -130,10 +133,8 @@ class LTXEngine:
 
             print(f"🎬 Generation Started: {prompt_id}")
 
-            # 2. Polling Loop
             start_time = time.time()
             while True:
-                # Watchdog
                 if self.process.poll() is not None:
                     print("❌ Server CRASHED mid-render.")
                     os._exit(1) 
@@ -152,7 +153,6 @@ class LTXEngine:
                 
                 await asyncio.sleep(5)
 
-        # 3. Return Video
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
         if not videos: raise HTTPException(status_code=500, detail="No video generated")
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
