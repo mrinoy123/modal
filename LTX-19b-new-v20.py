@@ -96,8 +96,8 @@ class LTXEngine:
         print("🔗 Running Aggressive Fuzzy Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # Ensure all possible destination directories exist
-        dirs = ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints", "diffusion_models"]
+# Ensure all possible destination directories exist
+        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -122,7 +122,7 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    # --- AGGRESSIVE FUZZY ROUTING LOGIC ---
+# --- AGGRESSIVE FUZZY ROUTING LOGIC ---
                     
                     # 1. UNet / Diffusion routing
                     if "unet" in fn or "ltx-2-19b-dev-q3" in fn:
@@ -132,8 +132,9 @@ class LTXEngine:
                     # 2. Gemma / Clip / T5 routing (SM node safety)
                     if "gemma" in fn or "clip" in fn or "t5" in fn:
                         link_it("clip")
-                        link_it("text_encoders")
-                        link_it("checkpoints") # 🔥 Double-link for SM Node validation
+                        link_it("text_encoders") 
+                        link_it("text_encoder") # 🔥 THE FIX: Added the singular version of the folder
+                        link_it("checkpoints")
                         
                     # 3. Connector routing
                     if "connector" in fn:
