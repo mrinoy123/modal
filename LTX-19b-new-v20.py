@@ -58,7 +58,7 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack"
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
-    # 🔥 SURGICAL HARD DRIVE PATCH v2: Stitches on GPU, then pushes to CPU for MP4 saving
+    # 🔥 SURGICAL HARD DRIVE PATCH v2: Fixes the PyTorch device split error in RIFE
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
 
@@ -93,11 +93,11 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-print("🔗 Running Aggressive Fuzzy Linker...")
+        print("🔗 Running Aggressive Fuzzy Linker (Carpet Bomb Strategy)...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # 🔥 Added "gguf" to the allowed directories list
-        dirs = ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints", "diffusion_models", "gguf"]
+        # 1. Create ALL possible search directories used by various custom node packs
+        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -108,6 +108,7 @@ print("🔗 Running Aggressive Fuzzy Linker...")
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
+                    # Filter for model files only
                     if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
                         continue
                         
@@ -123,31 +124,36 @@ print("🔗 Running Aggressive Fuzzy Linker...")
 
                     # --- AGGRESSIVE FUZZY ROUTING LOGIC ---
                     
+                    # UNet / Diffusion routing
                     if "unet" in fn or "ltx-2-19b-dev-q3" in fn:
                         link_it("unet")
                         link_it("diffusion_models")
                         
+                    # Gemma / Text Encoder routing (SM Node + GGUF safety)
                     if "gemma" in fn or "clip" in fn or "t5" in fn:
                         link_it("clip")
                         link_it("text_encoders")
+                        link_it("text_encoder")
                         link_it("checkpoints")
-                        # 🔥 THE FIX: SM Node natively looks in gguf and unet for its clip inputs!
                         link_it("gguf") 
                         link_it("unet") 
-                        link_it("diffusion_models")
                         
+                    # Connector routing (Essential for Node 86)
                     if "connector" in fn:
                         link_it("checkpoints") 
                         link_it("clip")
                         link_it("unet")
                         
+                    # Audio VAE routing
                     if "audio_vae" in fn:
                         link_it("checkpoints")
                         link_it("vae")
                         
+                    # Standard Video VAE routing
                     if "vae" in fn and "audio" not in fn:
                         link_it("vae")
                         
+                    # RIFE / Frame Interpolation routing
                     if "rife" in fn or "vfi" in fn:
                         link_it("vfi")
                         
