@@ -43,7 +43,6 @@ compiled_image = build_image.run_commands(
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
-# Merged Custom Nodes: Easy-Use (for your error) + Impact-Pack (from v2.3)
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -79,26 +78,40 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        # --- SMART LINKER (Brought back from your v2.3 script) ---
-        weights_root = None
-        for mount in ["/mnt/weights", "/mnt"]:
-            if os.path.exists(mount):
-                for root, dirs, _ in os.walk(mount):
-                    if any(x in dirs for x in ["unet", "vae", "clip"]):
-                        weights_root = root
-                        break
-                if weights_root: break
+        print("🔗 Running Bulletproof Flattening Linker...")
+        base_models_dir = "/workspace/ComfyUI/models"
+        
+        # 1. Force create all possible directories custom nodes might look into
+        for folder in ["unet", "vae", "clip", "text_encoders", "vfi", "audio_vae"]:
+            os.makedirs(os.path.join(base_models_dir, folder), exist_ok=True)
 
-        if weights_root:
-            for m_type in ["unet", "vae", "clip", "text_encoders", "upscale_models", "vfi"]:
-                src = os.path.join(weights_root, m_type)
-                dest = f"/workspace/ComfyUI/models/{m_type}"
-                if os.path.exists(src):
-                    if os.path.exists(dest):
-                        shutil.rmtree(dest) if not os.path.islink(dest) else os.unlink(dest)
-                    os.makedirs(os.path.dirname(dest), exist_ok=True)
-                    os.symlink(src, dest)
-                    print(f"🔗 Linked {src} -> {dest}")
+        def safe_link(source, destination):
+            if not os.path.exists(destination):
+                os.symlink(source, destination)
+                print(f"  -> Linked {os.path.basename(source)} to {os.path.basename(os.path.dirname(destination))}/")
+
+        # 2. Rip through the volume and hard-link files directly (ignoring their folder structure)
+        if os.path.exists("/mnt/weights"):
+            for root_dir, _, files in os.walk("/mnt/weights"):
+                for filename in files:
+                    src_path = os.path.join(root_dir, filename)
+                    lower_path = src_path.lower()
+                    
+                    # Route files based on keywords in their path
+                    if "unet" in lower_path:
+                        safe_link(src_path, os.path.join(base_models_dir, "unet", filename))
+                    
+                    elif "clip" in lower_path or "text_encoder" in lower_path:
+                        safe_link(src_path, os.path.join(base_models_dir, "clip", filename))
+                        safe_link(src_path, os.path.join(base_models_dir, "text_encoders", filename))
+                    
+                    elif "vae" in lower_path:
+                        safe_link(src_path, os.path.join(base_models_dir, "vae", filename))
+                        # 🔥 FIX FOR NODE 46: Double link audio VAE to custom directory
+                        safe_link(src_path, os.path.join(base_models_dir, "audio_vae", filename))
+                    
+                    elif "vfi" in lower_path or "rife" in lower_path:
+                        safe_link(src_path, os.path.join(base_models_dir, "vfi", filename))
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -108,9 +121,8 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (Merged V2.3 Logic)...")
+        print("🚀 Launching LTX-2 19B Engine (Optimized)...")
         
-        # --- MEMORY STABILITY (Brought back from your v2.3 script) ---
         env_vars = os.environ.copy()
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
@@ -121,9 +133,9 @@ class LTXEngine:
             "--cache-none",         
             "--use-sage-attention", 
             "--bf16-vae",
-            "--mmap",               # Required for 19B
+            "--mmap",               
             "--disable-smart-memory",
-            "--disable-xformers"    # Brought back from v2.3
+            "--disable-xformers"    
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -166,7 +178,6 @@ class LTXEngine:
             async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                 res_json = await resp.json()
                 
-                # --- SAFE ERROR HANDLING ---
                 if "error" in res_json or "prompt_id" not in res_json:
                     error_msg = res_json.get("error", res_json)
                     print(f"❌ ComfyUI Rejected Prompt: {error_msg}")
