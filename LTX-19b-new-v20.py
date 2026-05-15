@@ -8,6 +8,7 @@ import threading
 import aiohttp
 import urllib.request
 import asyncio
+import ctypes # 🔥 NEW: Used to force Linux to drop RAM
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
@@ -65,8 +66,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,               # 🔥 Strictly locked to 8GB RAM
-    ephemeral_disk=32768,      # 🔥 32GB of Temporary NVMe SSD space to act as our "RAM Swap"
+    memory=8192,               # 🔥 8GB RAM Strict Limit
     scaledown_window=60,
     timeout=3600 
 )
@@ -74,6 +74,19 @@ class LTXEngine:
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
+
+    # 🔥 NEW: The RAM Squeezer Watchdog
+    async def _ram_squeezer(self):
+        print("🛡️ RAM Watchdog Started. Forcing Linux to ignore page cache...")
+        while True:
+            # This hidden command violently forces Linux to empty its RAM cache
+            try:
+                with open('/proc/sys/vm/drop_caches', 'w') as f:
+                    f.write('1\n')
+            except Exception:
+                # Fallback if container lacks root permissions for drop_caches
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            await asyncio.sleep(2) # Run every 2 seconds during generation
 
     @modal.enter()
     def start_comfy(self):
@@ -114,25 +127,24 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (SSD Offload Mode)...")
+        print("🚀 Launching LTX-2 19B Engine (Your Custom Sequential Logic)...")
         
-        # Setup SSD Temporary Folders for Swap
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
-        # Aggressive memory purging
-        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64,garbage_collection_threshold:0.6"
+        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
-        env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" # Force Linux to instantly free RAM
-        env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload" # Force PyTorch to use SSD for offloading
+        env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
+        env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload" 
         
+        # This executes your exact idea: SSD -> GPU -> Clear -> Next Model
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--lowvram",              
             "--cache-none",           
             "--mmap",                 
-            "--temp-directory", "/tmp/comfy_swap", # Tell ComfyUI to use SSD for scratch/swap
+            "--temp-directory", "/tmp/comfy_swap", 
             "--disable-smart-memory", 
             "--use-sage-attention", 
             "--bf16-vae",
@@ -174,37 +186,44 @@ class LTXEngine:
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        async with aiohttp.ClientSession() as session:
-            print(f"🎨 Processing 19B Joint Audio-Video Workflow...")
-            async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
-                res_json = await resp.json()
-                
-                if "error" in res_json or "prompt_id" not in res_json:
-                    error_msg = res_json.get("error", res_json)
-                    print(f"❌ ComfyUI Rejected Prompt: {error_msg}")
-                    raise HTTPException(status_code=400, detail=f"Invalid Workflow JSON: {error_msg}")
-                
-                prompt_id = res_json['prompt_id']
+        # Start the RAM Watchdog while generating
+        ram_task = asyncio.create_task(self._ram_squeezer())
 
-            start_time = time.time()
-            while True:
-                if self.process.poll() is not None:
-                    print("❌ GPU CRASHED. Check Modal Logs.")
-                    os._exit(1) 
+        try:
+            async with aiohttp.ClientSession() as session:
+                print(f"🎨 Processing 19B Joint Audio-Video Workflow...")
+                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
+                    res_json = await resp.json()
+                    
+                    if "error" in res_json or "prompt_id" not in res_json:
+                        error_msg = res_json.get("error", res_json)
+                        print(f"❌ ComfyUI Rejected Prompt: {error_msg}")
+                        raise HTTPException(status_code=400, detail=f"Invalid Workflow JSON: {error_msg}")
+                    
+                    prompt_id = res_json['prompt_id']
 
-                async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
-                    if resp.status == 200:
-                        history = await resp.json()
-                        if prompt_id in history: break
+                start_time = time.time()
+                while True:
+                    if self.process.poll() is not None:
+                        print("❌ GPU CRASHED. Check Modal Logs.")
+                        os._exit(1) 
+
+                    async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
+                        if resp.status == 200:
+                            history = await resp.json()
+                            if prompt_id in history: break
+                    
+                    if time.time() - start_time > 2400: raise HTTPException(status_code=504, detail="Timeout")
+                    await asyncio.sleep(5)
+
+            videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
+            if not videos:
+                raise HTTPException(status_code=500, detail="Generation finished but no MP4 was found in output folder.")
                 
-                if time.time() - start_time > 2400: raise HTTPException(status_code=504, detail="Timeout")
-                await asyncio.sleep(5)
-
-        videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        if not videos:
-            raise HTTPException(status_code=500, detail="Generation finished but no MP4 was found in output folder.")
+            videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
             
-        videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-        
-        with open(os.path.join(out_dir, videos[0]), "rb") as f:
-            return Response(content=f.read(), media_type="video/mp4")
+            with open(os.path.join(out_dir, videos[0]), "rb") as f:
+                return Response(content=f.read(), media_type="video/mp4")
+        finally:
+            # Stop the RAM watchdog when generation finishes
+            ram_task.cancel()
