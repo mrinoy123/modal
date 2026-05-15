@@ -48,7 +48,6 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
-    # 🔥 FIX: Added the exact destination path so ComfyUI can find it
     "git clone https://github.com/smthemex/ComfyUI_LTX2_SM.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX2_SM",
     "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
@@ -94,11 +93,13 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        print("🔗 Running Flattening Linker...")
+        print("🔗 Running Aggressive Fuzzy Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        for folder in ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints"]:
-            os.makedirs(os.path.join(base_models_dir, folder), exist_ok=True)
+        # Ensure all possible destination directories exist
+        dirs = ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints", "diffusion_models"]
+        for d in dirs:
+            os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         def safe_link(source, destination):
             if not os.path.exists(destination):
@@ -107,22 +108,54 @@ class LTXEngine:
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
+                    # Ignore system or non-model files
+                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
+                        continue
+                        
                     src_path = os.path.join(root_dir, filename)
-                    lower_path = src_path.lower()
+                    fn = filename.lower() # 🔥 We evaluate the filename ONLY
+                    linked_to = []
+
+                    def link_it(target_dir):
+                        dest = os.path.join(base_models_dir, target_dir, filename)
+                        if not os.path.exists(dest):
+                            os.symlink(src_path, dest)
+                            linked_to.append(target_dir)
+
+                    # --- AGGRESSIVE FUZZY ROUTING LOGIC ---
                     
-                    if "unet" in lower_path:
-                        safe_link(src_path, os.path.join(base_models_dir, "unet", filename))
-                    # 🔥 FIXED: Now catches the "gemma" file for the SM Clip node
-                    elif "clip" in lower_path or "text_encoder" in lower_path or "gemma" in lower_path:
-                        safe_link(src_path, os.path.join(base_models_dir, "clip", filename))
-                        safe_link(src_path, os.path.join(base_models_dir, "text_encoders", filename))
-                    # 🔥 FIXED: Now catches the "connector" file for the SM Clip node
-                    elif "audio_vae" in lower_path or "connector" in lower_path:
-                        safe_link(src_path, os.path.join(base_models_dir, "checkpoints", filename))
-                    elif "vae" in lower_path:
-                        safe_link(src_path, os.path.join(base_models_dir, "vae", filename))
-                    elif "vfi" in lower_path or "rife" in lower_path:
-                        safe_link(src_path, os.path.join(base_models_dir, "vfi", filename))
+                    # 1. UNet / Diffusion routing
+                    if "unet" in fn or "ltx-2-19b-dev-q3" in fn:
+                        link_it("unet")
+                        link_it("diffusion_models")
+                        
+                    # 2. Gemma / Clip / T5 routing (SM node safety)
+                    if "gemma" in fn or "clip" in fn or "t5" in fn:
+                        link_it("clip")
+                        link_it("text_encoders")
+                        link_it("checkpoints") # 🔥 Double-link for SM Node validation
+                        
+                    # 3. Connector routing
+                    if "connector" in fn:
+                        link_it("checkpoints") # 🔥 Essential for LTX2_SM_Clip
+                        link_it("clip")
+                        link_it("unet")
+                        
+                    # 4. Audio VAE routing
+                    if "audio_vae" in fn:
+                        link_it("checkpoints") # Fixed based on your 'not in list' logs
+                        link_it("vae")
+                        
+                    # 5. Standard VAE routing
+                    if "vae" in fn and "audio" not in fn:
+                        link_it("vae")
+                        
+                    # 6. RIFE / VFI routing
+                    if "rife" in fn or "vfi" in fn:
+                        link_it("vfi")
+                        
+                    if linked_to:
+                        print(f"✅ Linked [{filename}] -> {linked_to}")
 
         self.s3 = boto3.client(
             service_name='s3', 
