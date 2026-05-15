@@ -57,7 +57,10 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack"
-).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;")
+).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
+    # 🔥 SURGICAL HARD DRIVE PATCH: Rewrites the RIFE code to fix the PyTorch device split error
+    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0)', data); open(file, 'w').write(data)\""
+)
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -93,7 +96,6 @@ class LTXEngine:
         print("🔗 Running Flattening Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # 🔥 FIXED: Added "checkpoints" to the folder creation list
         for folder in ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints"]:
             os.makedirs(os.path.join(base_models_dir, folder), exist_ok=True)
 
@@ -112,7 +114,6 @@ class LTXEngine:
                     elif "clip" in lower_path or "text_encoder" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "clip", filename))
                         safe_link(src_path, os.path.join(base_models_dir, "text_encoders", filename))
-                    # 🔥 FIXED: Audio VAE explicitly routed to the "checkpoints" folder
                     elif "audio_vae" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "checkpoints", filename))
                     elif "vae" in lower_path:
@@ -151,7 +152,6 @@ class LTXEngine:
             "--bf16-vae",
             "--disable-xformers",
             "--fp8_e4m3fn-text-enc"   
-            # 🔥 FIXED: Removed --use-sage-attention
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
