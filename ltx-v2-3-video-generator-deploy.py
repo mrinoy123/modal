@@ -8,12 +8,13 @@ import sys
 import asyncio
 import threading
 import aiohttp
+import urllib.request
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# =========================================================================
-# 1. IMAGE DEFINITION (KEEP IDENTICAL TO PRESERVE SAGE ATTENTION CACHE)
-# =========================================================================
+# ==========================================
+# 1. IMAGE DEFINITION (IDENTICAL TO PRESERVE CACHE)
+# ==========================================
 base_image = modal.Image.from_registry("nvidia/cuda:12.5.1-devel-ubuntu24.04", add_python="3.12").apt_install("git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "ninja-build", "cmake", "clang", "llvm")
 deps_image = base_image.env({"CUDA_HOME": "/usr/local/cuda", "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""), "FORCE_CUDA": "1", "TORCH_CUDA_ARCH_LIST": "8.9", "MAX_JOBS": "1", "CC": "gcc", "CXX": "g++"}).pip_install("torch==2.5.1", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu124").pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0")
 compiled_image = deps_image.run_commands("git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention", "cd /workspace/SageAttention && pip install --no-build-isolation .")
@@ -32,14 +33,13 @@ weights_volume = modal.Volume.from_name("ltx-video-weights")
 )
 class LTXEngine:
     def _log_reader(self):
-        """Drains the pipe so ComfyUI doesn't hang when the 64KB buffer is full."""
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
 
     @modal.enter()
     def start_comfy(self):
         import boto3
-        # Resilient Linker
+        # 1. Resilient Linker (Ensuring weights are visible)
         weights_root = None
         for mount in ["/mnt/weights", "/mnt"]:
             if os.path.exists(mount):
@@ -59,7 +59,8 @@ class LTXEngine:
 
         self.s3 = boto3.client(service_name='s3', endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], region_name="auto")
 
-        print("🚀 Starting ComfyUI (Normal VRAM)...")
+        # 2. Launch ComfyUI
+        print("🚀 Launching ComfyUI Server...")
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--normalvram", "--use-sage-attention", "--bf16-vae"
@@ -68,63 +69,92 @@ class LTXEngine:
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
 
-        # Simple blocking wait for startup (allowed in @modal.enter)
-        time.sleep(10)
+        # 3. CRITICAL: DYNAMIC HEALTH CHECK
+        # Wait until the port actually responds before allowing FastAPI to start
+        print("⏳ Waiting for ComfyUI to initialize (this can take up to 2 mins)...")
+        start_time = time.time()
+        while time.time() - start_time < 300: # 5 minute timeout
+            if self.process.poll() is not None:
+                print("❌ ComfyUI process died during startup!")
+                os._exit(1)
+            try:
+                # Use a standard urllib request to check if the server is up
+                with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
+                    if response.status == 200:
+                        print("⚡ ComfyUI is ONLINE and Ready!")
+                        return
+            except Exception:
+                time.sleep(2)
+        
+        print("❌ Timeout: ComfyUI failed to start within 5 minutes.")
+        os._exit(1)
 
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
-        if x_api_key != os.environ.get("API_KEY"): raise HTTPException(status_code=403, detail="Unauthorized")
+        if x_api_key != os.environ.get("API_KEY"): 
+            raise HTTPException(status_code=403, detail="Unauthorized")
         
-        body = await request.json()
+        try:
+            body = await request.json()
+        except:
+            raise HTTPException(status_code=400, detail="Invalid JSON")
+            
         image_url, workflow = body.get("image_url"), body.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
-        # Secure Fetch
+        # Secure Fetch Image
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
         file_key = image_url.split(".dev/")[-1]
-        self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
+        try:
+            self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"R2 Fetch Fail: {e}")
 
+        # Clean Output
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        # ASYNC API Interaction
+        # Async Session
         async with aiohttp.ClientSession() as session:
             # 1. Queue Prompt
+            print(f"🎨 Sending prompt to ComfyUI API...")
             async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                 if resp.status != 200:
+                    err_text = await resp.text()
+                    print(f"❌ ComfyUI Error: {err_text}")
                     raise HTTPException(status_code=500, detail="ComfyUI rejected prompt")
                 res_json = await resp.json()
                 prompt_id = res_json['prompt_id']
 
-            print(f"🎬 Processing: {prompt_id}")
+            print(f"🎬 Generation Started: {prompt_id}")
 
             # 2. Polling Loop
             start_time = time.time()
             while True:
-                # Watchdog: os._exit(1) is a hard kill to stop billing immediately 
-                # without confusing the async event loop with a SystemExit exception
+                # Watchdog
                 if self.process.poll() is not None:
-                    print("❌ Server CRASHED. Hard-killing container to stop billing.")
+                    print("❌ Server CRASHED mid-render.")
                     os._exit(1) 
 
                 try:
                     async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
-                        history = await resp.json()
-                        if prompt_id in history:
-                            break
-                except Exception:
-                    pass # Server busy
+                        if resp.status == 200:
+                            history = await resp.json()
+                            if prompt_id in history:
+                                break
+                except:
+                    pass 
 
                 if time.time() - start_time > 1500:
                     raise HTTPException(status_code=504, detail="Generation Timeout")
                 
-                await asyncio.sleep(5) # Keeps the event loop heartbeat alive
+                await asyncio.sleep(5)
 
-        # 3. Return Result
+        # 3. Return Video
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        if not videos: raise HTTPException(status_code=500, detail="No output file")
+        if not videos: raise HTTPException(status_code=500, detail="No video generated")
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
