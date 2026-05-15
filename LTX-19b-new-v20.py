@@ -65,7 +65,8 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=16384,          
+    memory=8192,               # 🔥 Strictly locked to 8GB RAM
+    ephemeral_disk=32768,      # 🔥 32GB of Temporary NVMe SSD space to act as our "RAM Swap"
     scaledown_window=60,
     timeout=3600 
 )
@@ -78,38 +79,30 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        print("🔗 Running Bulletproof Flattening Linker...")
+        print("🔗 Running Flattening Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # 1. Force create all possible directories custom nodes might look into
         for folder in ["unet", "vae", "clip", "text_encoders", "vfi", "audio_vae"]:
             os.makedirs(os.path.join(base_models_dir, folder), exist_ok=True)
 
         def safe_link(source, destination):
             if not os.path.exists(destination):
                 os.symlink(source, destination)
-                print(f"  -> Linked {os.path.basename(source)} to {os.path.basename(os.path.dirname(destination))}/")
 
-        # 2. Rip through the volume and hard-link files directly (ignoring their folder structure)
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
                     src_path = os.path.join(root_dir, filename)
                     lower_path = src_path.lower()
                     
-                    # Route files based on keywords in their path
                     if "unet" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "unet", filename))
-                    
                     elif "clip" in lower_path or "text_encoder" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "clip", filename))
                         safe_link(src_path, os.path.join(base_models_dir, "text_encoders", filename))
-                    
                     elif "vae" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "vae", filename))
-                        # 🔥 FIX FOR NODE 46: Double link audio VAE to custom directory
                         safe_link(src_path, os.path.join(base_models_dir, "audio_vae", filename))
-                    
                     elif "vfi" in lower_path or "rife" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "vfi", filename))
 
@@ -121,20 +114,28 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (Optimized)...")
+        print("🚀 Launching LTX-2 19B Engine (SSD Offload Mode)...")
         
+        # Setup SSD Temporary Folders for Swap
+        os.makedirs("/tmp/comfy_swap", exist_ok=True)
+        os.makedirs("/tmp/hf_offload", exist_ok=True)
+
         env_vars = os.environ.copy()
-        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
+        # Aggressive memory purging
+        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64,garbage_collection_threshold:0.6"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
+        env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" # Force Linux to instantly free RAM
+        env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload" # Force PyTorch to use SSD for offloading
         
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--lowvram",            
-            "--cache-none",         
+            "--lowvram",              
+            "--cache-none",           
+            "--mmap",                 
+            "--temp-directory", "/tmp/comfy_swap", # Tell ComfyUI to use SSD for scratch/swap
+            "--disable-smart-memory", 
             "--use-sage-attention", 
             "--bf16-vae",
-            "--mmap",               
-            "--disable-smart-memory",
             "--disable-xformers"    
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
