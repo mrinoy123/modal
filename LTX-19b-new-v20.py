@@ -8,7 +8,7 @@ import threading
 import aiohttp
 import urllib.request
 import asyncio
-import ctypes # 🔥 NEW: Used to force Linux to drop RAM
+import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
@@ -66,7 +66,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,               # 🔥 8GB RAM Strict Limit
+    memory=8192,               # 🔥 8GB RAM Cost-Saver
     scaledown_window=60,
     timeout=3600 
 )
@@ -75,18 +75,16 @@ class LTXEngine:
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
 
-    # 🔥 NEW: The RAM Squeezer Watchdog
+    # 🔥 RAM SQUEEZER Watchdog (Keeps the 8GB RAM from filling up with OS cache)
     async def _ram_squeezer(self):
-        print("🛡️ RAM Watchdog Started. Forcing Linux to ignore page cache...")
+        print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
-            # This hidden command violently forces Linux to empty its RAM cache
             try:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
                     f.write('1\n')
             except Exception:
-                # Fallback if container lacks root permissions for drop_caches
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
-            await asyncio.sleep(2) # Run every 2 seconds during generation
+            await asyncio.sleep(2)
 
     @modal.enter()
     def start_comfy(self):
@@ -127,25 +125,19 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (Your Custom Sequential Logic)...")
+        print("🚀 Launching LTX-2 19B Engine (GPU-Only Strict Streaming)...")
         
-        os.makedirs("/tmp/comfy_swap", exist_ok=True)
-        os.makedirs("/tmp/hf_offload", exist_ok=True)
-
         env_vars = os.environ.copy()
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
-        env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload" 
         
-        # This executes your exact idea: SSD -> GPU -> Clear -> Next Model
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--lowvram",              
-            "--cache-none",           
-            "--mmap",                 
-            "--temp-directory", "/tmp/comfy_swap", 
-            "--disable-smart-memory", 
+            "--gpu-only",             # 🔥 CORE FIX: Forbids ComfyUI from putting 12.4GB models into 8GB System RAM
+            "--cache-none",           # Forces deletion of the model from the GPU immediately after use
+            "--mmap",                 # Streams directly from SSD to GPU
+            "--disable-smart-memory", # Stops ComfyUI from trying to optimize RAM usage
             "--use-sage-attention", 
             "--bf16-vae",
             "--disable-xformers"    
@@ -186,7 +178,7 @@ class LTXEngine:
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        # Start the RAM Watchdog while generating
+        # Start the RAM Watchdog
         ram_task = asyncio.create_task(self._ram_squeezer())
 
         try:
@@ -225,5 +217,5 @@ class LTXEngine:
             with open(os.path.join(out_dir, videos[0]), "rb") as f:
                 return Response(content=f.read(), media_type="video/mp4")
         finally:
-            # Stop the RAM watchdog when generation finishes
+            # Stop the RAM watchdog when done
             ram_task.cancel()
