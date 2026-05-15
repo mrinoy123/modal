@@ -9,9 +9,9 @@ import sys
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# ==========================================
-# 1. IMAGE DEFINITION (LAYERED FOR CACHING)
-# ==========================================
+# =========================================================================
+# 1. IMAGE DEFINITION (KEEP IDENTICAL TO PREVENT SAGE RE-COMPILATION)
+# =========================================================================
 
 # Layer 1: OS Packages
 base_image = (
@@ -41,7 +41,7 @@ deps_image = (
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0")
 )
 
-# Layer 3: SageAttention Compilation (Slowest part - cached once done)
+# Layer 3: SageAttention Compilation
 compiled_image = (
     deps_image
     .run_commands(
@@ -66,7 +66,6 @@ final_image = (
         "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack"
     )
     .run_commands(
-        # Fixed syntax warning with raw string 'r'
         r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
     )
 )
@@ -79,7 +78,7 @@ weights_volume = modal.Volume.from_name("ltx-video-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    scaledown_window=30, # Kill GPU quickly when idle
+    scaledown_window=30, 
     timeout=1200 
 )
 class LTXEngine:
@@ -104,16 +103,17 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Starting ComfyUI (Normal VRAM Mode)...")
-        # IMPORTANT: Using --normalvram to allow the 22B model to swap during VAE/RIFE steps
+        print("🚀 Starting ComfyUI (AGGRESSIVE CPU OFFLOADING MODE)...")
+        # MODIFICATION: Changed --normalvram to --lowvram
+        # MODIFICATION: Added --use-split-cross-attention for more VRAM headroom
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--use-sage-attention", 
-            "--normalvram", 
-            "--bf16-vae"
+            "--lowvram", 
+            "--use-split-cross-attention",
+            "--bf16-vae",
+            "--use-sage-attention"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         
-        # Health Check
         start_wait = time.time()
         while time.time() - start_wait < 180:
             if self.process.poll() is not None:
@@ -121,7 +121,7 @@ class LTXEngine:
                 sys.exit(1)
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1)
-                print("⚡ Online")
+                print("⚡ Online & Ready for CPU Offloading")
                 return
             except:
                 time.sleep(2)
@@ -145,7 +145,6 @@ class LTXEngine:
         image_url, workflow = data.get("image_url"), data.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
-        # R2 Fetch
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs("/workspace/ComfyUI/input", exist_ok=True)
         file_key = image_url.split(".dev/")[-1]
@@ -155,12 +154,10 @@ class LTXEngine:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"R2 Download Error: {e}")
 
-        # Clean Output Directory
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        # Queue Prompt
         try:
             prompt_payload = json.dumps({"prompt": workflow}).encode('utf-8')
             req = urllib.request.Request("http://127.0.0.1:8188/prompt", data=prompt_payload)
@@ -168,7 +165,6 @@ class LTXEngine:
         except Exception as e:
             raise HTTPException(status_code=500, detail="Failed to reach ComfyUI")
 
-        # Monitor with Billing Protection (sys.exit(1) if server crashes)
         start_time = time.time()
         while True:
             if self.process.poll() is not None:
@@ -182,14 +178,13 @@ class LTXEngine:
             except:
                 pass 
 
-            if time.time() - start_time > 1100: # 18 minute timeout
+            if time.time() - start_time > 1100:
                 raise HTTPException(status_code=504, detail="Generation Timeout")
             time.sleep(5)
 
-        # Find and Return Video
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
         if not videos:
-            raise HTTPException(status_code=500, detail="Render finished but no file found")
+            raise HTTPException(status_code=500, detail="No video file found")
         
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         target_video = os.path.join(out_dir, videos[0])
