@@ -93,11 +93,11 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        print("🔗 Running Aggressive Fuzzy Linker...")
+print("🔗 Running Aggressive Fuzzy Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-# Ensure all possible destination directories exist
-        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models"]
+        # 🔥 Added "gguf" to the allowed directories list
+        dirs = ["unet", "vae", "clip", "text_encoders", "vfi", "checkpoints", "diffusion_models", "gguf"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -108,12 +108,11 @@ class LTXEngine:
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
-                    # Ignore system or non-model files
                     if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
                         continue
                         
                     src_path = os.path.join(root_dir, filename)
-                    fn = filename.lower() # 🔥 We evaluate the filename ONLY
+                    fn = filename.lower()
                     linked_to = []
 
                     def link_it(target_dir):
@@ -122,36 +121,33 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-# --- AGGRESSIVE FUZZY ROUTING LOGIC ---
+                    # --- AGGRESSIVE FUZZY ROUTING LOGIC ---
                     
-                    # 1. UNet / Diffusion routing
                     if "unet" in fn or "ltx-2-19b-dev-q3" in fn:
                         link_it("unet")
                         link_it("diffusion_models")
                         
-                    # 2. Gemma / Clip / T5 routing (SM node safety)
                     if "gemma" in fn or "clip" in fn or "t5" in fn:
                         link_it("clip")
-                        link_it("text_encoders") 
-                        link_it("text_encoder") # 🔥 THE FIX: Added the singular version of the folder
+                        link_it("text_encoders")
                         link_it("checkpoints")
+                        # 🔥 THE FIX: SM Node natively looks in gguf and unet for its clip inputs!
+                        link_it("gguf") 
+                        link_it("unet") 
+                        link_it("diffusion_models")
                         
-                    # 3. Connector routing
                     if "connector" in fn:
-                        link_it("checkpoints") # 🔥 Essential for LTX2_SM_Clip
+                        link_it("checkpoints") 
                         link_it("clip")
                         link_it("unet")
                         
-                    # 4. Audio VAE routing
                     if "audio_vae" in fn:
-                        link_it("checkpoints") # Fixed based on your 'not in list' logs
+                        link_it("checkpoints")
                         link_it("vae")
                         
-                    # 5. Standard VAE routing
                     if "vae" in fn and "audio" not in fn:
                         link_it("vae")
                         
-                    # 6. RIFE / VFI routing
                     if "rife" in fn or "vfi" in fn:
                         link_it("vfi")
                         
