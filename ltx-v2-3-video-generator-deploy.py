@@ -104,14 +104,12 @@ class LTXEngine:
         )
 
         print("🚀 Starting ComfyUI (AGGRESSIVE CPU OFFLOADING MODE)...")
-        # MODIFICATION: Changed --normalvram to --lowvram
-        # MODIFICATION: Added --use-split-cross-attention for more VRAM headroom
+        # FIXED: Removed --use-split-cross-attention to fix the startup error
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--lowvram", 
-            "--use-split-cross-attention",
-            "--bf16-vae",
-            "--use-sage-attention"
+            "--use-sage-attention",
+            "--bf16-vae"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         
         start_wait = time.time()
@@ -121,7 +119,7 @@ class LTXEngine:
                 sys.exit(1)
             try:
                 urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1)
-                print("⚡ Online & Ready for CPU Offloading")
+                print("⚡ Online & Ready")
                 return
             except:
                 time.sleep(2)
