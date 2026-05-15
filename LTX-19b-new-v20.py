@@ -11,48 +11,63 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION (Optimized & Fixed)
+# 1. IMAGE DEFINITION (Resolved GLIBCXX Conflicts)
 # ==========================================
-image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.12")
-    .apt_install("git", "ffmpeg", "libgl1", "libglib2.0-0")
-    .env({"GIT_TERMINAL_PROMPT": "0"}) # Prevents Git from hanging on auth prompts
-    .pip_install(
-        "torch==2.5.1", 
-        "torchvision", 
-        "torchaudio", 
-        index_url="https://download.pytorch.org/whl/cu124"
-    )
-    .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0")
-    .run_commands(
-        "pip install https://huggingface.co/Kijai/PrecompiledWheels/resolve/main/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"
-    )
-    .run_commands(
-        "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
-        "pip install -r /workspace/ComfyUI/requirements.txt"
-    )
-    .run_commands(
-        "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
-        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes"
-    )
-    .run_commands(
-        # FIXED: Corrected official Lightricks URL (removed hyphen)
-        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-        "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt"
-    )
+# We use Ubuntu 24.04 to match the modern libstdc++ requirements
+base_image = modal.Image.from_registry(
+    "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
+    add_python="3.12"
+).apt_install(
+    "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
+    "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
+
+# Set build environment for CUDA compilation
+build_image = base_image.env({
+    "CUDA_HOME": "/usr/local/cuda",
+    "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
+    "FORCE_CUDA": "1",
+    "TORCH_CUDA_ARCH_LIST": "8.9", # Optimized for L4
+    "MAX_JOBS": "1",
+    "CC": "gcc",
+    "CXX": "g++"
+}).pip_install(
+    "torch==2.5.1", "torchvision", "torchaudio", 
+    index_url="https://download.pytorch.org/whl/cu124"
+).pip_install(
+    "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
+    "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
+)
+
+# Compile SageAttention from source to ensure binary compatibility
+compiled_image = build_image.run_commands(
+    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
+    "cd /workspace/SageAttention && pip install --no-build-isolation ."
+)
+
+# Finalize ComfyUI and Custom Nodes
+final_image = compiled_image.run_commands(
+    "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
+    "pip install -r /workspace/ComfyUI/requirements.txt"
+).run_commands(
+    "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
+    "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
+    "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
+    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
+    "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
+    # Official Lightricks Node for 19B Looping
+    "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo"
+).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;")
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
 @app.cls(
     gpu="L4", 
-    image=image, 
+    image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=16384,          # Optimized for 19B + Gemma-3 12B swapping
+    memory=16384,          # 16GB System RAM for 19B stability
     scaledown_window=60,
     timeout=3600 
 )
@@ -65,7 +80,7 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        # Linker Logic for Volume
+        # Linker Logic for 19B Weights
         src_root = "/mnt/weights"
         dest_root = "/workspace/ComfyUI/models"
         mapping = {"unet": "unet", "clip": "clip", "vae": "vae", "vfi": "vfi"}
@@ -88,19 +103,20 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B (Sequential Purge Mode)...")
+        print("🚀 Launching LTX-2 19B Engine (Optimized)...")
         
         env_vars = os.environ.copy()
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
+        # Launch with 19B survival flags
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--lowvram",            # Required for Joint Video/Audio Memory
-            "--cache-none",         # Forces immediate VRAM cleanup
+            "--lowvram",            # Swaps Joint Audio/Video latents
+            "--cache-none",         # Immediate VRAM purge
             "--use-sage-attention", 
             "--bf16-vae",
-            "--mmap",               # Direct-from-disk loading to save system RAM
+            "--mmap",               # Saves system RAM by reading from disk
             "--disable-smart-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
