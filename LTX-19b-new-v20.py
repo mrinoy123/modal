@@ -52,7 +52,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=16,          # Optimized for 19B + Gemma-3 12B swapping
+    memory=16384,          # Optimized for 19B + Gemma-3 12B swapping
     scaledown_window=60,
     timeout=3600 
 )
