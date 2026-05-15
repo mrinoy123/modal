@@ -13,7 +13,7 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION (PRESERVED AS REQUESTED)
+# 1. IMAGE DEFINITION (PRESERVED)
 # ==========================================
 base_image = modal.Image.from_registry("nvidia/cuda:12.5.1-devel-ubuntu24.04", add_python="3.12").apt_install("git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", "build-essential", "ninja-build", "cmake", "clang", "llvm")
 deps_image = base_image.env({"CUDA_HOME": "/usr/local/cuda", "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""), "FORCE_CUDA": "1", "TORCH_CUDA_ARCH_LIST": "8.9", "MAX_JOBS": "1", "CC": "gcc", "CXX": "g++"}).pip_install("torch==2.5.1", "torchvision", "torchaudio", index_url="https://download.pytorch.org/whl/cu124").pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0", "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0")
@@ -39,7 +39,7 @@ class LTXEngine:
     @modal.enter()
     def start_comfy(self):
         import boto3
-        # Linker Logic (Preserved)
+        # Linker Logic
         weights_root = None
         for mount in ["/mnt/weights", "/mnt"]:
             if os.path.exists(mount):
@@ -59,39 +59,43 @@ class LTXEngine:
 
         self.s3 = boto3.client(service_name='s3', endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], region_name="auto")
 
-        print("🚀 Launching Optimized ComfyUI Server...")
+        print("🚀 Launching Sequential Engine...")
         
-        # FIX: We set PYTORCH_CUDA_ALLOC_CONF to handle memory fragmentation
-        # FIX: We switch to --lowvram to prevent Xid 43 page faults on the 22B model
+        # 1. FORCING SEQUENTIAL: Environment variables to stop memory fragmentation
         env_vars = os.environ.copy()
-        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:128"
+        env_vars["CUDA_MODULE_LOADING"] = "LAZY" # Saves startup VRAM
         
+        # 2. THE CLI FLAGS:
+        # --cache-none: This is the 'Nuclear Option'. It kills the model from VRAM the second it's done.
+        # --lowvram: Ensures only one block is active.
+        # --disable-smart-memory: Stops ComfyUI from trying to keep things 'ready' for the next run.
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--lowvram",            # Prevents GPU Page Faults (Xid 43)
-            "--use-sage-attention", # Uses your compiled kernels
-            "--bf16-vae",           # Prevents color banding
-            "--disable-xformers"    # SageAttention handles attention; disabling xformers prevents driver conflicts
+            "--lowvram",
+            "--cache-none", 
+            "--use-sage-attention",
+            "--bf16-vae",
+            "--disable-smart-memory",
+            "--disable-xformers" 
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
 
-        print("⏳ Waiting for ComfyUI to initialize...")
+        print("⏳ Waiting for Sequential initialization...")
         start_time = time.time()
         while time.time() - start_time < 300:
             if self.process.poll() is not None:
-                print("❌ ComfyUI process died during startup!")
+                print("❌ Startup Crash!")
                 os._exit(1)
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
                     if response.status == 200:
-                        print("⚡ ComfyUI is ONLINE and Ready!")
+                        print("⚡ Sequential Engine ONLINE!")
                         return
             except Exception:
                 time.sleep(2)
-        
-        print("❌ Timeout: ComfyUI failed to start.")
         os._exit(1)
 
     @modal.fastapi_endpoint(method="POST")
@@ -99,63 +103,40 @@ class LTXEngine:
         if x_api_key != os.environ.get("API_KEY"): 
             raise HTTPException(status_code=403, detail="Unauthorized")
         
-        try:
-            body = await request.json()
-        except:
-            raise HTTPException(status_code=400, detail="Invalid JSON")
-            
+        body = await request.json()
         image_url, workflow = body.get("image_url"), body.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
-        # Secure Fetch Image
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
         file_key = image_url.split(".dev/")[-1]
-        try:
-            self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"R2 Fetch Fail: {e}")
+        self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
 
-        # Clean Output
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
         async with aiohttp.ClientSession() as session:
-            print(f"🎨 Sending prompt to ComfyUI API...")
+            print(f"🎨 Queueing Sequential Tasks...")
             async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
-                if resp.status != 200:
-                    err_text = await resp.text()
-                    print(f"❌ ComfyUI Error: {err_text}")
-                    raise HTTPException(status_code=500, detail="ComfyUI rejected prompt")
                 res_json = await resp.json()
                 prompt_id = res_json['prompt_id']
-
-            print(f"🎬 Generation Started: {prompt_id}")
 
             start_time = time.time()
             while True:
                 if self.process.poll() is not None:
-                    print("❌ Server CRASHED mid-render.")
+                    print("❌ GPU CRASHED (Xid 43 / Out of Memory). Check logs.")
                     os._exit(1) 
 
-                try:
-                    async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
-                        if resp.status == 200:
-                            history = await resp.json()
-                            if prompt_id in history:
-                                break
-                except:
-                    pass 
-
-                if time.time() - start_time > 1500:
-                    raise HTTPException(status_code=504, detail="Generation Timeout")
+                async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
+                    if resp.status == 200:
+                        history = await resp.json()
+                        if prompt_id in history: break
                 
+                if time.time() - start_time > 1500: raise HTTPException(status_code=504, detail="Timeout")
                 await asyncio.sleep(5)
 
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-        if not videos: raise HTTPException(status_code=500, detail="No video generated")
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-        
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
             return Response(content=f.read(), media_type="video/mp4")
