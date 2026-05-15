@@ -11,12 +11,12 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION (LTX-2 19B Optimized)
+# 1. IMAGE DEFINITION (Optimized & Fixed)
 # ==========================================
-# Using Ubuntu 22.04 for broader compatibility with precompiled wheels
 image = (
     modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "ffmpeg", "libgl1", "libglib2.0-0")
+    .env({"GIT_TERMINAL_PROMPT": "0"}) # Prevents Git from hanging on auth prompts
     .pip_install(
         "torch==2.5.1", 
         "torchvision", 
@@ -25,22 +25,26 @@ image = (
     )
     .pip_install("fastapi", "aiohttp", "boto3", "triton>=3.1.0")
     .run_commands(
-        # SageAttention is mandatory for 19B speed/memory efficiency
-        "pip install https://huggingface.co/Kijai/PrecompiledWheels/resolve/main/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl",
+        "pip install https://huggingface.co/Kijai/PrecompiledWheels/resolve/main/sageattention-2.2.0-cp312-cp312-linux_x86_64.whl"
+    )
+    .run_commands(
         "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
-        "pip install -r /workspace/ComfyUI/requirements.txt",
-        # Required Custom Nodes for GGUF and LTX-2
+        "pip install -r /workspace/ComfyUI/requirements.txt"
+    )
+    .run_commands(
         "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
-        "git clone https://github.com/kijai/ComfyUI-LTX-Video.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-Video",
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes"
+    )
+    .run_commands(
+        # FIXED: Corrected official Lightricks URL (removed hyphen)
+        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
         "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt"
     )
 )
 
 app = modal.App("ltx-2-19b-v20-api")
-# New dedicated volume for 19B weights
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
 @app.cls(
@@ -48,7 +52,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=16,          # 16GB System RAM (Goldilocks Zone)
+    memory=16,          # Optimized for 19B + Gemma-3 12B swapping
     scaledown_window=60,
     timeout=3600 
 )
@@ -61,17 +65,10 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        # 1. LINKER LOGIC (Mapping Volume folders to ComfyUI structure)
-        # Assumes downloader script structure: /unet, /clip, /vae, /vfi
+        # Linker Logic for Volume
         src_root = "/mnt/weights"
         dest_root = "/workspace/ComfyUI/models"
-        
-        mapping = {
-            "unet": "unet",
-            "clip": "clip",
-            "vae": "vae",
-            "vfi": "vfi"
-        }
+        mapping = {"unet": "unet", "clip": "clip", "vae": "vae", "vfi": "vfi"}
 
         for src_folder, dest_folder in mapping.items():
             src = os.path.join(src_root, src_folder)
@@ -94,29 +91,26 @@ class LTXEngine:
         print("🚀 Launching LTX-2 19B (Sequential Purge Mode)...")
         
         env_vars = os.environ.copy()
-        # Prevent fragmentation on 16GB RAM
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
-        # 2. CLI FLAGS (Survival configuration)
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--lowvram",            # Mandatory to swap Gemma-3 and 19B UNet
-            "--cache-none",         # Nukes model from VRAM immediately after node finish
+            "--lowvram",            # Required for Joint Video/Audio Memory
+            "--cache-none",         # Forces immediate VRAM cleanup
             "--use-sage-attention", 
             "--bf16-vae",
-            "--mmap",               # Loads directly from Volume to avoid System RAM bloat
+            "--mmap",               # Direct-from-disk loading to save system RAM
             "--disable-smart-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
 
-        # 3. HEALTH CHECK
         start_time = time.time()
         while time.time() - start_time < 300:
             if self.process.poll() is not None:
-                print("❌ Startup Crash! Check logs for OOM or Missing Model errors.")
+                print("❌ Startup Crash!")
                 os._exit(1)
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
@@ -136,11 +130,8 @@ class LTXEngine:
         image_url, workflow = body.get("image_url"), body.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
-        # 4. ASSET PREP
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
-        
-        # R2 Download logic
         file_key = image_url.split(".dev/")[-1]
         self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
 
@@ -148,7 +139,6 @@ class LTXEngine:
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
-        # 5. EXECUTION
         async with aiohttp.ClientSession() as session:
             print(f"🎨 Processing 19B Joint Audio-Video Workflow...")
             async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
@@ -158,7 +148,7 @@ class LTXEngine:
             start_time = time.time()
             while True:
                 if self.process.poll() is not None:
-                    print("❌ GPU CRASHED (Possible VRAM limit reached during 6s render).")
+                    print("❌ GPU CRASHED.")
                     os._exit(1) 
 
                 async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
@@ -166,16 +156,11 @@ class LTXEngine:
                         history = await resp.json()
                         if prompt_id in history: break
                 
-                # Extended timeout to 40 mins for 6-second high-quality renders
                 if time.time() - start_time > 2400: raise HTTPException(status_code=504, detail="Timeout")
                 await asyncio.sleep(5)
 
-        # 6. RETURN RESULT
         videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
         videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
         
-        if not videos:
-            raise HTTPException(status_code=500, detail="Video generation failed - no file produced.")
-
         with open(os.path.join(out_dir, videos[0]), "rb") as f:
             return Response(content=f.read(), media_type="video/mp4")
