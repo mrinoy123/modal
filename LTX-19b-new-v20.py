@@ -66,16 +66,16 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,               # 🔥 8GB RAM Cost-Saver
+    memory=8192,               # 💰 Hard locked to 8GB RAM Cost-Saver Tier
     scaledown_window=60,
-    timeout=3600 
+    timeout=10000 
 )
 class LTXEngine:
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
 
-    # 🔥 RAM SQUEEZER Watchdog (Keeps the 8GB RAM from filling up with OS cache)
+    # RAM SQUEEZER Watchdog (Keeps the 8GB RAM from filling up with OS cache)
     async def _ram_squeezer(self):
         print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
@@ -125,19 +125,30 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (GPU-Only Strict Streaming)...")
+        print("🚀 Launching LTX-2 19B Engine (Direct GPU Safetensors Streaming)...")
         
+        # 🔥 ADDED OPTIMIZATION: Setup scratch directories on default free 512GB NVMe SSD
+        os.makedirs("/tmp/comfy_swap", exist_ok=True)
+        os.makedirs("/tmp/hf_offload", exist_ok=True)
+
         env_vars = os.environ.copy()
+        
+        # 🔥 ADDED OPTIMIZATION: Choke CPU threads to block background memory footprint bloat
+        env_vars["TORCH_NUM_THREADS"] = "1"
+        env_vars["OMP_NUM_THREADS"] = "1"
+        
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
+        env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--gpu-only",             # 🔥 CORE FIX: Forbids ComfyUI from putting 12.4GB models into 8GB System RAM
-            "--cache-none",           # Forces deletion of the model from the GPU immediately after use
-            "--mmap",                 # Streams directly from SSD to GPU
-            "--disable-smart-memory", # Stops ComfyUI from trying to optimize RAM usage
+            "--gpu-only",             # Forbids ComfyUI from pulling models to CPU staging RAM
+            "--cache-none",           # Forces deletion of the model from VRAM immediately after use
+            "--mmap",                 # Streams directly from SSD file pointers to GPU VRAM
+            "--temp-directory", "/tmp/comfy_swap", # 🔥 ADDED: Route internal model-swapping directly to SSD
+            "--disable-smart-memory", # Stops ComfyUI from tracking and caching tensors in RAM
             "--use-sage-attention", 
             "--bf16-vae",
             "--disable-xformers"    
