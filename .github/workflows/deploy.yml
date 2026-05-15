@@ -12,6 +12,7 @@ on:
           - both
           - ltx-v2-3
           - sonic-lypsync
+          - LTX-19b-new-v20
 
 jobs:
   deploy-modal:
@@ -36,6 +37,15 @@ jobs:
         run: |
           echo "Deploying LTX v2.3 Video API..."
           modal deploy ltx-v2-3-video-generator-deploy.py
+
+      - name: 🚀 Deploy LTX-19b New v20 Engine
+        if: github.event.inputs.target == 'both' || github.event.inputs.target == 'LTX-19b-new-v20'
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          echo "Deploying LTX-19b-new-v20 Video API..."
+          modal deploy LTX-19b-new-v20.py
 
       - name: 🗣️ Deploy Sonic Lip-Sync Engine
         if: github.event.inputs.target == 'both' || github.event.inputs.target == 'sonic-lypsync'
