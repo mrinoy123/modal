@@ -112,10 +112,12 @@ class LTXEngine:
                     
                     if "unet" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "unet", filename))
-                    elif "clip" in lower_path or "text_encoder" in lower_path:
+                    # 🔥 FIXED: Now catches the "gemma" file for the SM Clip node
+                    elif "clip" in lower_path or "text_encoder" in lower_path or "gemma" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "clip", filename))
                         safe_link(src_path, os.path.join(base_models_dir, "text_encoders", filename))
-                    elif "audio_vae" in lower_path:
+                    # 🔥 FIXED: Now catches the "connector" file for the SM Clip node
+                    elif "audio_vae" in lower_path or "connector" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "checkpoints", filename))
                     elif "vae" in lower_path:
                         safe_link(src_path, os.path.join(base_models_dir, "vae", filename))
