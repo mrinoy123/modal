@@ -234,22 +234,27 @@ class LTXEngine:
                 )
 
         # =====================================================================
-        # 🎯 STRICT TARGETING BASED ON COMFYUI ERROR LOGS
-        # These are the exact files ComfyUI explicitly confirmed it has available.
+        # 🔍 SMARTER AUTO-DISCOVERY ENGINE (Prevents VAE Crossed-Wires)
         # =====================================================================
+        def get_model_filename(folder_name, required_keyword=None, exclude_keyword=None):
+            dir_path = f"/workspace/ComfyUI/models/{folder_name}"
+            if os.path.exists(dir_path):
+                files = [f for f in os.listdir(dir_path) if f.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin"))]
+                for f in files:
+                    if required_keyword and required_keyword.lower() not in f.lower():
+                        continue
+                    if exclude_keyword and exclude_keyword.lower() in f.lower():
+                        continue
+                    return f
+            return None
+
         exact_unet_name = "ltx-2-19b-dev-fp8.safetensors"
         exact_gemma_name = "gemma-3-12b-it-FP8.safetensors"
         exact_connector_name = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
 
-        # Dynamically find VAEs since they weren't in the error log
-        def get_model_filename(folder_name):
-            dir_path = f"/workspace/ComfyUI/models/{folder_name}"
-            if os.path.exists(dir_path):
-                files = [f for f in os.listdir(dir_path) if f.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin"))]
-                if files: return files[0] 
-            return None
-
-        active_vae = get_model_filename("vae")
+        # 🔧 FIXED: Strictly separate Video VAE and Audio VAE
+        active_video_vae = get_model_filename("vae", exclude_keyword="audio")
+        active_audio_vae = get_model_filename("vae", required_keyword="audio")
 
         # =====================================================================
         # 🛡️ THE ISOLATION INJECTOR
@@ -274,30 +279,33 @@ class LTXEngine:
                             node_data["inputs"]["unet_name"] = exact_unet_name
                         else:
                             node_data["inputs"]["ckpt_name"] = exact_unet_name
-                            
-                        print(f"💉 INJECTED: Hard-linked exact UNET [{exact_unet_name}] into Node {node_id}")
 
                     # --- 2. FORCE FIX TEXT ENCODERS (GEMMA + CONNECTOR) ---
                     if class_type in ["LTXAVTextEncoderLoader", "DualCLIPLoader"]:
                         node_data["inputs"]["text_encoder"] = exact_gemma_name
                         if class_type == "LTXAVTextEncoderLoader":
                             node_data["inputs"]["ckpt_name"] = exact_connector_name
-                        print(f"💉 INJECTED: Loaded Text Encoder [{exact_gemma_name}] and Connector into Node {node_id}")
 
-                    # --- 3. FORCE FIX VAE ---
+                    # --- 3. FORCE FIX VIDEO VAE ---
                     if class_type == "VAELoader":
-                        if active_vae:
-                            node_data["inputs"]["vae_name"] = active_vae
-                            print(f"💉 INJECTED: Loaded VAE [{active_vae}] into Node {node_id}")
+                        if active_video_vae:
+                            node_data["inputs"]["vae_name"] = active_video_vae
+                            print(f"💉 INJECTED: Loaded VIDEO VAE [{active_video_vae}] into Node {node_id}")
 
-                    # --- 4. CANVAS ENFORCER ---
+                    # --- 4. FORCE FIX AUDIO VAE ---
+                    if class_type == "LTXVAudioVAELoader":
+                        if active_audio_vae:
+                            if "ckpt_name" in node_data["inputs"]:
+                                node_data["inputs"]["ckpt_name"] = active_audio_vae
+                            else:
+                                node_data["inputs"]["vae_name"] = active_audio_vae
+                            print(f"💉 INJECTED: Loaded AUDIO VAE [{active_audio_vae}] into Node {node_id}")
+
+                    # --- 5. CANVAS ENFORCER ---
                     if class_type == "LoadImage":
                         node_data["inputs"]["image"] = "master_plane.png"
-                        print(f"🔧 Canvas Enforcer: Bound LoadImage Node {node_id} to master_plane.png")
 
                     sanitized_workflow[str(node_id)] = node_data
-                else:
-                    print(f"🧹 Gatekeeper Evicted Non-Node UI Metadata Key: {node_id}")
             
             workflow = sanitized_workflow
 
