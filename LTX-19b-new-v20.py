@@ -44,8 +44,9 @@ compiled_image = build_image.run_commands(
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
+# 🔄 REWRITTEN: Using comfyanonymous repository while preserving /workspace/ComfyUI directory routing
 final_image = compiled_image.run_commands(
-    "git clone https://github.com/Comfy-Org/ComfyUI /workspace/ComfyUI",
+    "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/smthemex/ComfyUI_LTX2_SM.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX2_SM",
@@ -62,7 +63,6 @@ final_image = compiled_image.run_commands(
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
-
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
