@@ -110,7 +110,7 @@ class LTXEngine:
                         
                     src_path = os.path.join(root_dir, filename)
                     fn = filename.lower()
-                    rd = root_dir.lower() # Also check the folder name!
+                    rd = root_dir.lower() 
                     linked_to = []
 
                     def link_it(target_dir):
@@ -119,8 +119,7 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    # 🔧 FIXED: Now checks folder name (rd) and fixed the ltx-video keyword match
-                    if "unet" in rd or "unet" in fn or "ltx-video" in fn or "diffusion_models" in rd:
+                    if "unet" in rd or "unet" in fn or "ltx-2" in fn or "diffusion_models" in rd:
                         link_it("unet")
                         link_it("diffusion_models")
                         link_it("checkpoints")
@@ -208,7 +207,7 @@ class LTXEngine:
         body = await request.json()
         
         # =====================================================================
-        # 📥 DEEP PAYLOAD UNPACKER (Handles n8n wrappers)
+        # 📥 DEEP PAYLOAD UNPACKER
         # =====================================================================
         if isinstance(body, dict) and "json" in body:
             body = body["json"]
@@ -226,35 +225,34 @@ class LTXEngine:
             if not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
                 workflow = workflow["workflow"]
 
-        # =====================================================================
-        # 🚨 FORMAT VALIDATION ALARM
-        # =====================================================================
         if isinstance(workflow, dict):
             if "nodes" in workflow and "last_node_id" in workflow:
                 print("❌ ERROR: Received Canvas/UI JSON format instead of API JSON format.")
                 raise HTTPException(
                     status_code=400, 
-                    detail="Format Mismatch: You sent the ComfyUI UI format. You MUST use 'Save (API Format)' from ComfyUI with Dev Mode enabled."
+                    detail="Format Mismatch: You sent the ComfyUI UI format. You MUST use 'Save (API Format)' from ComfyUI."
                 )
 
         # =====================================================================
-        # 🔍 DYNAMIC MODEL AUTO-DISCOVERY ENGINE
+        # 🎯 STRICT TARGETING BASED ON COMFYUI ERROR LOGS
+        # These are the exact files ComfyUI explicitly confirmed it has available.
         # =====================================================================
+        exact_unet_name = "ltx-2-19b-dev-fp8.safetensors"
+        exact_gemma_name = "gemma-3-12b-it-FP8.safetensors"
+        exact_connector_name = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
+
+        # Dynamically find VAEs since they weren't in the error log
         def get_model_filename(folder_name):
             dir_path = f"/workspace/ComfyUI/models/{folder_name}"
             if os.path.exists(dir_path):
                 files = [f for f in os.listdir(dir_path) if f.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin"))]
-                if files:
-                    return files[0] 
+                if files: return files[0] 
             return None
 
-        # Dynamically find Text Encoders and VAEs
-        active_t5 = get_model_filename("text_encoders")
         active_vae = get_model_filename("vae")
 
         # =====================================================================
         # 🛡️ THE ISOLATION INJECTOR
-        # Fixes the broken JSON by manually shoving the exact names into the nodes
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
@@ -266,29 +264,25 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 1. FORCE FIX THE ISOLATED UNET LOADER ---
+                    # --- 1. FORCE FIX UNET ---
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
                         node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
-                        
-                        # Strip bad keys passed by n8n
                         if "ckpt_name" in node_data["inputs"] and class_type == "UNETLoader":
                             node_data["inputs"].pop("ckpt_name")
-
-                        # 🎯 DIRECT TARGET FROM YOUR IMAGE: 
-                        exact_unet_name = "ltx-video-2-19b-dev-fp8.safetensors"
-                        
+                            
                         if class_type == "UNETLoader":
                             node_data["inputs"]["unet_name"] = exact_unet_name
                         else:
                             node_data["inputs"]["ckpt_name"] = exact_unet_name
                             
-                        print(f"💉 INJECTED: Hard-linked exact UNET [{exact_unet_name}] into isolated Node {node_id}")
+                        print(f"💉 INJECTED: Hard-linked exact UNET [{exact_unet_name}] into Node {node_id}")
 
-                    # --- 2. FORCE FIX TEXT ENCODERS ---
+                    # --- 2. FORCE FIX TEXT ENCODERS (GEMMA + CONNECTOR) ---
                     if class_type in ["LTXAVTextEncoderLoader", "DualCLIPLoader"]:
-                        if active_t5:
-                            node_data["inputs"]["text_encoder"] = active_t5
-                            print(f"💉 INJECTED: Loaded Text Encoder [{active_t5}] into Node {node_id}")
+                        node_data["inputs"]["text_encoder"] = exact_gemma_name
+                        if class_type == "LTXAVTextEncoderLoader":
+                            node_data["inputs"]["ckpt_name"] = exact_connector_name
+                        print(f"💉 INJECTED: Loaded Text Encoder [{exact_gemma_name}] and Connector into Node {node_id}")
 
                     # --- 3. FORCE FIX VAE ---
                     if class_type == "VAELoader":
