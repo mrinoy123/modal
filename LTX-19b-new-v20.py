@@ -45,7 +45,7 @@ compiled_image = build_image.run_commands(
 )
 
 final_image = compiled_image.run_commands(
-    "git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI",
+    "git clone https://github.com/Comfy-Org/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/smthemex/ComfyUI_LTX2_SM.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX2_SM",
