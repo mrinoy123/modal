@@ -45,7 +45,7 @@ compiled_image = build_image.run_commands(
 )
 
 final_image = compiled_image.run_commands(
-    "git clone https://github.com/Comfy-Org/ComfyUI",
+    "git clone https://github.com/Comfy-Org/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/smthemex/ComfyUI_LTX2_SM.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX2_SM",
@@ -57,11 +57,9 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
-    # 🚀 NEW ADDITIONS REQUIRED BY THE MULTI-STAGE SEPARATED TIMELINE BLUEPRINT:
     "git clone https://github.com/RandomInternetPreson/ComfyUI_LTX-2_VRAM_Memory_Management.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX-2_VRAM_Memory_Management",
     "git clone https://github.com/evanspearman/ComfyMath.git /workspace/ComfyUI/custom_nodes/ComfyMath"
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
-    # 🔥 SURGICAL HARD DRIVE PATCH v2: Fixes the PyTorch device split error in RIFE
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
 
@@ -99,7 +97,6 @@ class LTXEngine:
         print("🔗 Running Aggressive Fuzzy Linker (Carpet Bomb Strategy)...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # 1. Create ALL possible search directories used by various custom node packs
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
@@ -111,7 +108,6 @@ class LTXEngine:
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
-                    # Filter for model files only
                     if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
                         continue
                         
@@ -125,14 +121,12 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    # Unified Audio-Video Transformer (Catches Distilled, Dev, FP8 & GGUF formats)
                     if "unet" in fn or "ltx-2-19b" in fn or "distilled" in fn or "diffusion_models" in fn:
                         link_it("unet")
                         link_it("diffusion_models")
                         link_it("checkpoints")
                         link_it("clip")
                         
-                    # Gemma / Text Encoder routing (SM Node + GGUF safety)
                     if "gemma" in fn or "clip" in fn or "t5" in fn:
                         link_it("clip")
                         link_it("text_encoders")
@@ -141,22 +135,18 @@ class LTXEngine:
                         link_it("gguf") 
                         link_it("unet") 
                         
-                    # Connector routing (Essential for Node 86 Matrix)
                     if "connector" in fn:
                         link_it("checkpoints") 
                         link_it("clip")
                         link_it("unet")
                         
-                    # Audio VAE routing
                     if "audio_vae" in fn or ("audio" in fn and "vae" in fn):
                         link_it("checkpoints")
                         link_it("vae")
                         
-                    # Standard Video VRAM VAE routing
                     if "vae" in fn and "audio" not in fn:
                         link_it("vae")
                         
-                    # RIFE / Frame Interpolation routing
                     if "rife" in fn or "vfi" in fn:
                         link_it("vfi")
                         
@@ -184,17 +174,14 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # =======================================================================
-        # ⚡ HIGH-SPEED SEQUENTIAL HARD DRIVE STREAMING FLAGS
-        # =======================================================================
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--mmap",                      # Keeps file access pinned to direct storage memory-mapping
-            "--cache-none",                # Completely unloads unpatched models from RAM/VRAM cache immediately after use
+            "--mmap",                      
+            "--cache-none",                
             "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae",
             "--disable-xformers",
-            "--fp8_e4m3fn-text-enc"        # Locks Text Encoder footprint inside compressed execution boundaries
+            "--fp8_e4m3fn-text-enc"        
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -223,10 +210,37 @@ class LTXEngine:
         image_url, workflow = body.get("image_url"), body.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
+        # =====================================================================
+        # 🔥 DYNAMIC LTX-2 ARCHITECTURE FORCER (The FLUX Fix)
+        # =====================================================================
+        if isinstance(workflow, dict):
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict) and node_data.get("class_type") == "UNETLoader":
+                    
+                    # 1. Morph the class into the official Lightricks LTX-Video Loader
+                    node_data["class_type"] = "LTXVModelLoader"
+                    
+                    if "inputs" not in node_data:
+                        node_data["inputs"] = {}
+                        
+                    # 2. Re-map the file input (Custom loaders use 'ckpt_name' instead of 'unet_name')
+                    if "unet_name" in node_data["inputs"]:
+                        node_data["inputs"]["ckpt_name"] = node_data["inputs"].pop("unet_name")
+                        
+                    # 3. Force FP8 strictly to prevent memory crashes
+                    node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
+                    
+                    print(f"🔧 AUTOMATIC FIX: Morphed Node {node_id} into LTXVModelLoader (Forced LTX-V Architecture)")
+
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
-        file_key = image_url.split(".dev/")[-1]
-        self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
+        
+        if image_url:
+            file_key = image_url.split(".dev/")[-1]
+            try:
+                self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
+            except Exception as e:
+                print(f"⚠️ Failed to download image from S3: {e}")
 
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
