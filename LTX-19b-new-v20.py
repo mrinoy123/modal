@@ -122,16 +122,12 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    # =======================================================================
-                    # 🛠️ REWRITTEN RESILIENT FUZZY ROUTING LOGIC
-                    # =======================================================================
-                    
-                    # Core Unified Audio-Video Transformer (Catches Distilled, Dev, FP8 & GGUF formats)
+                    # Unified Audio-Video Transformer (Catches Distilled, Dev, FP8 & GGUF formats)
                     if "unet" in fn or "ltx-2-19b" in fn or "distilled" in fn or "diffusion_models" in fn:
                         link_it("unet")
                         link_it("diffusion_models")
                         link_it("checkpoints")
-                        link_it("clip") # Safety mapping anchor for intersection layouts
+                        link_it("clip")
                         
                     # Gemma / Text Encoder routing (SM Node + GGUF safety)
                     if "gemma" in fn or "clip" in fn or "t5" in fn:
@@ -153,7 +149,7 @@ class LTXEngine:
                         link_it("checkpoints")
                         link_it("vae")
                         
-                    # Standard Video VAE routing
+                    # Standard Video VRAM VAE routing
                     if "vae" in fn and "audio" not in fn:
                         link_it("vae")
                         
@@ -172,7 +168,7 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (Direct GPU Safetensors Streaming)...")
+        print("🚀 Launching LTX-2 19B Engine (Direct NVMe Sequential Streaming)...")
         
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -185,16 +181,17 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # =======================================================================
+        # ⚡ HIGH-SPEED SEQUENTIAL HARD DRIVE STREAMING FLAGS
+        # =======================================================================
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--gpu-only",              
-            "--cache-none",           
-            "--mmap",                 
+            "--mmap",                      # Keeps file access pinned to direct storage memory-mapping
+            "--cache-none",                # Completely unloads unpatched models from RAM/VRAM cache immediately after use
             "--temp-directory", "/tmp/comfy_swap", 
-            "--disable-smart-memory", 
             "--bf16-vae",
             "--disable-xformers",
-            "--fp8_e4m3fn-text-enc"   
+            "--fp8_e4m3fn-text-enc"        # Locks Text Encoder footprint inside compressed execution boundaries
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
