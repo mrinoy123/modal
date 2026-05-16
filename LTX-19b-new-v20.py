@@ -122,12 +122,16 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    # --- AGGRESSIVE FUZZY ROUTING LOGIC ---
+                    # =======================================================================
+                    # 🛠️ REWRITTEN RESILIENT FUZZY ROUTING LOGIC
+                    # =======================================================================
                     
-                    # UNet / Diffusion routing
-                    if "unet" in fn or "ltx-2-19b-dev-q3" in fn:
+                    # Core Unified Audio-Video Transformer (Catches Distilled, Dev, FP8 & GGUF formats)
+                    if "unet" in fn or "ltx-2-19b" in fn or "distilled" in fn or "diffusion_models" in fn:
                         link_it("unet")
                         link_it("diffusion_models")
+                        link_it("checkpoints")
+                        link_it("clip") # Safety mapping anchor for intersection layouts
                         
                     # Gemma / Text Encoder routing (SM Node + GGUF safety)
                     if "gemma" in fn or "clip" in fn or "t5" in fn:
@@ -138,14 +142,14 @@ class LTXEngine:
                         link_it("gguf") 
                         link_it("unet") 
                         
-                    # Connector routing (Essential for Node 86)
+                    # Connector routing (Essential for Node 86 Matrix)
                     if "connector" in fn:
                         link_it("checkpoints") 
                         link_it("clip")
                         link_it("unet")
                         
                     # Audio VAE routing
-                    if "audio_vae" in fn:
+                    if "audio_vae" in fn or ("audio" in fn and "vae" in fn):
                         link_it("checkpoints")
                         link_it("vae")
                         
@@ -183,7 +187,7 @@ class LTXEngine:
         
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--gpu-only",             
+            "--gpu-only",              
             "--cache-none",           
             "--mmap",                 
             "--temp-directory", "/tmp/comfy_swap", 
