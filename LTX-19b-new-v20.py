@@ -44,7 +44,7 @@ compiled_image = build_image.run_commands(
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
-# 🔄 REWRITTEN: Using comfyanonymous repository while preserving /workspace/ComfyUI directory routing
+# 🔄 Preserving your comfyanonymous repository layout route exactly
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -63,6 +63,7 @@ final_image = compiled_image.run_commands(
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
+
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -211,27 +212,38 @@ class LTXEngine:
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
         # =====================================================================
+        # 🧹 THE CRITICAL PAYLOAD SANITIZER (Eliminates the 500 TypeError)
+        # =====================================================================
+        if isinstance(workflow, dict):
+            sanitized_workflow = {}
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict):
+                    sanitized_workflow[node_id] = node_data
+                else:
+                    print(f"🧹 STRIPPED JUNK METADATA FROM WORKFLOW ROOT: {node_id} = {node_data}")
+            workflow = sanitized_workflow
+
+        # =====================================================================
         # 🛡️ THE ENVIRONMENT ISOLATION PATCH (Forcing Native UNETLoader to LTXV)
         # =====================================================================
         if isinstance(workflow, dict):
             for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict) and node_data.get("class_type") == "UNETLoader":
+                if node_data.get("class_type") == "UNETLoader":
                     
-                    # Keep it as a native UNETLoader so ComfyUI doesn't throw a 'missing_node_type' error
                     if "inputs" not in node_data:
                         node_data["inputs"] = {}
                         
-                    # Force the structural parameters directly in the workflow payload
+                    # Force structural execution space directly inside workflow payload
                     node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
                     
-                    # If your n8n script sent it as 'ckpt_name', map it back to what the native loader expects
+                    # Intercept custom node structures and map keys cleanly back to native definitions
                     if "ckpt_name" in node_data["inputs"]:
                         node_data["inputs"]["unet_name"] = node_data["inputs"].pop("ckpt_name")
                         
                     print(f"🛡️ Isolated Node {node_id} (UNETLoader) payload. Forcing FP8 execution space.")
 
                 # Guarantee LoadImage nodes match our local filename target on the hard drive
-                if isinstance(node_data, dict) and node_data.get("class_type") == "LoadImage":
+                if node_data.get("class_type") == "LoadImage":
                     if "inputs" not in node_data:
                         node_data["inputs"] = {}
                     node_data["inputs"]["image"] = "master_plane.png"
@@ -241,14 +253,18 @@ class LTXEngine:
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
         
         # =====================================================================
-        # 📥 BULLETPROOF STORAGE SYNC (Fixes the missing asset file error)
+        # 📥 BULLETPROOF STORAGE SYNC (With Double Slash Interceptor)
         # =====================================================================
         if image_url and str(image_url).strip():
             from urllib.parse import urlparse
             file_key = urlparse(image_url).path.lstrip('/')
             
+            # Smash out accidental double slashes
+            while "//" in file_key:
+                file_key = file_key.replace("//", "/")
+            
             try:
-                print(f"📥 Downloading input frame asset from R2. Key: {file_key}")
+                print(f"📥 Downloading input frame asset from R2. Cleaned Key: {file_key}")
                 self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
                 print(f"✅ Storage Sync Successful. File size: {os.path.getsize(local_input)} bytes.")
             except Exception as e:
