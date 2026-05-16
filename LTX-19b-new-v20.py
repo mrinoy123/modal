@@ -110,6 +110,7 @@ class LTXEngine:
                         
                     src_path = os.path.join(root_dir, filename)
                     fn = filename.lower()
+                    rd = root_dir.lower() # Also check the folder name!
                     linked_to = []
 
                     def link_it(target_dir):
@@ -118,13 +119,14 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    if "unet" in fn or "ltx-2-19b" in fn or "distilled" in fn or "diffusion_models" in fn:
+                    # 🔧 FIXED: Now checks folder name (rd) and fixed the ltx-video keyword match
+                    if "unet" in rd or "unet" in fn or "ltx-video" in fn or "diffusion_models" in rd:
                         link_it("unet")
                         link_it("diffusion_models")
                         link_it("checkpoints")
                         link_it("clip")
                         
-                    if "gemma" in fn or "clip" in fn or "t5" in fn:
+                    if "text_encoder" in rd or "gemma" in fn or "clip" in fn or "t5" in fn:
                         link_it("clip")
                         link_it("text_encoders")
                         link_it("text_encoder")
@@ -137,14 +139,14 @@ class LTXEngine:
                         link_it("clip")
                         link_it("unet")
                         
-                    if "audio_vae" in fn or ("audio" in fn and "vae" in fn):
+                    if "vae" in rd or "audio_vae" in fn or ("audio" in fn and "vae" in fn):
                         link_it("checkpoints")
                         link_it("vae")
                         
-                    if "vae" in fn and "audio" not in fn:
+                    if ("vae" in rd or "vae" in fn) and "audio" not in fn:
                         link_it("vae")
                         
-                    if "rife" in fn or "vfi" in fn:
+                    if "rife" in fn or "vfi" in fn or "vfi" in rd:
                         link_it("vfi")
                         
                     if linked_to:
@@ -228,7 +230,6 @@ class LTXEngine:
         # 🚨 FORMAT VALIDATION ALARM
         # =====================================================================
         if isinstance(workflow, dict):
-            # If the JSON contains a "nodes" array and a "last_node_id", it's the UI format.
             if "nodes" in workflow and "last_node_id" in workflow:
                 print("❌ ERROR: Received Canvas/UI JSON format instead of API JSON format.")
                 raise HTTPException(
@@ -237,7 +238,23 @@ class LTXEngine:
                 )
 
         # =====================================================================
-        # 🛡️ THE BULLETPROOF GRAPH GATEKEEPER & ISOLATION ENGINE
+        # 🔍 DYNAMIC MODEL AUTO-DISCOVERY ENGINE
+        # =====================================================================
+        def get_model_filename(folder_name):
+            dir_path = f"/workspace/ComfyUI/models/{folder_name}"
+            if os.path.exists(dir_path):
+                files = [f for f in os.listdir(dir_path) if f.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin"))]
+                if files:
+                    return files[0] 
+            return None
+
+        # Dynamically find Text Encoders and VAEs
+        active_t5 = get_model_filename("text_encoders")
+        active_vae = get_model_filename("vae")
+
+        # =====================================================================
+        # 🛡️ THE ISOLATION INJECTOR
+        # Fixes the broken JSON by manually shoving the exact names into the nodes
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
@@ -247,13 +264,40 @@ class LTXEngine:
                     if "inputs" not in node_data or node_data["inputs"] is None:
                         node_data["inputs"] = {}
 
-                    if node_data.get("class_type") == "UNETLoader":
-                        node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["unet_name"] = node_data["inputs"].pop("ckpt_name")
-                        print(f"🛡️ Isolated Node {node_id} (UNETLoader). Forcing FP8 execution space.")
+                    class_type = node_data.get("class_type")
 
-                    if node_data.get("class_type") == "LoadImage":
+                    # --- 1. FORCE FIX THE ISOLATED UNET LOADER ---
+                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                        node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
+                        
+                        # Strip bad keys passed by n8n
+                        if "ckpt_name" in node_data["inputs"] and class_type == "UNETLoader":
+                            node_data["inputs"].pop("ckpt_name")
+
+                        # 🎯 DIRECT TARGET FROM YOUR IMAGE: 
+                        exact_unet_name = "ltx-video-2-19b-dev-fp8.safetensors"
+                        
+                        if class_type == "UNETLoader":
+                            node_data["inputs"]["unet_name"] = exact_unet_name
+                        else:
+                            node_data["inputs"]["ckpt_name"] = exact_unet_name
+                            
+                        print(f"💉 INJECTED: Hard-linked exact UNET [{exact_unet_name}] into isolated Node {node_id}")
+
+                    # --- 2. FORCE FIX TEXT ENCODERS ---
+                    if class_type in ["LTXAVTextEncoderLoader", "DualCLIPLoader"]:
+                        if active_t5:
+                            node_data["inputs"]["text_encoder"] = active_t5
+                            print(f"💉 INJECTED: Loaded Text Encoder [{active_t5}] into Node {node_id}")
+
+                    # --- 3. FORCE FIX VAE ---
+                    if class_type == "VAELoader":
+                        if active_vae:
+                            node_data["inputs"]["vae_name"] = active_vae
+                            print(f"💉 INJECTED: Loaded VAE [{active_vae}] into Node {node_id}")
+
+                    # --- 4. CANVAS ENFORCER ---
+                    if class_type == "LoadImage":
                         node_data["inputs"]["image"] = "master_plane.png"
                         print(f"🔧 Canvas Enforcer: Bound LoadImage Node {node_id} to master_plane.png")
 
