@@ -211,26 +211,26 @@ class LTXEngine:
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
         # =====================================================================
-        # 🔥 DYNAMIC LTX-2 ARCHITECTURE FORCER (The FLUX Fix)
+        # 🔥 DYNAMIC LTX-2 ARCHITECTURE FORCER (The FLUX Fix - Patched Naming)
         # =====================================================================
         if isinstance(workflow, dict):
             for node_id, node_data in workflow.items():
                 if isinstance(node_data, dict) and node_data.get("class_type") == "UNETLoader":
                     
-                    # 1. Morph the class into the official Lightricks LTX-Video Loader
-                    node_data["class_type"] = "LTXVModelLoader"
+                    # 1. Morph into the exact registered backend class name
+                    node_data["class_type"] = "LTXVideoModelLoader"
                     
                     if "inputs" not in node_data:
                         node_data["inputs"] = {}
                         
-                    # 2. Re-map the file input (Custom loaders use 'ckpt_name' instead of 'unet_name')
+                    # 2. Re-map the file input parameter name
                     if "unet_name" in node_data["inputs"]:
                         node_data["inputs"]["ckpt_name"] = node_data["inputs"].pop("unet_name")
                         
-                    # 3. Force FP8 strictly to prevent memory crashes
+                    # 3. Force FP8 mode strictly
                     node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
                     
-                    print(f"🔧 AUTOMATIC FIX: Morphed Node {node_id} into LTXVModelLoader (Forced LTX-V Architecture)")
+                    print(f"🔧 AUTOMATIC FIX: Morphed Node {node_id} into LTXVideoModelLoader")
 
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
