@@ -210,7 +210,7 @@ class LTXEngine:
         image_url, workflow = body.get("image_url"), body.get("workflow")
         if isinstance(workflow, str): workflow = json.loads(workflow)
 
-# =====================================================================
+        # =====================================================================
         # 🛡️ THE ENVIRONMENT ISOLATION PATCH (Forcing Native UNETLoader to LTXV)
         # =====================================================================
         if isinstance(workflow, dict):
@@ -230,13 +230,35 @@ class LTXEngine:
                         
                     print(f"🛡️ Isolated Node {node_id} (UNETLoader) payload. Forcing FP8 execution space.")
 
-        # Let's add an active backend injector right before we post to the ComfyUI API.
-        # This reaches into ComfyUI's internal code memory and forces its auto-detection state machine to say 'LTXVideo'
-        if isinstance(workflow, dict):
-            # We add a hidden config modifier directly into the workflow structure if needed, 
-            # but forcing 'weight_dtype' to 'fp8_e4m3fn' directly on the native 'UNETLoader' 
-            # is the exact isolation it needs to prevent it from loading the Flux weight map!
-            pass
+                # Guarantee LoadImage nodes match our local filename target on the hard drive
+                if isinstance(node_data, dict) and node_data.get("class_type") == "LoadImage":
+                    if "inputs" not in node_data:
+                        node_data["inputs"] = {}
+                    node_data["inputs"]["image"] = "master_plane.png"
+                    print(f"🔧 AUTOMATIC FIX: Locked LoadImage Node {node_id} to 'master_plane.png'")
+
+        local_input = "/workspace/ComfyUI/input/master_plane.png"
+        os.makedirs(os.path.dirname(local_input), exist_ok=True)
+        
+        # =====================================================================
+        # 📥 BULLETPROOF STORAGE SYNC (Fixes the missing asset file error)
+        # =====================================================================
+        if image_url and str(image_url).strip():
+            from urllib.parse import urlparse
+            file_key = urlparse(image_url).path.lstrip('/')
+            
+            try:
+                print(f"📥 Downloading input frame asset from R2. Key: {file_key}")
+                self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
+                print(f"✅ Storage Sync Successful. File size: {os.path.getsize(local_input)} bytes.")
+            except Exception as e:
+                print(f"❌ CRITICAL STORAGE ERROR: {e}")
+                raise HTTPException(status_code=400, detail=f"Input asset download failed from R2 storage: {str(e)}")
+        else:
+            print("⚠️ No image_url provided. Compiling fallback canvas to satisfy LoadImage validation.")
+            from PIL import Image
+            img = Image.new('RGB', (1024, 1024), color='black')
+            img.save(local_input)
 
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
