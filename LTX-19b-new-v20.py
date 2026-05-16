@@ -44,7 +44,7 @@ compiled_image = build_image.run_commands(
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
-# 🔄 Preserving your comfyanonymous repository layout route exactly
+# 🔄 Routing directly through comfyanonymous repository layout
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -101,10 +101,6 @@ class LTXEngine:
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
-
-        def safe_link(source, destination):
-            if not os.path.exists(destination):
-                os.symlink(source, destination)
 
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
@@ -208,58 +204,75 @@ class LTXEngine:
             raise HTTPException(status_code=403, detail="Unauthorized")
         
         body = await request.json()
-        image_url, workflow = body.get("image_url"), body.get("workflow")
-        if isinstance(workflow, str): workflow = json.loads(workflow)
+        
+        # =====================================================================
+        # 📥 DEEP PAYLOAD UNPACKER (Handles n8n wrappers)
+        # =====================================================================
+        if isinstance(body, dict) and "json" in body:
+            body = body["json"]
+
+        image_url = body.get("image_url")
+        workflow = body.get("workflow")
+
+        if isinstance(workflow, str):
+            try:
+                workflow = json.loads(workflow)
+            except Exception:
+                pass
+
+        if isinstance(workflow, dict) and "workflow" in workflow:
+            if not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
+                workflow = workflow["workflow"]
 
         # =====================================================================
-        # 🧹 THE CRITICAL PAYLOAD SANITIZER (Eliminates the 500 TypeError)
+        # 🚨 FORMAT VALIDATION ALARM
+        # =====================================================================
+        if isinstance(workflow, dict):
+            # If the JSON contains a "nodes" array and a "last_node_id", it's the UI format.
+            if "nodes" in workflow and "last_node_id" in workflow:
+                print("❌ ERROR: Received Canvas/UI JSON format instead of API JSON format.")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Format Mismatch: You sent the ComfyUI UI format. You MUST use 'Save (API Format)' from ComfyUI with Dev Mode enabled."
+                )
+
+        # =====================================================================
+        # 🛡️ THE BULLETPROOF GRAPH GATEKEEPER & ISOLATION ENGINE
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
             for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict):
-                    sanitized_workflow[node_id] = node_data
+                if isinstance(node_data, dict) and "class_type" in node_data:
+                    
+                    if "inputs" not in node_data or node_data["inputs"] is None:
+                        node_data["inputs"] = {}
+
+                    if node_data.get("class_type") == "UNETLoader":
+                        node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["unet_name"] = node_data["inputs"].pop("ckpt_name")
+                        print(f"🛡️ Isolated Node {node_id} (UNETLoader). Forcing FP8 execution space.")
+
+                    if node_data.get("class_type") == "LoadImage":
+                        node_data["inputs"]["image"] = "master_plane.png"
+                        print(f"🔧 Canvas Enforcer: Bound LoadImage Node {node_id} to master_plane.png")
+
+                    sanitized_workflow[str(node_id)] = node_data
                 else:
-                    print(f"🧹 STRIPPED JUNK METADATA FROM WORKFLOW ROOT: {node_id} = {node_data}")
+                    print(f"🧹 Gatekeeper Evicted Non-Node UI Metadata Key: {node_id}")
+            
             workflow = sanitized_workflow
-
-        # =====================================================================
-        # 🛡️ THE ENVIRONMENT ISOLATION PATCH (Forcing Native UNETLoader to LTXV)
-        # =====================================================================
-        if isinstance(workflow, dict):
-            for node_id, node_data in workflow.items():
-                if node_data.get("class_type") == "UNETLoader":
-                    
-                    if "inputs" not in node_data:
-                        node_data["inputs"] = {}
-                        
-                    # Force structural execution space directly inside workflow payload
-                    node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
-                    
-                    # Intercept custom node structures and map keys cleanly back to native definitions
-                    if "ckpt_name" in node_data["inputs"]:
-                        node_data["inputs"]["unet_name"] = node_data["inputs"].pop("ckpt_name")
-                        
-                    print(f"🛡️ Isolated Node {node_id} (UNETLoader) payload. Forcing FP8 execution space.")
-
-                # Guarantee LoadImage nodes match our local filename target on the hard drive
-                if node_data.get("class_type") == "LoadImage":
-                    if "inputs" not in node_data:
-                        node_data["inputs"] = {}
-                    node_data["inputs"]["image"] = "master_plane.png"
-                    print(f"🔧 AUTOMATIC FIX: Locked LoadImage Node {node_id} to 'master_plane.png'")
 
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
         
         # =====================================================================
-        # 📥 BULLETPROOF STORAGE SYNC (With Double Slash Interceptor)
+        # 📥 BULLETPROOF STORAGE SYNC 
         # =====================================================================
         if image_url and str(image_url).strip():
             from urllib.parse import urlparse
             file_key = urlparse(image_url).path.lstrip('/')
             
-            # Smash out accidental double slashes
             while "//" in file_key:
                 file_key = file_key.replace("//", "/")
             
