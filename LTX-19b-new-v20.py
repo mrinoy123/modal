@@ -59,8 +59,7 @@ final_image = compiled_image.run_commands(
 ).run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 ).run_commands(
-    # 🔥 UPDATED DENO CONNECTOR PATCH
-    # Forcefully swaps Deno's hardcoded ltx-2.3 string with your actual 19b embedding connector file!
+    # 🔥 DENO CONNECTOR PATCH
     "python -c \"import os; f='/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes/deno_ltx23_preset_loader.py'; d=open(f).read().replace('ltx-2.3_text_projection_bf16.safetensors', 'ltx-2-19b-embeddings_connector_dev_bf16.safetensors') if os.path.exists(f) else ''; open(f, 'w').write(d) if d else None; print('✅ Successfully patched hardcoded Deno file references to use your 19b Connector.')\""
 )
 
@@ -235,13 +234,12 @@ class LTXEngine:
         # =====================================================================
         target_unet = "ltx-2-19b-dev-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
-        target_clip_l = "clip_l.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
         # =====================================================================
-        # 🛡️ THE ANTI-FLUX ENFORCEMENT ENGINE
+        # 🛡️ THE ANTI-FLUX HYBRID ENFORCEMENT ENGINE
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
@@ -252,57 +250,29 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 🌟 INTERCEPT DENO PRESET LOADERS AND ENFORCE PARAMETERS ---
-                    if "Deno" in class_type or class_type == "DenoLTX23PresetLoader":
-                        
-                        if "pipeline_mode" in node_data["inputs"]:
-                            node_data["inputs"]["pipeline_mode"] = "KJ Style"
-                        
-                        for key in ["unet_name", "ckpt_name", "model_name", "model", "diffusion_model_name", "checkpoint_name"]:
-                            if key in node_data["inputs"]: 
-                                node_data["inputs"][key] = target_unet
-                        
-                        for key in ["text_encoder", "clip_name", "clip", "text_encoder_name"]:
-                            if key in node_data["inputs"]: 
-                                node_data["inputs"][key] = target_gemma
-                                
-                        for key in ["text_projection_name", "connector", "connector_name"]:
-                            if key in node_data["inputs"]:
-                                node_data["inputs"][key] = target_connector
-                        
-                        for key in ["clip_l", "clip_l_name", "clip_name_2"]:
-                            if key in node_data["inputs"]: 
-                                node_data["inputs"][key] = target_clip_l
+                    # --- 1. ISOLATE DENO FOR UNET/VAE ONLY ---
+                    if class_type == "DenoLTX23PresetLoader":
+                        node_data["inputs"]["pipeline_mode"] = "Checkpoint Style"
+                        node_data["inputs"]["checkpoint_name"] = target_unet
+                        node_data["inputs"]["diffusion_model_name"] = target_unet
+                        node_data["inputs"]["video_vae_name"] = target_video_vae
+                        print(f"💉 HYBRID SYNC: Locked Deno Node {node_id} to 19B Checkpoint Style.")
 
-                        for key in ["vae_name", "video_vae", "video_vae_name", "vae"]:
-                            if key in node_data["inputs"] and "audio" not in key:
-                                node_data["inputs"][key] = target_video_vae
-                        
-                        for key in ["audio_vae", "audio_vae_name"]:
-                            if key in node_data["inputs"]: 
-                                node_data["inputs"][key] = target_audio_vae
-                                
-                        print(f"💉 ANTI-FLUX PATROL: Secured Deno Node {node_id} with 19B Connector.")
+                    # --- 2. ISOLATE STANDALONE TEXT ENGINE ---
+                    if class_type == "LTXAVTextEncoderLoader":
+                        node_data["inputs"]["text_encoder"] = target_gemma
+                        node_data["inputs"]["ckpt_name"] = target_connector
+                        print(f"💉 HYBRID SYNC: Injected Gemma & Connector into Text Node {node_id}.")
 
-                    # --- 2. FALLBACK OVERRIDES FOR RAW PARTS ---
-                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "CheckpointLoaderKJ", "DiffusionModelLoaderKJ"]:
-                        if "model_type" in node_data["inputs"]:
-                            node_data["inputs"]["model_type"] = "ltxv"
-                        
-                        if "unet_name" in node_data["inputs"]: node_data["inputs"]["unet_name"] = target_unet
-                        elif "ckpt_name" in node_data["inputs"]: node_data["inputs"]["ckpt_name"] = target_unet
-                        elif "model_name" in node_data["inputs"]: node_data["inputs"]["model_name"] = target_unet
-
-                    if class_type in ["LTXAVTextEncoderLoader", "DualCLIPLoader"]:
-                        if "text_encoder" in node_data["inputs"]: node_data["inputs"]["text_encoder"] = target_gemma
-
-                    if class_type in ["VAELoader", "VAELoaderKJ"]:
-                        for key in ["vae_name", "ckpt_name"]:
-                            if key in node_data["inputs"]: node_data["inputs"][key] = target_video_vae
-
+                    # --- 3. AUDIO VAE MAPPING ---
                     if class_type == "LTXVAudioVAELoader":
-                        for key in ["vae_name", "ckpt_name"]:
-                            if key in node_data["inputs"]: node_data["inputs"][key] = target_audio_vae
+                        if "ckpt_name" in node_data["inputs"]: node_data["inputs"]["ckpt_name"] = target_audio_vae
+                        if "vae_name" in node_data["inputs"]: node_data["inputs"]["vae_name"] = target_audio_vae
+
+                    # --- 4. HARDWARE/SYNC FAILSAFES ---
+                    if class_type == "LTXVEmptyLatentAudio":
+                        # GUARANTEES the audio generator matches the 12fps baseline of the video generator
+                        node_data["inputs"]["frame_rate"] = 12 
 
                     if class_type == "LoadImage":
                         node_data["inputs"]["image"] = "master_plane.png"
@@ -345,7 +315,7 @@ class LTXEngine:
 
         try:
             async with aiohttp.ClientSession() as session:
-                print(f"🎨 Processing Joint Audio-Video Workflow...")
+                print(f"🎨 Processing Hybrid Audio-Video Workflow...")
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                     res_json = await resp.json()
                     
