@@ -13,7 +13,7 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION (Trimmed for Speed)
+# 1. IMAGE DEFINITION
 # ==========================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
@@ -96,7 +96,6 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # The Deno node looks in standard directories, this ensures everything from /mnt/weights is mounted cleanly
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
@@ -114,7 +113,7 @@ class LTXEngine:
                             os.symlink(src_path, dest)
                             linked_to.append(target_dir)
 
-                    if "unet" in rd or "unet" in fn or "ltx-2" in fn or "diffusion_models" in rd:
+                    if "unet" in rd or "unet" in fn or "ltx" in fn or "diffusion_models" in rd:
                         link_it("unet")
                         link_it("diffusion_models")
                         link_it("checkpoints")
@@ -128,10 +127,11 @@ class LTXEngine:
                         link_it("gguf") 
                         link_it("unet") 
                         
-                    if "connector" in fn:
+                    if "connector" in fn or "projection" in fn:
                         link_it("checkpoints") 
                         link_it("clip")
                         link_it("unet")
+                        link_it("text_encoders")
                         
                     if "vae" in rd or "audio_vae" in fn or ("audio" in fn and "vae" in fn):
                         link_it("checkpoints")
@@ -154,7 +154,7 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 Engine with Deno Loader Support...")
+        print("🚀 Launching LTX-2 Engine with Fixed Deno Loader Support...")
         
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -201,9 +201,6 @@ class LTXEngine:
         
         body = await request.json()
         
-        # =====================================================================
-        # 📥 DEEP PAYLOAD UNPACKER
-        # =====================================================================
         if isinstance(body, dict) and "json" in body:
             body = body["json"]
 
@@ -222,23 +219,87 @@ class LTXEngine:
 
         if isinstance(workflow, dict):
             if "nodes" in workflow and "last_node_id" in workflow:
-                print("❌ ERROR: Received Canvas/UI JSON format instead of API JSON format.")
-                raise HTTPException(
-                    status_code=400, 
-                    detail="Format Mismatch: You sent the ComfyUI UI format. You MUST use 'Save (API Format)' from ComfyUI."
-                )
+                raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
         # =====================================================================
-        # 🛡️ MINIMAL CANVAS ENFORCER
-        # All injection logic removed: Deno node handles its own weights entirely.
-        # This purely ensures the payload maps your downloaded R2 image safely.
+        # 🎯 EXPLICIT TARGET HARDCODING FOR CHOSEN FP8 MODELS
+        # Directly forces parameters to match the valid disk contents
+        # =====================================================================
+        target_unet = "ltx-2-19b-dev-fp8.safetensors"
+        target_gemma = "gemma-3-12b-it-FP8.safetensors"
+        target_clip_l = "clip_l.safetensors"
+        target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
+        target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
+
+        # =====================================================================
+        # 🛡️ THE ANTI-FLUX ENFORCEMENT & INJECTOR ENGINE
         # =====================================================================
         if isinstance(workflow, dict):
+            sanitized_workflow = {}
             for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict) and node_data.get("class_type") == "LoadImage":
+                if isinstance(node_data, dict) and "class_type" in node_data:
                     if "inputs" not in node_data or node_data["inputs"] is None:
                         node_data["inputs"] = {}
-                    node_data["inputs"]["image"] = "master_plane.png"
+
+                    class_type = node_data.get("class_type")
+
+                    # --- 🌟 INTERCEPT DENO CUSTOM NODES AND SHUT DOWN FALLBACKS ---
+                    if "Deno" in class_type or class_type == "DenoLTX23PresetLoader":
+                        
+                        # 🔥 FORCE Deno node to use Custom Node/Diffusion Mode structure.
+                        # This strips out 'Checkpoint Style' so ComfyUI doesn't trigger the FLUX loader!
+                        if "pipeline_mode" in node_data["inputs"]:
+                            node_data["inputs"]["pipeline_mode"] = "Diffusion Model Style"
+                        
+                        # Map explicit model keys safely across Deno architecture variants
+                        for key in ["unet_name", "ckpt_name", "model_name", "model", "diffusion_model_name", "checkpoint_name"]:
+                            if key in node_data["inputs"]: 
+                                node_data["inputs"][key] = target_unet
+                        
+                        for key in ["text_encoder", "clip_name", "clip", "text_encoder_name"]:
+                            if key in node_data["inputs"]: 
+                                node_data["inputs"][key] = target_gemma
+                        
+                        for key in ["clip_l", "clip_l_name", "clip_name_2"]:
+                            if key in node_data["inputs"]: 
+                                node_data["inputs"][key] = target_clip_l
+
+                        for key in ["vae_name", "video_vae", "video_vae_name", "vae"]:
+                            if key in node_data["inputs"] and "audio" not in key:
+                                node_data["inputs"][key] = target_video_vae
+                        
+                        for key in ["audio_vae", "audio_vae_name"]:
+                            if key in node_data["inputs"]: 
+                                node_data["inputs"][key] = target_audio_vae
+                                
+                        print(f"💉 ANTI-FLUX PATROL: Forced Deno Node {node_id} to Diffusion Model Style and mapped FP8 weights.")
+
+                    # --- 2. REGULAR NATIVE NODE MAPPER ---
+                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "CheckpointLoaderKJ", "DiffusionModelLoaderKJ"]:
+                        if "model_type" in node_data["inputs"]:
+                            node_data["inputs"]["model_type"] = "ltxv"
+                        
+                        if "unet_name" in node_data["inputs"]: node_data["inputs"]["unet_name"] = target_unet
+                        elif "ckpt_name" in node_data["inputs"]: node_data["inputs"]["ckpt_name"] = target_unet
+                        elif "model_name" in node_data["inputs"]: node_data["inputs"]["model_name"] = target_unet
+
+                    if class_type in ["LTXAVTextEncoderLoader", "DualCLIPLoader"]:
+                        if "text_encoder" in node_data["inputs"]: node_data["inputs"]["text_encoder"] = target_gemma
+
+                    if class_type in ["VAELoader", "VAELoaderKJ"]:
+                        for key in ["vae_name", "ckpt_name"]:
+                            if key in node_data["inputs"]: node_data["inputs"][key] = target_video_vae
+
+                    if class_type == "LTXVAudioVAELoader":
+                        for key in ["vae_name", "ckpt_name"]:
+                            if key in node_data["inputs"]: node_data["inputs"][key] = target_audio_vae
+
+                    if class_type == "LoadImage":
+                        node_data["inputs"]["image"] = "master_plane.png"
+
+                    sanitized_workflow[str(node_id)] = node_data
+            
+            workflow = sanitized_workflow
 
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
@@ -274,7 +335,7 @@ class LTXEngine:
 
         try:
             async with aiohttp.ClientSession() as session:
-                print(f"🎨 Processing Deno-Routed Workflow...")
+                print(f"🎨 Processing Joint Audio-Video Workflow...")
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                     res_json = await resp.json()
                     
