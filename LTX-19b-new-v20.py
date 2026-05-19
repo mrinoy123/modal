@@ -58,9 +58,6 @@ final_image = compiled_image.run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
-).run_commands(
-    # 🔥 DENO CONNECTOR PATCH
-    "python -c \"import os; f='/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes/deno_ltx23_preset_loader.py'; d=open(f).read().replace('ltx-2.3_text_projection_bf16.safetensors', 'ltx-2-19b-embeddings_connector_dev_bf16.safetensors') if os.path.exists(f) else ''; open(f, 'w').write(d) if d else None; print('✅ Successfully patched hardcoded Deno file references to use your 19b Connector.')\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -104,6 +101,26 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
+        # =====================================================================
+        # 🪄 THE MAGIC MOCK (Bypassing Pre-Flight Validation)
+        # We create 0-byte dummy files so ComfyUI sees them and doesn't crash.
+        # Since the CLIP node is disconnected, it will never try to load these!
+        # =====================================================================
+        print("🪄 Deploying Magic Mocks to hijack ComfyUI validation checks...")
+        dummy_files = [
+            "checkpoints/ltx-2.3-22b-dev.safetensors",
+            "diffusion_models/ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
+            "vae/LTX23_video_vae_bf16.safetensors",
+            "vae/LTX23_audio_vae_bf16.safetensors",
+            "clip/gemma_3_12B_it_fp4_mixed.safetensors",
+            "clip/ltx-2.3_text_projection_bf16.safetensors"
+        ]
+        for df in dummy_files:
+            mock_path = os.path.join(base_models_dir, df)
+            if not os.path.exists(mock_path):
+                open(mock_path, 'a').close() # Create empty file
+
+        # Map actual volume files
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
@@ -150,9 +167,6 @@ class LTXEngine:
                         
                     if "rife" in fn or "vfi" in fn or "vfi" in rd:
                         link_it("vfi")
-                        
-                    if linked_to:
-                        print(f"✅ Linked [{filename}] -> {linked_to}")
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -239,7 +253,7 @@ class LTXEngine:
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
         # =====================================================================
-        # 🛡️ THE ANTI-FLUX HYBRID ENFORCEMENT ENGINE
+        # 🛡️ THE AGGRESSIVE VALIDATION OVERRIDE ENGINE
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
@@ -250,19 +264,23 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 1. ISOLATE DENO FOR UNET/VAE ONLY ---
+                    # --- 1. THE DENO VALIDATION HIJACK ---
                     if class_type == "DenoLTX23PresetLoader":
                         node_data["inputs"]["pipeline_mode"] = "Checkpoint Style"
+                        # Force EVERY dropdown widget to a verified file to prevent pre-flight crashes
                         node_data["inputs"]["checkpoint_name"] = target_unet
                         node_data["inputs"]["diffusion_model_name"] = target_unet
+                        node_data["inputs"]["gguf_unet_name"] = target_unet
+                        node_data["inputs"]["text_encoder_name"] = target_gemma
+                        node_data["inputs"]["text_projection_name"] = target_connector
                         node_data["inputs"]["video_vae_name"] = target_video_vae
-                        print(f"💉 HYBRID SYNC: Locked Deno Node {node_id} to 19B Checkpoint Style.")
+                        node_data["inputs"]["audio_vae_name"] = target_audio_vae
+                        print(f"💉 HIJACK: Force-fed 19B filenames to Deno Node {node_id} to pass validation.")
 
                     # --- 2. ISOLATE STANDALONE TEXT ENGINE ---
                     if class_type == "LTXAVTextEncoderLoader":
                         node_data["inputs"]["text_encoder"] = target_gemma
                         node_data["inputs"]["ckpt_name"] = target_connector
-                        print(f"💉 HYBRID SYNC: Injected Gemma & Connector into Text Node {node_id}.")
 
                     # --- 3. AUDIO VAE MAPPING ---
                     if class_type == "LTXVAudioVAELoader":
@@ -271,7 +289,6 @@ class LTXEngine:
 
                     # --- 4. HARDWARE/SYNC FAILSAFES ---
                     if class_type == "LTXVEmptyLatentAudio":
-                        # GUARANTEES the audio generator matches the 12fps baseline of the video generator
                         node_data["inputs"]["frame_rate"] = 12 
 
                     if class_type == "LoadImage":
