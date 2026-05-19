@@ -154,7 +154,7 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 Engine with Fixed Deno Loader Support...")
+        print("🚀 Launching LTX-2 Engine with Fixed Validated Deno Loader...")
         
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -222,8 +222,7 @@ class LTXEngine:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
         # =====================================================================
-        # 🎯 EXPLICIT TARGET HARDCODING FOR CHOSEN FP8 MODELS
-        # Directly forces parameters to match the valid disk contents
+        # 🎯 EXPLICIT TARGET MODEL ROUTING
         # =====================================================================
         target_unet = "ltx-2-19b-dev-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
@@ -232,7 +231,7 @@ class LTXEngine:
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
         # =====================================================================
-        # 🛡️ THE ANTI-FLUX ENFORCEMENT & INJECTOR ENGINE
+        # 🛡️ THE VALIDATED ANTI-FLUX ENFORCEMENT ENGINE
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
@@ -243,15 +242,16 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 🌟 INTERCEPT DENO CUSTOM NODES AND SHUT DOWN FALLBACKS ---
+                    # --- 🌟 INTERCEPT DENO PRESET LOADERS AND FORCE VALIDATED LIST MODE ---
                     if "Deno" in class_type or class_type == "DenoLTX23PresetLoader":
                         
-                        # 🔥 FORCE Deno node to use Custom Node/Diffusion Mode structure.
-                        # This strips out 'Checkpoint Style' so ComfyUI doesn't trigger the FLUX loader!
+                        # 💥 FIXED: Forces Deno node to pass the exact strict string list constraint.
+                        # Setting this to 'KJ Style' safely tells the custom loader to avoid core Checkpoint loops,
+                        # completely stopping ComfyUI from ever guessing the model_type as 'FLUX'.
                         if "pipeline_mode" in node_data["inputs"]:
-                            node_data["inputs"]["pipeline_mode"] = "Diffusion Model Style"
+                            node_data["inputs"]["pipeline_mode"] = "KJ Style"
                         
-                        # Map explicit model keys safely across Deno architecture variants
+                        # Map explicit parameters safely into Deno's structure slots
                         for key in ["unet_name", "ckpt_name", "model_name", "model", "diffusion_model_name", "checkpoint_name"]:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_unet
@@ -272,9 +272,9 @@ class LTXEngine:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_audio_vae
                                 
-                        print(f"💉 ANTI-FLUX PATROL: Forced Deno Node {node_id} to Diffusion Model Style and mapped FP8 weights.")
+                        print(f"💉 ANTI-FLUX ENFORCED: Switched Deno Node {node_id} to validated KJ Style loading pipeline.")
 
-                    # --- 2. REGULAR NATIVE NODE MAPPER ---
+                    # --- 2. FALLBACK STYLES FOR NATIVE OBJECT PARTS ---
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "CheckpointLoaderKJ", "DiffusionModelLoaderKJ"]:
                         if "model_type" in node_data["inputs"]:
                             node_data["inputs"]["model_type"] = "ltxv"
