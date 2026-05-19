@@ -13,7 +13,7 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION
+# 1. IMAGE DEFINITION (Trimmed for Speed)
 # ==========================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
@@ -44,22 +44,16 @@ compiled_image = build_image.run_commands(
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
-# 🔄 Routing directly through comfyanonymous repository layout
+# 🔄 Stripped down strictly to required workflow nodes for maximum boot speed
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
-    "git clone https://github.com/smthemex/ComfyUI_LTX2_SM.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX2_SM",
-    "git clone https://github.com/city96/ComfyUI-GGUF.git /workspace/ComfyUI/custom_nodes/ComfyUI-GGUF",
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
-    "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-    "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
-    "git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git /workspace/ComfyUI/custom_nodes/ComfyUI-Impact-Pack",
-    "git clone https://github.com/RandomInternetPreson/ComfyUI_LTX-2_VRAM_Memory_Management.git /workspace/ComfyUI/custom_nodes/ComfyUI_LTX-2_VRAM_Memory_Management",
-    "git clone https://github.com/evanspearman/ComfyMath.git /workspace/ComfyUI/custom_nodes/ComfyMath"
+    "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes"
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
@@ -102,6 +96,7 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
+        # The Deno node looks in standard directories, this ensures everything from /mnt/weights is mounted cleanly
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
@@ -159,7 +154,7 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 19B Engine (Direct NVMe Sequential Streaming)...")
+        print("🚀 Launching LTX-2 Engine with Deno Loader Support...")
         
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -193,7 +188,7 @@ class LTXEngine:
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
                     if response.status == 200:
-                        print("⚡ LTX-2 19B API ONLINE!")
+                        print("⚡ LTX-2 API ONLINE!")
                         return
             except Exception:
                 time.sleep(2)
@@ -234,80 +229,16 @@ class LTXEngine:
                 )
 
         # =====================================================================
-        # 🔍 SMARTER AUTO-DISCOVERY ENGINE (Prevents VAE Crossed-Wires)
-        # =====================================================================
-        def get_model_filename(folder_name, required_keyword=None, exclude_keyword=None):
-            dir_path = f"/workspace/ComfyUI/models/{folder_name}"
-            if os.path.exists(dir_path):
-                files = [f for f in os.listdir(dir_path) if f.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin"))]
-                for f in files:
-                    if required_keyword and required_keyword.lower() not in f.lower():
-                        continue
-                    if exclude_keyword and exclude_keyword.lower() in f.lower():
-                        continue
-                    return f
-            return None
-
-        exact_unet_name = "ltx-2-19b-dev-fp8.safetensors"
-        exact_gemma_name = "gemma-3-12b-it-FP8.safetensors"
-        exact_connector_name = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
-
-        # 🔧 FIXED: Strictly separate Video VAE and Audio VAE
-        active_video_vae = get_model_filename("vae", exclude_keyword="audio")
-        active_audio_vae = get_model_filename("vae", required_keyword="audio")
-
-        # =====================================================================
-        # 🛡️ THE ISOLATION INJECTOR
+        # 🛡️ MINIMAL CANVAS ENFORCER
+        # All injection logic removed: Deno node handles its own weights entirely.
+        # This purely ensures the payload maps your downloaded R2 image safely.
         # =====================================================================
         if isinstance(workflow, dict):
-            sanitized_workflow = {}
             for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict) and "class_type" in node_data:
-                    
+                if isinstance(node_data, dict) and node_data.get("class_type") == "LoadImage":
                     if "inputs" not in node_data or node_data["inputs"] is None:
                         node_data["inputs"] = {}
-
-                    class_type = node_data.get("class_type")
-
-                    # --- 1. FORCE FIX UNET ---
-                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
-                        node_data["inputs"]["weight_dtype"] = "fp8_e4m3fn"
-                        if "ckpt_name" in node_data["inputs"] and class_type == "UNETLoader":
-                            node_data["inputs"].pop("ckpt_name")
-                            
-                        if class_type == "UNETLoader":
-                            node_data["inputs"]["unet_name"] = exact_unet_name
-                        else:
-                            node_data["inputs"]["ckpt_name"] = exact_unet_name
-
-                    # --- 2. FORCE FIX TEXT ENCODERS (GEMMA + CONNECTOR) ---
-                    if class_type in ["LTXAVTextEncoderLoader", "DualCLIPLoader"]:
-                        node_data["inputs"]["text_encoder"] = exact_gemma_name
-                        if class_type == "LTXAVTextEncoderLoader":
-                            node_data["inputs"]["ckpt_name"] = exact_connector_name
-
-                    # --- 3. FORCE FIX VIDEO VAE ---
-                    if class_type == "VAELoader":
-                        if active_video_vae:
-                            node_data["inputs"]["vae_name"] = active_video_vae
-                            print(f"💉 INJECTED: Loaded VIDEO VAE [{active_video_vae}] into Node {node_id}")
-
-                    # --- 4. FORCE FIX AUDIO VAE ---
-                    if class_type == "LTXVAudioVAELoader":
-                        if active_audio_vae:
-                            if "ckpt_name" in node_data["inputs"]:
-                                node_data["inputs"]["ckpt_name"] = active_audio_vae
-                            else:
-                                node_data["inputs"]["vae_name"] = active_audio_vae
-                            print(f"💉 INJECTED: Loaded AUDIO VAE [{active_audio_vae}] into Node {node_id}")
-
-                    # --- 5. CANVAS ENFORCER ---
-                    if class_type == "LoadImage":
-                        node_data["inputs"]["image"] = "master_plane.png"
-
-                    sanitized_workflow[str(node_id)] = node_data
-            
-            workflow = sanitized_workflow
+                    node_data["inputs"]["image"] = "master_plane.png"
 
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
@@ -343,7 +274,7 @@ class LTXEngine:
 
         try:
             async with aiohttp.ClientSession() as session:
-                print(f"🎨 Processing 19B Joint Audio-Video Workflow...")
+                print(f"🎨 Processing Deno-Routed Workflow...")
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                     res_json = await resp.json()
                     
