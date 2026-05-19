@@ -266,13 +266,11 @@ class LTXEngine:
 
                     # --- 1. THE DENO VALIDATION HIJACK ---
                     if class_type == "DenoLTX23PresetLoader":
-                        node_data["inputs"]["pipeline_mode"] = "KJ Style" # Re-enable split file style
+                        node_data["inputs"]["pipeline_mode"] = "KJ Style" 
                         
-                        # Set dropdown fallbacks (for fields validated but unused during KJ Style execution)
                         node_data["inputs"]["checkpoint_name"] = "ltx-2.3-22b-dev.safetensors"
                         node_data["inputs"]["gguf_unet_name"] = "LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
                         
-                        # Set the active real split files inside the volume
                         node_data["inputs"]["diffusion_model_name"] = target_unet
                         node_data["inputs"]["text_encoder_name"] = target_gemma
                         node_data["inputs"]["text_projection_name"] = target_connector
@@ -280,17 +278,17 @@ class LTXEngine:
                         node_data["inputs"]["audio_vae_name"] = target_audio_vae
                         print(f"💉 HIJACK: Force-fed 19B split filenames to Deno Node {node_id} to pass validation.")
 
-                    # --- 2. ISOLATE STANDALONE TEXT ENGINE ---
+                    # --- 2. ISOLATE STANDALONE TEXT ENGINE (UNCONDITIONAL) ---
                     if class_type == "LTXAVTextEncoderLoader":
-                        if "text_encoder" in node_data["inputs"]: node_data["inputs"]["text_encoder"] = target_gemma
-                        if "text_encoder_name" in node_data["inputs"]: node_data["inputs"]["text_encoder_name"] = target_gemma
-                        if "ckpt_name" in node_data["inputs"]: node_data["inputs"]["ckpt_name"] = target_connector
-                        if "checkpoint_name" in node_data["inputs"]: node_data["inputs"]["checkpoint_name"] = target_connector
+                        node_data["inputs"]["text_encoder"] = target_gemma
+                        node_data["inputs"]["ckpt_name"] = target_connector
+                        print(f"💉 HIJACK: Force-fed Text Encoder to Standalone Loader Node {node_id}.")
 
-                    # --- 3. AUDIO VAE MAPPING ---
+                    # --- 3. AUDIO VAE MAPPING (UNCONDITIONAL) ---
                     if class_type == "LTXVAudioVAELoader":
-                        if "ckpt_name" in node_data["inputs"]: node_data["inputs"]["ckpt_name"] = target_audio_vae
-                        if "vae_name" in node_data["inputs"]: node_data["inputs"]["vae_name"] = target_audio_vae
+                        node_data["inputs"]["ckpt_name"] = target_audio_vae
+                        node_data["inputs"]["vae_name"] = target_audio_vae
+                        print(f"💉 HIJACK: Force-fed Audio VAE to Loader Node {node_id}.")
 
                     # --- 4. HARDWARE/SYNC FAILSAFES ---
                     if class_type == "LTXVEmptyLatentAudio":
