@@ -56,6 +56,12 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes"
 ).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
+).run_commands(
+    # 🔥 CRITICAL DENO HARDCODED STRING BYPASS PATCH
+    # This automatically searches the Deno preset python file and cleans out any references demanding ltx-2.3_text_projection
+    "python -c \"import os; file='/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes/deno_ltx23_preset_loader.py'; "
+    "if os.path.exists(file): d=open(file).read().replace('ltx-2.3_text_projection_bf16.safetensors', 'gemma-3-12b-it-FP8.safetensors'); "
+    "open(file, 'w').write(d); print('✅ Successfully patched hardcoded Deno file references.')\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -154,7 +160,7 @@ class LTXEngine:
             region_name="auto"
         )
 
-        print("🚀 Launching LTX-2 Engine with Fixed Validated Deno Loader...")
+        print("🚀 Launching Patched LTX Engine...")
         
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -222,7 +228,7 @@ class LTXEngine:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
         # =====================================================================
-        # 🎯 EXPLICIT TARGET MODEL ROUTING
+        # 🎯 TARGET FILE RE-MAPPING
         # =====================================================================
         target_unet = "ltx-2-19b-dev-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
@@ -231,7 +237,7 @@ class LTXEngine:
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
         # =====================================================================
-        # 🛡️ THE VALIDATED ANTI-FLUX ENFORCEMENT ENGINE
+        # 🛡️ THE ANTI-FLUX ENFORCEMENT ENGINE
         # =====================================================================
         if isinstance(workflow, dict):
             sanitized_workflow = {}
@@ -242,21 +248,19 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 🌟 INTERCEPT DENO PRESET LOADERS AND FORCE VALIDATED LIST MODE ---
+                    # --- 🌟 INTERCEPT DENO PRESET LOADERS AND ENFORCE PARAMETERS ---
                     if "Deno" in class_type or class_type == "DenoLTX23PresetLoader":
                         
-                        # 💥 FIXED: Forces Deno node to pass the exact strict string list constraint.
-                        # Setting this to 'KJ Style' safely tells the custom loader to avoid core Checkpoint loops,
-                        # completely stopping ComfyUI from ever guessing the model_type as 'FLUX'.
+                        # Use KJ Style to route around native check loops completely
                         if "pipeline_mode" in node_data["inputs"]:
                             node_data["inputs"]["pipeline_mode"] = "KJ Style"
                         
-                        # Map explicit parameters safely into Deno's structure slots
+                        # Enforce mappings into whatever key layout variants the custom node exposes
                         for key in ["unet_name", "ckpt_name", "model_name", "model", "diffusion_model_name", "checkpoint_name"]:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_unet
                         
-                        for key in ["text_encoder", "clip_name", "clip", "text_encoder_name"]:
+                        for key in ["text_encoder", "clip_name", "clip", "text_encoder_name", "text_projection_name"]:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_gemma
                         
@@ -272,9 +276,9 @@ class LTXEngine:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_audio_vae
                                 
-                        print(f"💉 ANTI-FLUX ENFORCED: Switched Deno Node {node_id} to validated KJ Style loading pipeline.")
+                        print(f"💉 ANTI-FLUX PATROL: Secured Deno Node {node_id} to KJ Style configuration.")
 
-                    # --- 2. FALLBACK STYLES FOR NATIVE OBJECT PARTS ---
+                    # --- 2. FALLBACK OVERRIDES FOR RAW PARTS ---
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "CheckpointLoaderKJ", "DiffusionModelLoaderKJ"]:
                         if "model_type" in node_data["inputs"]:
                             node_data["inputs"]["model_type"] = "ltxv"
@@ -349,24 +353,3 @@ class LTXEngine:
                 start_time = time.time()
                 while True:
                     if self.process.poll() is not None:
-                        print("❌ GPU CRASHED. Check Modal Logs.")
-                        os._exit(1) 
-
-                    async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as resp:
-                        if resp.status == 200:
-                            history = await resp.json()
-                            if prompt_id in history: break
-                    
-                    if time.time() - start_time > 2400: raise HTTPException(status_code=504, detail="Timeout")
-                    await asyncio.sleep(5)
-
-            videos = [f for f in os.listdir(out_dir) if f.endswith(".mp4")]
-            if not videos:
-                raise HTTPException(status_code=500, detail="Generation finished but no MP4 was found in output folder.")
-                
-            videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-            
-            with open(os.path.join(out_dir, videos[0]), "rb") as f:
-                return Response(content=f.read(), media_type="video/mp4")
-        finally:
-            ram_task.cancel()
