@@ -54,18 +54,14 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes"
-).run_commands(r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;").run_commands(
+).run_commands(
+    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
+).run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 ).run_commands(
-    # 🔥 CRITICAL DENO HARDCODED STRING BYPASS PATCH (FIXED)
-    "python -c \"\n"
-    "import os\n"
-    "file = '/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes/deno_ltx23_preset_loader.py'\n"
-    "if os.path.exists(file):\n"
-    "    d = open(file).read().replace('ltx-2.3_text_projection_bf16.safetensors', 'gemma-3-12b-it-FP8.safetensors')\n"
-    "    open(file, 'w').write(d)\n"
-    "    print('✅ Successfully patched hardcoded Deno file references.')\n"
-    "\""
+    # 🔥 UPDATED DENO CONNECTOR PATCH
+    # Forcefully swaps Deno's hardcoded ltx-2.3 string with your actual 19b embedding connector file!
+    "python -c \"import os; f='/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes/deno_ltx23_preset_loader.py'; d=open(f).read().replace('ltx-2.3_text_projection_bf16.safetensors', 'ltx-2-19b-embeddings_connector_dev_bf16.safetensors') if os.path.exists(f) else ''; open(f, 'w').write(d) if d else None; print('✅ Successfully patched hardcoded Deno file references to use your 19b Connector.')\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -240,6 +236,7 @@ class LTXEngine:
         target_unet = "ltx-2-19b-dev-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_clip_l = "clip_l.safetensors"
+        target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
@@ -257,6 +254,7 @@ class LTXEngine:
 
                     # --- 🌟 INTERCEPT DENO PRESET LOADERS AND ENFORCE PARAMETERS ---
                     if "Deno" in class_type or class_type == "DenoLTX23PresetLoader":
+                        
                         if "pipeline_mode" in node_data["inputs"]:
                             node_data["inputs"]["pipeline_mode"] = "KJ Style"
                         
@@ -264,9 +262,13 @@ class LTXEngine:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_unet
                         
-                        for key in ["text_encoder", "clip_name", "clip", "text_encoder_name", "text_projection_name"]:
+                        for key in ["text_encoder", "clip_name", "clip", "text_encoder_name"]:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_gemma
+                                
+                        for key in ["text_projection_name", "connector", "connector_name"]:
+                            if key in node_data["inputs"]:
+                                node_data["inputs"][key] = target_connector
                         
                         for key in ["clip_l", "clip_l_name", "clip_name_2"]:
                             if key in node_data["inputs"]: 
@@ -280,7 +282,7 @@ class LTXEngine:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_audio_vae
                                 
-                        print(f"💉 ANTI-FLUX PATROL: Secured Deno Node {node_id} to KJ Style configuration.")
+                        print(f"💉 ANTI-FLUX PATROL: Secured Deno Node {node_id} with 19B Connector.")
 
                     # --- 2. FALLBACK OVERRIDES FOR RAW PARTS ---
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "CheckpointLoaderKJ", "DiffusionModelLoaderKJ"]:
@@ -360,23 +362,25 @@ class LTXEngine:
                         print("❌ ComfyUI server crashed during generation.")
                         raise HTTPException(status_code=500, detail="ComfyUI server execution failure.")
                     
-                    # Check queue status via API
                     async with session.get("http://127.0.0.1:8188/history") as hist_resp:
-                        history = await hist_resp.json()
-                        if prompt_id in history:
-                            print("✨ Generation Completed successfully inside backend context.")
-                            break
+                        if hist_resp.status == 200:
+                            history = await hist_resp.json()
+                            if prompt_id in history:
+                                print("✨ Generation Completed successfully inside backend context.")
+                                break
                     
-                    if time.time() - start_time > 600: # 10-minute timeout guard
+                    if time.time() - start_time > 2400:
                         raise HTTPException(status_code=504, detail="Workflow generation timed out.")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
 
-            # Gather generated files to return
-            generated_files = os.listdir(out_dir)
-            if not generated_files:
+            videos = [v for v in os.listdir(out_dir) if v.endswith(".mp4")]
+            if not videos:
                 raise HTTPException(status_code=500, detail="Generation completed but no output files were found.")
                 
-            return {"status": "success", "files": generated_files}
+            videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
+            
+            with open(os.path.join(out_dir, videos[0]), "rb") as f:
+                return Response(content=f.read(), media_type="video/mp4")
 
         finally:
             ram_task.cancel()
