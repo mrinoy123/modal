@@ -58,7 +58,6 @@ final_image = compiled_image.run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 ).run_commands(
     # 🔥 CRITICAL DENO HARDCODED STRING BYPASS PATCH
-    # This automatically searches the Deno preset python file and cleans out any references demanding ltx-2.3_text_projection
     "python -c \"import os; file='/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes/deno_ltx23_preset_loader.py'; "
     "if os.path.exists(file): d=open(file).read().replace('ltx-2.3_text_projection_bf16.safetensors', 'gemma-3-12b-it-FP8.safetensors'); "
     "open(file, 'w').write(d); print('✅ Successfully patched hardcoded Deno file references.')\""
@@ -88,7 +87,10 @@ class LTXEngine:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
                     f.write('1\n')
             except Exception:
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
+                try:
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
             await asyncio.sleep(2)
 
     @modal.enter()
@@ -250,12 +252,9 @@ class LTXEngine:
 
                     # --- 🌟 INTERCEPT DENO PRESET LOADERS AND ENFORCE PARAMETERS ---
                     if "Deno" in class_type or class_type == "DenoLTX23PresetLoader":
-                        
-                        # Use KJ Style to route around native check loops completely
                         if "pipeline_mode" in node_data["inputs"]:
                             node_data["inputs"]["pipeline_mode"] = "KJ Style"
                         
-                        # Enforce mappings into whatever key layout variants the custom node exposes
                         for key in ["unet_name", "ckpt_name", "model_name", "model", "diffusion_model_name", "checkpoint_name"]:
                             if key in node_data["inputs"]: 
                                 node_data["inputs"][key] = target_unet
@@ -353,3 +352,26 @@ class LTXEngine:
                 start_time = time.time()
                 while True:
                     if self.process.poll() is not None:
+                        print("❌ ComfyUI server crashed during generation.")
+                        raise HTTPException(status_code=500, detail="ComfyUI server execution failure.")
+                    
+                    # Check queue status via API
+                    async with session.get("http://127.0.0.1:8188/history") as hist_resp:
+                        history = await hist_resp.json()
+                        if prompt_id in history:
+                            print("✨ Generation Completed successfully inside backend context.")
+                            break
+                    
+                    if time.time() - start_time > 600: # 10-minute timeout guard
+                        raise HTTPException(status_code=504, detail="Workflow generation timed out.")
+                    await asyncio.sleep(1)
+
+            # Gather generated files to return
+            generated_files = os.listdir(out_dir)
+            if not generated_files:
+                raise HTTPException(status_code=500, detail="Generation completed but no output files were found.")
+                
+            return {"status": "success", "files": generated_files}
+
+        finally:
+            ram_task.cancel()
