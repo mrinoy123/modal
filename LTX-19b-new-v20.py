@@ -113,7 +113,10 @@ class LTXEngine:
             "vae/LTX23_video_vae_bf16.safetensors",
             "vae/LTX23_audio_vae_bf16.safetensors",
             "clip/gemma_3_12B_it_fp4_mixed.safetensors",
-            "clip/ltx-2.3_text_projection_bf16.safetensors"
+            "clip/ltx-2.3_text_projection_bf16.safetensors",
+            # We add the expected GGUF models as mock files to prevent validation failures
+            "unet/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
+            "gguf/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
         ]
         for df in dummy_files:
             mock_path = os.path.join(base_models_dir, df)
@@ -267,12 +270,12 @@ class LTXEngine:
                     # --- 1. THE DENO VALIDATION HIJACK ---
                     if class_type == "DenoLTX23PresetLoader":
                         node_data["inputs"]["pipeline_mode"] = "Checkpoint Style"
-                        # Force EVERY dropdown widget to a verified file to prevent pre-flight crashes
+                        # Force verified configuration files or mock names present in lists
                         node_data["inputs"]["checkpoint_name"] = target_unet
                         node_data["inputs"]["diffusion_model_name"] = target_unet
-                        node_data["inputs"]["gguf_unet_name"] = target_unet
-                        node_data["inputs"]["text_encoder_name"] = target_gemma
-                        node_data["inputs"]["text_projection_name"] = target_connector
+                        node_data["inputs"]["gguf_unet_name"] = "LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
+                        node_data["inputs"]["text_encoder_name"] = "gemma_3_12B_it_fp4_mixed.safetensors"
+                        node_data["inputs"]["text_projection_name"] = "ltx-2.3_text_projection_bf16.safetensors"
                         node_data["inputs"]["video_vae_name"] = target_video_vae
                         node_data["inputs"]["audio_vae_name"] = target_audio_vae
                         print(f"💉 HIJACK: Force-fed 19B filenames to Deno Node {node_id} to pass validation.")
