@@ -52,7 +52,8 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-    "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes"
+    "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
+    "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use"
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
@@ -100,26 +101,7 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # =====================================================================
-        # 🪄 THE MAGIC MOCK (Bypassing Pre-Flight Validation)
-        # =====================================================================
-        print("🪄 Deploying Magic Mocks to hijack ComfyUI validation checks...")
-        dummy_files = [
-            "unet/ltx-2-19b-dev-fp8.safetensors",
-            "unet/ltx-2-19b-distilled-fp8.safetensors",
-            "clip/gemma-3-12b-it-FP8.safetensors",
-            "clip/gemma_3_12B_it_fp8_scaled.safetensors",
-            "clip/ltx-2-19b-embeddings_connector_dev_bf16.safetensors",
-            "clip/ltx-2-19b-embeddings_connector_distill_bf16.safetensors",
-            "vae/ltx-2-19b-dev_video_vae.safetensors",
-            "vae/ltx-2-19b-dev_audio_vae.safetensors"
-        ]
-        for df in dummy_files:
-            mock_path = os.path.join(base_models_dir, df)
-            if not os.path.exists(mock_path):
-                open(mock_path, 'a').close()
-
-        # Map actual volume files
+        # Map actual volume files (No Magic Mocks to avoid file block conflicts)
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
@@ -129,13 +111,14 @@ class LTXEngine:
                     src_path = os.path.join(root_dir, filename)
                     fn = filename.lower()
                     rd = root_dir.lower() 
-                    linked_to = []
 
                     def link_it(target_dir):
                         dest = os.path.join(base_models_dir, target_dir, filename)
                         if not os.path.exists(dest):
-                            os.symlink(src_path, dest)
-                            linked_to.append(target_dir)
+                            try:
+                                os.symlink(src_path, dest)
+                            except FileExistsError:
+                                pass
 
                     if "unet" in rd or "unet" in fn or "ltx" in fn or "diffusion_models" in rd:
                         link_it("unet")
