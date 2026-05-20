@@ -93,7 +93,7 @@ class LTXEngine:
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf"]
+        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf", "loras"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -105,7 +105,7 @@ class LTXEngine:
                         
                     src_path = os.path.join(root_dir, filename)
                     # Cross-link everything cleanly to prevent loader mismatch issues
-                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "vfi"]:
+                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "vfi", "loras"]:
                         dest = os.path.join(base_models_dir, target_dir, filename)
                         if not os.path.exists(dest):
                             try: os.symlink(src_path, dest)
@@ -186,6 +186,10 @@ class LTXEngine:
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
+        # LoRA targets mapping from storage volume
+        target_distilled_lora = "ltx-2-19b-distilled-lora-384.safetensors"
+        target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
+
         def find_node(cls_name):
             return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
 
@@ -255,6 +259,27 @@ class LTXEngine:
                     # 6. Asset Input Synchronization
                     if class_type == "LoadImage":
                         node_data["inputs"]["image"] = "master_plane.png"
+
+                    # 7. Safe Standalone Lora Loader Routing (Matches inputs or widgets by filename keywords)
+                    if class_type == "LoraLoader":
+                        lora_input_name = node_data["inputs"].get("lora_name", "")
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                lora_input_name = node_data["widgets_values"][0]
+                        
+                        resolved_lora = None
+                        if "distilled" in str(lora_input_name).lower():
+                            resolved_lora = target_distilled_lora
+                        elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
+                            resolved_lora = target_detailer_lora
+                        
+                        if resolved_lora:
+                            if "lora_name" in node_data["inputs"]:
+                                node_data["inputs"]["lora_name"] = resolved_lora
+                            if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                                if len(node_data["widgets_values"]) > 0:
+                                    node_data["widgets_values"][0] = resolved_lora
+                            print(f"🔗 LORA SYNC: Set Lora Loader to {resolved_lora}")
 
                     sanitized_workflow[str(node_id)] = node_data
             
