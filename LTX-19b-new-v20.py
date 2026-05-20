@@ -13,7 +13,7 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# 1. IMAGE DEFINITION
+# 1. IMAGE DEFINITION WITH DEPENDENCIES
 # ==========================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
@@ -94,14 +94,13 @@ class LTXEngine:
     def start_comfy(self):
         import boto3
         
-        print("🔗 Running Aggressive Fuzzy Linker (Carpet Bomb Strategy)...")
+        print("🔗 Running Fuzzy Linker to link model checkpoints...")
         base_models_dir = "/workspace/ComfyUI/models"
         
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # Map actual volume files (No Magic Mocks to avoid file block conflicts)
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
@@ -159,7 +158,6 @@ class LTXEngine:
         )
 
         print("🚀 Launching Patched LTX Engine...")
-        
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
@@ -204,12 +202,12 @@ class LTXEngine:
             raise HTTPException(status_code=403, detail="Unauthorized")
         
         body = await request.json()
-        
         if isinstance(body, dict) and "json" in body:
             body = body["json"]
 
         image_url = body.get("image_url")
         workflow = body.get("workflow")
+        requested_length = body.get("length") # Supports dynamic frame generation counts (e.g., 49, 97, 241)
 
         if isinstance(workflow, str):
             try:
@@ -225,19 +223,39 @@ class LTXEngine:
             if "nodes" in workflow and "last_node_id" in workflow:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
-        # =====================================================================
-        # 🎯 TARGET FILE RE-MAPPING
-        # =====================================================================
+        # Model Target Remapping Configurations
         target_unet = "ltx-2-19b-dev-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
 
-        # =====================================================================
-        # 🛡️ THE AGGRESSIVE VALIDATION OVERRIDE ENGINE
-        # =====================================================================
+        # Safe dynamic node lookup helper
+        def find_node(cls_name):
+            return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
+
         if isinstance(workflow, dict):
+            # Dynamic Temporal Length Enforcement to prevent AV Shape Mismatch crashes
+            if requested_length is not None:
+                try:
+                    tgt_len = int(requested_length)
+                    # Enforce standard LTX mathematical boundary (8N + 1)
+                    if (tgt_len - 1) % 8 != 0:
+                        tgt_len = ((tgt_len - 1) // 8) * 8 + 1
+                        if tgt_len < 9: tgt_len = 9
+                    
+                    video_latent_node = find_node("EmptyLTXVLatentVideo")
+                    audio_latent_node = find_node("LTXVEmptyLatentAudio")
+                    
+                    if video_latent_node:
+                        workflow[video_latent_node]["inputs"]["length"] = tgt_len
+                        print(f"📏 DYNAMIC TIMEFRAME: Set EmptyLTXVLatentVideo ({video_latent_node}) to {tgt_len} frames.")
+                    if audio_latent_node:
+                        workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
+                        print(f"📏 DYNAMIC TIMEFRAME: Set LTXVEmptyLatentAudio ({audio_latent_node}) to {tgt_len} frames.")
+                except Exception as e:
+                    print(f"⚠️ Temporal sync warning: {e}")
+
             sanitized_workflow = {}
             for node_id, node_data in workflow.items():
                 if isinstance(node_data, dict) and "class_type" in node_data:
@@ -246,46 +264,27 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 1. UNET MODEL LOADER ---
+                    # 1. UNET Loader Configuration
                     if class_type == "UNETLoader":
                         node_data["inputs"]["unet_name"] = target_unet
                         if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                             if len(node_data["widgets_values"]) > 0:
                                 node_data["widgets_values"][0] = target_unet
-                        print(f"💉 HIJACK: Mapped base model to '{target_unet}' on Node {node_id}.")
 
-                    # --- 2. TEXT ENCODER & CONNECTOR LOADER ---
+                    # 2. Text Encoder & Embeddings Connector Loader
                     if class_type == "LTXAVTextEncoderLoader":
                         node_data["inputs"]["text_encoder"] = target_gemma
                         node_data["inputs"]["ckpt_name"] = target_connector
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                node_data["widgets_values"][0] = target_gemma
-                            if len(node_data["widgets_values"]) > 1:
-                                node_data["widgets_values"][1] = target_connector
-                        print(f"💉 HIJACK: Mapped Text Encoder to Standalone Loader Node {node_id}.")
 
-                    # --- 3. AUDIO VAE LOADER ---
+                    # 3. Audio VAE Loader
                     if class_type == "LTXVAudioVAELoader":
                         node_data["inputs"]["ckpt_name"] = target_audio_vae
-                        node_data["inputs"]["vae_name"] = target_audio_vae
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                node_data["widgets_values"][0] = target_audio_vae
-                        print(f"💉 HIJACK: Mapped Audio VAE to Loader Node {node_id}.")
 
-                    # --- 4. KJ VAE LOADER & Standard VAELoader (VIDEO VAE) ---
+                    # 4. Video VAE Loader (KJ Nodes)
                     if class_type in ["VAELoaderKJ", "VAELoader"]:
                         node_data["inputs"]["vae_name"] = target_video_vae
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                node_data["widgets_values"][0] = target_video_vae
-                        print(f"💉 HIJACK: Mapped Video VAE to KJ Loader Node {node_id}.")
 
-                    # --- 5. HARDWARE/SYNC FAILSAFES ---
-                    if class_type == "LTXVEmptyLatentAudio":
-                        node_data["inputs"]["frame_rate"] = 12 
-
+                    # 5. Image Input Validation
                     if class_type == "LoadImage":
                         node_data["inputs"]["image"] = "master_plane.png"
 
@@ -296,25 +295,21 @@ class LTXEngine:
         local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
         
-        # =====================================================================
-        # 📥 BULLETPROOF STORAGE SYNC 
-        # =====================================================================
+        # Pull initial asset image from Cloudflare R2
         if image_url and str(image_url).strip():
             from urllib.parse import urlparse
             file_key = urlparse(image_url).path.lstrip('/')
-            
             while "//" in file_key:
                 file_key = file_key.replace("//", "/")
             
             try:
-                print(f"📥 Downloading input frame asset from R2. Cleaned Key: {file_key}")
+                print(f"📥 Downloading input asset key from R2: {file_key}")
                 self.s3.download_file("video-asset-files-storage-workflow", file_key, local_input)
-                print(f"✅ Storage Sync Successful. File size: {os.path.getsize(local_input)} bytes.")
             except Exception as e:
-                print(f"❌ CRITICAL STORAGE ERROR: {e}")
-                raise HTTPException(status_code=400, detail=f"Input asset download failed from R2 storage: {str(e)}")
+                print(f"❌ R2 Download Failed: {e}")
+                raise HTTPException(status_code=400, detail=f"R2 asset sync failed: {str(e)}")
         else:
-            print("⚠️ No image_url provided. Compiling fallback canvas to satisfy LoadImage validation.")
+            print("⚠️ Generating backup starting frame canvas.")
             from PIL import Image
             img = Image.new('RGB', (1024, 1024), color='black')
             img.save(local_input)
@@ -327,37 +322,36 @@ class LTXEngine:
 
         try:
             async with aiohttp.ClientSession() as session:
-                print(f"🎨 Processing Hybrid Audio-Video Workflow...")
+                print("🎨 Running Separation of Powers Generation Pipeline...")
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                     res_json = await resp.json()
                     
                     if "error" in res_json or "prompt_id" not in res_json:
                         error_msg = res_json.get("error", res_json)
-                        print(f"❌ ComfyUI Rejected Prompt: {error_msg}")
-                        raise HTTPException(status_code=400, detail=f"Invalid Workflow JSON: {error_msg}")
+                        print(f"❌ Backend Prompt Rejection: {error_msg}")
+                        raise HTTPException(status_code=400, detail=f"Invalid JSON: {error_msg}")
                     
                     prompt_id = res_json['prompt_id']
 
                 start_time = time.time()
                 while True:
                     if self.process.poll() is not None:
-                        print("❌ ComfyUI server crashed during generation.")
-                        raise HTTPException(status_code=500, detail="ComfyUI server execution failure.")
+                        raise HTTPException(status_code=500, detail="Backend server execution failure.")
                     
                     async with session.get("http://127.0.0.1:8188/history") as hist_resp:
                         if hist_resp.status == 200:
                             history = await hist_resp.json()
                             if prompt_id in history:
-                                print("✨ Generation Completed successfully inside backend context.")
+                                print("✨ Generation success.")
                                 break
                     
                     if time.time() - start_time > 2400:
-                        raise HTTPException(status_code=504, detail="Workflow generation timed out.")
+                        raise HTTPException(status_code=504, detail="Execution timeout.")
                     await asyncio.sleep(5)
 
             videos = [v for v in os.listdir(out_dir) if v.endswith(".mp4")]
             if not videos:
-                raise HTTPException(status_code=500, detail="Generation completed but no output files were found.")
+                raise HTTPException(status_code=500, detail="No output video files were found.")
                 
             videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
             
