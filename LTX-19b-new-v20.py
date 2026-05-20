@@ -180,7 +180,7 @@ class LTXEngine:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
         # Real model file names from your ltx-20-19b-weights volume
-        target_unet = "ltx-2-19b-dev-fp8.safetensors"
+        target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
