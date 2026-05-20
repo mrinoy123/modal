@@ -52,7 +52,6 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-    "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes"
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
@@ -103,22 +102,22 @@ class LTXEngine:
 
         # =====================================================================
         # 🪄 THE MAGIC MOCK (Bypassing Pre-Flight Validation)
-        # We create 0-byte dummy files so ComfyUI sees them and doesn't crash.
-        # These are used to pass validation for unused drop-down options.
         # =====================================================================
         print("🪄 Deploying Magic Mocks to hijack ComfyUI validation checks...")
         dummy_files = [
-            "checkpoints/ltx-2.3-22b-dev.safetensors",
-            "diffusion_models/ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
-            "vae/LTX23_video_vae_bf16.safetensors",
-            "vae/LTX23_audio_vae_bf16.safetensors",
-            "unet/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf",
-            "gguf/LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
+            "unet/ltx-2-19b-dev-fp8.safetensors",
+            "unet/ltx-2-19b-distilled-fp8.safetensors",
+            "clip/gemma-3-12b-it-FP8.safetensors",
+            "clip/gemma_3_12B_it_fp8_scaled.safetensors",
+            "clip/ltx-2-19b-embeddings_connector_dev_bf16.safetensors",
+            "clip/ltx-2-19b-embeddings_connector_distill_bf16.safetensors",
+            "vae/ltx-2-19b-dev_video_vae.safetensors",
+            "vae/ltx-2-19b-dev_audio_vae.safetensors"
         ]
         for df in dummy_files:
             mock_path = os.path.join(base_models_dir, df)
             if not os.path.exists(mock_path):
-                open(mock_path, 'a').close() # Create empty file
+                open(mock_path, 'a').close()
 
         # Map actual volume files
         if os.path.exists("/mnt/weights"):
@@ -264,33 +263,43 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # --- 1. THE DENO VALIDATION HIJACK ---
-                    if class_type == "DenoLTX23PresetLoader":
-                        node_data["inputs"]["pipeline_mode"] = "KJ Style" 
-                        
-                        node_data["inputs"]["checkpoint_name"] = "ltx-2.3-22b-dev.safetensors"
-                        node_data["inputs"]["gguf_unet_name"] = "LTX-2.3-22B-distilled-1.1-Q4_K_M.gguf"
-                        
-                        node_data["inputs"]["diffusion_model_name"] = target_unet
-                        node_data["inputs"]["text_encoder_name"] = target_gemma
-                        node_data["inputs"]["text_projection_name"] = target_connector
-                        node_data["inputs"]["video_vae_name"] = target_video_vae
-                        node_data["inputs"]["audio_vae_name"] = target_audio_vae
-                        print(f"💉 HIJACK: Force-fed 19B split filenames to Deno Node {node_id} to pass validation.")
+                    # --- 1. UNET MODEL LOADER ---
+                    if class_type == "UNETLoader":
+                        node_data["inputs"]["unet_name"] = target_unet
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                node_data["widgets_values"][0] = target_unet
+                        print(f"💉 HIJACK: Mapped base model to '{target_unet}' on Node {node_id}.")
 
-                    # --- 2. ISOLATE STANDALONE TEXT ENGINE (UNCONDITIONAL) ---
+                    # --- 2. TEXT ENCODER & CONNECTOR LOADER ---
                     if class_type == "LTXAVTextEncoderLoader":
                         node_data["inputs"]["text_encoder"] = target_gemma
                         node_data["inputs"]["ckpt_name"] = target_connector
-                        print(f"💉 HIJACK: Force-fed Text Encoder to Standalone Loader Node {node_id}.")
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                node_data["widgets_values"][0] = target_gemma
+                            if len(node_data["widgets_values"]) > 1:
+                                node_data["widgets_values"][1] = target_connector
+                        print(f"💉 HIJACK: Mapped Text Encoder to Standalone Loader Node {node_id}.")
 
-                    # --- 3. AUDIO VAE MAPPING (UNCONDITIONAL) ---
+                    # --- 3. AUDIO VAE LOADER ---
                     if class_type == "LTXVAudioVAELoader":
                         node_data["inputs"]["ckpt_name"] = target_audio_vae
                         node_data["inputs"]["vae_name"] = target_audio_vae
-                        print(f"💉 HIJACK: Force-fed Audio VAE to Loader Node {node_id}.")
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                node_data["widgets_values"][0] = target_audio_vae
+                        print(f"💉 HIJACK: Mapped Audio VAE to Loader Node {node_id}.")
 
-                    # --- 4. HARDWARE/SYNC FAILSAFES ---
+                    # --- 4. KJ VAE LOADER & Standard VAELoader (VIDEO VAE) ---
+                    if class_type in ["VAELoaderKJ", "VAELoader"]:
+                        node_data["inputs"]["vae_name"] = target_video_vae
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                node_data["widgets_values"][0] = target_video_vae
+                        print(f"💉 HIJACK: Mapped Video VAE to KJ Loader Node {node_id}.")
+
+                    # --- 5. HARDWARE/SYNC FAILSAFES ---
                     if class_type == "LTXVEmptyLatentAudio":
                         node_data["inputs"]["frame_rate"] = 12 
 
