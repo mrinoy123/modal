@@ -154,9 +154,7 @@ class LTXEngine:
                 time.sleep(2)
         os._exit(1)
 
-
-
-@modal.fastapi_endpoint(method="POST")
+    @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
             raise HTTPException(status_code=403, detail="Unauthorized")
@@ -262,8 +260,7 @@ class LTXEngine:
             
             workflow = sanitized_workflow
 
-
-local_input = "/workspace/ComfyUI/input/master_plane.png"
+        local_input = "/workspace/ComfyUI/input/master_plane.png"
         os.makedirs(os.path.dirname(local_input), exist_ok=True)
         
         if image_url and str(image_url).strip():
