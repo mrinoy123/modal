@@ -64,8 +64,8 @@ final_image = build_image.run_commands(
 ).run_commands(
     # 🔥 PATCH 1: Fix FizzNodes NoneType crash
     "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
-    # 🔥 PATCH 2: Robust fix for LTXVideo Guider Mismatch (Handles both custom and native CFG guiders)
-    "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (guider.conds.get(\\'positive\\'), guider.conds.get(\\'negative\\'))'); open(filepath, 'w').write(code)\""
+    # 🔥 PATCH 2: Robust fallback patch for guider.raw_conds to avoid AttributeError exceptions
+    "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (getattr(guider, \\'original_conds\\', {}).get(\\'positive\\'), getattr(guider, \\'original_conds\\', {}).get(\\'negative\\'))'); open(filepath, 'w').write(code)\""
 ).run_commands(
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
@@ -110,6 +110,31 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
+        def get_target_dirs(filename: str):
+            fn = filename.lower()
+            # 1. Distilled base model & Quantized GGUF models
+            if "distilled-fp8" in fn or "dev-fp8" in fn or "dev-q3" in fn or fn.endswith(".gguf"):
+                return ["unet", "diffusion_models"]
+            # 2. Gemma Text Encoders
+            if "gemma" in fn:
+                return ["text_encoders", "text_encoder"]
+            # 3. Embedding Connectors
+            if "embeddings_connector" in fn:
+                return ["clip"]
+            # 4. Audio and Video VAEs
+            if "video_vae" in fn or "audio_vae" in fn:
+                return ["vae"]
+            # 5. IC-LoRAs and Standard LoRAs
+            if "lora" in fn:
+                return ["loras"]
+            # 6. Fallback CLIPs
+            if "clip_l" in fn:
+                return ["clip"]
+            # 7. Safe Fallbacks based on standard file extension mappings
+            if fn.endswith((".pth", ".pt")):
+                return ["unet"]
+            return ["checkpoints"]
+
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
@@ -117,7 +142,9 @@ class LTXEngine:
                         continue
                         
                     src_path = os.path.join(root_dir, filename)
-                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "loras"]:
+                    target_dirs = get_target_dirs(filename)
+                    
+                    for target_dir in target_dirs:
                         dest = os.path.join(base_models_dir, target_dir, filename)
                         if not os.path.exists(dest):
                             try: 
@@ -145,7 +172,7 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Optimized with memory mapping and forced cache-none streaming execution
+        # Stream model files dynamically with memory mapping and instant unloading
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
