@@ -40,45 +40,52 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# Clone ComfyUI and install required custom nodes
-final_image = build_image.run_commands(
-    "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-    "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
-    "pip install -r /workspace/ComfyUI/requirements.txt"
-).run_commands(
-    # ... [Keep your existing git clones here] ...
-).run_commands(
-    "pip install diffusers accelerate transformers",
-    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
-    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
-).run_commands(
-    # 🔥 PATCH 1: Fix FizzNodes NoneType crash
-    "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
+# 1. Base clean dependencies layer first (Ensures correct CUDA PyTorch and compatible NumPy)
+final_image = (
+    build_image.pip_install(
+        "torch==2.5.1",
+        "torchvision==0.20.1",
+        "torchaudio==2.5.1",
+        index_url="https://download.pytorch.org/whl/cu124"
+    )
+    .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers")
     
-    # 🔥 PATCH 2: Robust fallback patch for guider.raw_conds to avoid AttributeError exceptions
-    "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (getattr(guider, \\'original_conds\\', {}).get(\\'positive\\'), getattr(guider, \\'original_conds\\', {}).get(\\'negative\\'))'); open(filepath, 'w').write(code)\"",
+    # 2. Clone core ComfyUI and time-travel checkout to stabilize dependencies
+    .run_commands(
+        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
+        "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
+        "pip install -r /workspace/ComfyUI/requirements.txt"
+    )
     
-    # 🔥 PATCH 3: Dynamic Tensor .clone() router to fix "AttributeError: 'Tensor' object has no attribute 'copy'"
-    "cat << 'EOF' > /workspace/patch_copy.py\n"
-    "import os, re\n"
-    "dirs = ['/workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes', '/workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes']\n"
-    "for d in dirs:\n"
-    "    for r, _, fs in os.walk(d):\n"
-    "        for f in fs:\n"
-    "            if f.endswith('.py'):\n"
-    "                p = os.path.join(r, f)\n"
-    "                with open(p, 'r') as file: c = file.read()\n"
-    "                # Safely routes .copy() to .clone() if the variable supports it (like PyTorch Tensors)\n"
-    "                c = re.sub(r'([a-zA-Z_][a-zA-Z0-9_]*\\[[^\\]]+\\]|[a-zA-Z_][a-zA-Z0-9_]*)\\.copy\\(\\)', r'(\\1.clone() if hasattr(\\1, \"clone\") else \\1.copy())', c)\n"
-    "                with open(p, 'w') as file: file.write(c)\n"
-    "EOF",
-    "python3 /workspace/patch_copy.py"
-).run_commands(
-    "pip uninstall -y torch torchvision torchaudio numpy",
-    "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    "pip install --no-cache-dir numpy==1.26.4"
+    # 3. Clone custom nodes sequentially into absolute directory paths
+    .run_commands(
+        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
+        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
+        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
+        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
+        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
+        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes",
+        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts",
+        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
+        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
+    )
+    
+    # 4. Handle time-travel checkout for LTXVideo & install node-specific requirements safely
+    .run_commands(
+        "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
+    )
+    
+    # 5. Apply critical runtime runtime patches
+    .run_commands(
+        # 🔥 PATCH 1: Fix FizzNodes NoneType crash
+        "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
+        # 🔥 PATCH 2: Fix LTXVideo Attribute Mismatch (raw_conds -> set_conds)
+        "sed -i 's/guider.raw_conds/guider.set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+    )
 )
-
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
