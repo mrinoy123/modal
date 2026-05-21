@@ -41,6 +41,7 @@ build_image = base_image.env({
 )
 
 # Clone ComfyUI and install required custom nodes (VFI Purged)
+# Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -59,8 +60,9 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # 🔥 FORCE FIX: Overwrite downstream packages back to verified version requirements.
-    "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
+    # 🔥 FIX STACK: Purge corrupted artifacts and lock down matching binary wheel sets
+    "pip uninstall -y torch torchvision torchaudio",
+    "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 )
 
