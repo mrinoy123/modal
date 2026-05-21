@@ -64,8 +64,8 @@ final_image = build_image.run_commands(
 ).run_commands(
     # 🔥 PATCH 1: Fix FizzNodes NoneType crash
     "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
-    # 🔥 PATCH 2: Fix LTXVideo Attribute Mismatch (raw_conds -> set_conds)
-    "sed -i 's/guider.raw_conds/guider.set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+    # 🔥 PATCH 2: Robust fix for LTXVideo Guider Mismatch (Handles both custom and native CFG guiders)
+    "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (guider.conds.get(\\'positive\\'), guider.conds.get(\\'negative\\'))'); open(filepath, 'w').write(code)\""
 ).run_commands(
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
@@ -120,7 +120,9 @@ class LTXEngine:
                     for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "loras"]:
                         dest = os.path.join(base_models_dir, target_dir, filename)
                         if not os.path.exists(dest):
-                            try: os.symlink(src_path, dest)
+                            try: 
+                                os.symlink(src_path, dest)
+                                print(f"🔗 Linked weight: {filename} -> models/{target_dir}")
                             except FileExistsError: pass
 
         self.s3 = boto3.client(
@@ -143,6 +145,7 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # Optimized with memory mapping and forced cache-none streaming execution
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
