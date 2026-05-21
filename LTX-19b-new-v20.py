@@ -41,7 +41,8 @@ build_image = base_image.env({
     "pandas", "numexpr", "pytz", "python-dateutil", 
     "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
     "decord", "imageio", "scikit-image", "numba", "einops", 
-    "transformers", "diffusers", "accelerate"
+    "transformers", "diffusers", "accelerate", "bitsandbytes",
+    "kornia<=0.7.3"
 )
 
 # Clone ComfyUI and install required custom nodes based on the workflow JSON
@@ -62,10 +63,13 @@ final_image = build_image.run_commands(
     "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
+    # Explicitly install ComfyUI-LTXVideo requirements first to ensure ltx_video and comfyui-workflow-templates are present
+    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
+    # Then install remaining nodes recursively
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # Force reinstall numpy 1.26.4 at the end to correct any binary incompatibility from NumPy 2.0
-    "pip install --force-reinstall numpy==1.26.4"
+    # Force reinstall specific compatible versions of numpy and kornia to protect against late upgrades
+    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 ).run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
