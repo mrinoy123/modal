@@ -42,7 +42,6 @@ build_image = base_image.env({
 
 
 # Clone ComfyUI and install required custom nodes (VFI Purged)
-# Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -63,8 +62,8 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
-    # 🔥 THE PATH HOTFIX: Force register the newly structured sub-modules directly into the ComfyUI package init file
-    "echo -e '\nimport sys\nsys.path.append(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\")' >> /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
+    # 🔥 THE SYSTEM PATH PATCH: Safely append the root folder using python file writer logic directly
+    "python3 -c 'with open(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py\", \"a\") as f: f.write(\"\nimport sys\nsys.path.append(\\\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\\\")\n\")'"
 ).run_commands(
     # 🔥 CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
