@@ -43,7 +43,6 @@ build_image = base_image.env({
 # Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-    # 🔥 SYNC FIX: Roll back ComfyUI Core to match the LTXVideo custom node version perfectly
     "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
@@ -63,7 +62,10 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
-    "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
+    # 🔥 PATCH 1: Fix FizzNodes NoneType crash
+    "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
+    # 🔥 PATCH 2: Fix LTXVideo Attribute Mismatch (raw_conds -> set_conds)
+    "sed -i 's/guider.raw_conds/guider.set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
 ).run_commands(
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
