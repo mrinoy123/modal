@@ -63,7 +63,7 @@ final_image = build_image.run_commands(
     # 🔥 FIX STACK: Purge corrupted artifacts and lock down matching binary wheel sets
     "pip uninstall -y torch torchvision torchaudio",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
+    "pip install numpy==1.26.4"
 )
 
 app = modal.App("ltx-2-19b-v20-api")
