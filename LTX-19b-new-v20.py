@@ -44,13 +44,8 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate"
 )
 
-compiled_image = build_image.run_commands(
-    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
-    "cd /workspace/SageAttention && pip install --no-build-isolation ."
-)
-
 # Clone ComfyUI and install required custom nodes based on the workflow JSON
-final_image = compiled_image.run_commands(
+final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
@@ -68,6 +63,9 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
+).run_commands(
+    # Force reinstall numpy 1.26.4 at the end to correct any binary incompatibility from NumPy 2.0
+    "pip install --force-reinstall numpy==1.26.4"
 ).run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
@@ -317,6 +315,18 @@ class LTXEngine:
 
                     sanitized_workflow[str(node_id)] = node_data
             
+            # Automatically bypass SageAttention node if present, as compilation is removed
+            sage_node_id = find_node("LTX2MemoryEfficientSageAttentionPatch")
+            if sage_node_id:
+                sage_input = sanitized_workflow[sage_node_id]["inputs"].get("model")
+                if sage_input:
+                    for node_id, node_data in sanitized_workflow.items():
+                        if isinstance(node_data, dict) and "inputs" in node_data:
+                            for k, v in node_data["inputs"].items():
+                                if isinstance(v, list) and len(v) > 0 and v[0] == sage_node_id:
+                                    node_data["inputs"][k] = sage_input
+                del sanitized_workflow[sage_node_id]
+
             workflow = sanitized_workflow
 
         # Dynamic download directory path setup
