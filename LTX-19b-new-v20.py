@@ -59,9 +59,8 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
+    # 🔥 FORCE FIX: Overwrite downstream packages back to verified version requirements.
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    # Re-enforce kornia and numpy limits to prevent array mismatches
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 )
 
@@ -73,7 +72,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192, # 🔥 RESTORED to 8GB RAM (No increase)
+    memory=8192, 
     scaledown_window=60,
     timeout=3600 
 )
@@ -99,7 +98,6 @@ class LTXEngine:
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # Removed "vfi" from the directory list
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
@@ -137,7 +135,8 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-self.process = subprocess.Popen([
+        # Fixed Indentation and Upgraded parameters to sync with modern ComfyUI arguments
+        self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"        
@@ -176,8 +175,6 @@ self.process = subprocess.Popen([
         image_url = body.get("image_url") if isinstance(body, dict) else None
         workflow = body.get("workflow") if isinstance(body, dict) else body
         requested_length = body.get("length") if isinstance(body, dict) else None
-        prompts_override = body.get("prompts") if isinstance(body, dict) else None
-        prompt_override = body.get("prompt") if isinstance(body, dict) else None
 
         if isinstance(workflow, str):
             try: workflow = json.loads(workflow)
@@ -224,19 +221,8 @@ self.process = subprocess.Popen([
                 except Exception as e:
                     print(f"⚠️ Dynamic framing error: {e}")
 
-            if prompts_override or prompt_override:
-                multi_string_node = find_node("MultiStringPrompts")
-                if multi_string_node:
-                    if prompts_override:
-                        if isinstance(prompts_override, list):
-                            for idx, p_text in enumerate(prompts_override[:5]):
-                                workflow[multi_string_node]["inputs"][f"multi_prompt_{idx+1}"] = p_text
-                        elif isinstance(prompts_override, dict):
-                            for k, p_text in prompts_override.items():
-                                if k in workflow[multi_string_node]["inputs"]:
-                                    workflow[multi_string_node]["inputs"][k] = p_text
-                    elif prompt_override and isinstance(prompt_override, str):
-                        workflow[multi_string_node]["inputs"]["multi_prompt_1"] = prompt_override
+            # NOTE: Removed the redundant MultiStringPrompts dynamic payload overrides 
+            # to remain in clean functional sync with the optimized n8n orchestrator array.
 
             sanitized_workflow = {}
             for node_id, node_data in workflow.items():
@@ -409,7 +395,6 @@ self.process = subprocess.Popen([
                     
                 videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
                 
-                # 🔥 VRAM PURGE: Aggressively unload models and dump cache to maintain 8GB limit
                 print("🧹 Generation Complete. Purging VRAM & Unloading Models...")
                 try:
                     await session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True})
