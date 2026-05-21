@@ -63,13 +63,14 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
+    # 🔥 FIZZ NODES PATCH: Fix NoneType concatenation crash so LTX/Gemma text conditioning succeeds
+    "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
+).run_commands(
     # 🔥 CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4"
 )
-
-
 
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -143,7 +144,6 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Fixed Indentation and Upgraded parameters to sync with modern ComfyUI arguments
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -175,10 +175,8 @@ class LTXEngine:
         body = await request.json()
         
         if isinstance(body, dict):
-            if "json" in body:
-                body = body["json"]
-            elif "body" in body:
-                body = body["body"]
+            if "json" in body: body = body["json"]
+            elif "body" in body: body = body["body"]
 
         image_url = body.get("image_url") if isinstance(body, dict) else None
         workflow = body.get("workflow") if isinstance(body, dict) else body
@@ -196,6 +194,9 @@ class LTXEngine:
             if "nodes" in workflow and "last_node_id" in workflow:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
+        # =========================================================================
+        # 🔗 FUZZYLINKER: DYNAMIC MODEL & NODE INJECTION
+        # =========================================================================
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
@@ -204,10 +205,57 @@ class LTXEngine:
         target_distilled_lora = "ltx-2-19b-distilled-lora-384.safetensors"
         target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
 
-        def find_node(cls_name):
-            return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
+        def fuzzy_linker(wf_data):
+            """Intelligently assigns correct models based on node contextual logic."""
+            for node_id, node in wf_data.items():
+                if not isinstance(node, dict) or "inputs" not in node:
+                    continue
+                
+                cls = node.get("class_type", "").lower()
+                inputs = node["inputs"]
+                
+                # 1. UNET / Base Model Routing
+                if any(x in cls for x in ["unet", "model", "checkpoint"]):
+                    if "unet_name" in inputs: inputs["unet_name"] = target_unet
+                    if "ckpt_name" in inputs: inputs["ckpt_name"] = target_unet
+                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                        node["widgets_values"][0] = target_unet
+
+                # 2. Text Encoder (Gemma) Routing
+                if "textencoder" in cls or "gemma" in cls:
+                    if "text_encoder" in inputs: inputs["text_encoder"] = target_gemma
+                    if "ckpt_name" in inputs: inputs["ckpt_name"] = target_connector
+
+                # 3. VAE Routing (Audio vs Video Logic)
+                if "vae" in cls:
+                    if "audio" in cls:
+                        if "ckpt_name" in inputs: inputs["ckpt_name"] = target_audio_vae
+                        if "vae_name" in inputs: inputs["vae_name"] = target_audio_vae
+                    else:
+                        if "vae_name" in inputs: inputs["vae_name"] = target_video_vae
+                        if "ckpt_name" in inputs: inputs["ckpt_name"] = target_video_vae
+
+                # 4. LoRA Assignment Logic
+                if "lora" in cls:
+                    current_lora = str(inputs.get("lora_name", "")).lower()
+                    resolved = target_distilled_lora
+                    if "detail" in current_lora or "ic-lora" in current_lora:
+                        resolved = target_detailer_lora
+                    
+                    inputs["lora_name"] = resolved
+                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                        node["widgets_values"][0] = resolved
+
+                # 5. Native Deno Multi Image Pathing
+                if "deno" in cls and "image" in cls:
+                    if "image_paths" in inputs: inputs["image_paths"] = "input/dynamic_guides"
+
+            return wf_data
 
         if isinstance(workflow, dict):
+            workflow = fuzzy_linker(workflow)
+
+            # Global Sequence & Frame Matching
             if requested_length is not None:
                 try:
                     tgt_len = int(requested_length)
@@ -215,94 +263,30 @@ class LTXEngine:
                         tgt_len = ((tgt_len - 1) // 8) * 8 + 1
                         if tgt_len < 9: tgt_len = 9
                     
-                    video_latent_node = find_node("EmptyLTXVLatentVideo")
-                    audio_latent_node = find_node("LTXVEmptyLatentAudio")
-                    
-                    if video_latent_node:
-                        workflow[video_latent_node]["inputs"]["length"] = tgt_len
-                    if audio_latent_node:
-                        workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
-
-                    batch_prompt_nodes = [k for k, v in workflow.items() if v.get("class_type") == "BatchPromptSchedule"]
-                    for node in batch_prompt_nodes:
-                        workflow[node]["inputs"]["max_frames"] = tgt_len
+                    for node_id, node in workflow.items():
+                        if not isinstance(node, dict) or "inputs" not in node: continue
+                        cls = node.get("class_type", "")
+                        if "EmptyLTXVLatentVideo" in cls: node["inputs"]["length"] = tgt_len
+                        if "LTXVEmptyLatentAudio" in cls: 
+                            node["inputs"]["frames_number"] = tgt_len
+                            node["inputs"]["frame_rate"] = 12
+                        if "BatchPromptSchedule" in cls: node["inputs"]["max_frames"] = tgt_len
                 except Exception as e:
                     print(f"⚠️ Dynamic framing error: {e}")
 
-            # NOTE: Removed the redundant MultiStringPrompts dynamic payload overrides 
-            # to remain in clean functional sync with the optimized n8n orchestrator array.
-
-            sanitized_workflow = {}
-            for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict) and "class_type" in node_data:
-                    if "inputs" not in node_data or node_data["inputs"] is None:
-                        node_data["inputs"] = {}
-
-                    class_type = node_data.get("class_type")
-
-                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
-                        if "unet_name" in node_data["inputs"]:
-                            node_data["inputs"]["unet_name"] = target_unet
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_unet
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                node_data["widgets_values"][0] = target_unet
-
-                    if class_type == "LTXAVTextEncoderLoader":
-                        node_data["inputs"]["text_encoder"] = target_gemma
-                        node_data["inputs"]["ckpt_name"] = target_connector
-
-                    if class_type in ["VAELoaderKJ", "VAELoader"]:
-                        if "vae_name" in node_data["inputs"]:
-                            node_data["inputs"]["vae_name"] = target_video_vae
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_video_vae
-
-                    if class_type == "LTXVAudioVAELoader":
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_audio_vae
-                        if "vae_name" in node_data["inputs"]:
-                            node_data["inputs"]["vae_name"] = target_audio_vae
-
-                    if class_type == "DenoMultiImageLoader":
-                        node_data["inputs"]["image_paths"] = "input/dynamic_guides"
-
-                    if class_type == "LTXVEmptyLatentAudio":
-                        node_data["inputs"]["frame_rate"] = 12
-
-                    if class_type == "LoraLoader":
-                        lora_input_name = node_data["inputs"].get("lora_name") or ""
-                        if not lora_input_name and "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                lora_input_name = node_data["widgets_values"][0] or ""
-                        
-                        resolved_lora = None
-                        if "distilled" in str(lora_input_name).lower() or not lora_input_name:
-                            resolved_lora = target_distilled_lora
-                        elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
-                            resolved_lora = target_detailer_lora
-                        
-                        if resolved_lora:
-                            node_data["inputs"]["lora_name"] = resolved_lora
-                            if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                                if len(node_data["widgets_values"]) > 0:
-                                    node_data["widgets_values"][0] = resolved_lora
-
-                    sanitized_workflow[str(node_id)] = node_data
-            
-            sage_node_id = find_node("LTX2MemoryEfficientSageAttentionPatch")
+            # Sage Attention Patch Optimizer
+            sage_node_id = next((k for k, v in workflow.items() if v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
             if sage_node_id:
-                sage_input = sanitized_workflow[sage_node_id]["inputs"].get("model")
+                sage_input = workflow[sage_node_id]["inputs"].get("model")
                 if sage_input:
-                    for node_id, node_data in sanitized_workflow.items():
+                    for node_id, node_data in workflow.items():
                         if isinstance(node_data, dict) and "inputs" in node_data:
                             for k, v in node_data["inputs"].items():
                                 if isinstance(v, list) and len(v) > 0 and v[0] == sage_node_id:
                                     node_data["inputs"][k] = sage_input
-                del sanitized_workflow[sage_node_id]
+                del workflow[sage_node_id]
 
-            workflow = sanitized_workflow
+        # =========================================================================
 
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
         if os.path.exists(dynamic_guides_dir):
