@@ -62,8 +62,8 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
-    # 🔥 THE SYSTEM PATH PATCH: Safely append the root folder using python file writer logic directly
-    "python3 -c 'with open(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py\", \"a\") as f: f.write(\"\nimport sys\nsys.path.append(\\\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\\\")\n\")'"
+    # 🔥 THE SYSTEM PATH PATCH: Using hex escape values to inject absolute string without breaking Dockerfile parsers
+    "python3 -c 'with open(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py\", \"a\") as f: f.write(\"\nimport sys\nsys.path.append(\x22/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\x22)\n\")'"
 ).run_commands(
     # 🔥 CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
