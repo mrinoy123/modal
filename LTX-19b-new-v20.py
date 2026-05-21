@@ -40,7 +40,8 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# 1. Base clean dependencies layer first (Ensures correct CUDA PyTorch and compatible NumPy)
+
+# Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = (
     build_image.pip_install(
         "torch==2.5.1",
@@ -50,14 +51,14 @@ final_image = (
     )
     .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers")
     
-    # 2. Clone core ComfyUI and time-travel checkout to stabilize dependencies
+    # 1. Clone core ComfyUI and pin version
     .run_commands(
         "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
         "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
         "pip install -r /workspace/ComfyUI/requirements.txt"
     )
     
-    # 3. Clone custom nodes sequentially into absolute directory paths
+    # 2. Clone custom nodes sequentially into absolute directory paths
     .run_commands(
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
@@ -71,21 +72,26 @@ final_image = (
         "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
     )
     
-    # 4. Handle time-travel checkout for LTXVideo & install node-specific requirements safely
+    # 3. Handle checkout constraints and custom node dependencies
     .run_commands(
         "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
     )
     
-    # 5. Apply critical runtime runtime patches
+    # 4. Apply critical patches (Fixing the Guider Attribute/Method mismatch)
     .run_commands(
         # 🔥 PATCH 1: Fix FizzNodes NoneType crash
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
-        # 🔥 PATCH 2: Fix LTXVideo Attribute Mismatch (raw_conds -> set_conds)
-        "sed -i 's/guider.raw_conds/guider.set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+        
+        # 🔥 PATCH 2: FIXED (raw_conds -> inner_set_conds tuple)
+        "sed -i 's/guider.raw_conds/guider.inner_set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
     )
 )
+
+
+
+
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
