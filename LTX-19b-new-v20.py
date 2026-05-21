@@ -29,10 +29,12 @@ build_image = base_image.env({
     "TORCH_CUDA_ARCH_LIST": "8.9", 
     "MAX_JOBS": "1",
     "CC": "gcc",
-    "CXX": "g++"
+    "CXX": "g++",
+    # 🔥 THE FIX: Globally force PIP to use the CUDA 12.4 registry for ALL node installations
+    "PIP_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cu124" 
 }).pip_install(
-    "torch==2.5.1", "torchvision", "torchaudio", 
-    index_url="https://download.pytorch.org/whl/cu124"
+    # 🔥 THE FIX: Strictly pin the ecosystem to prevent ABI mismatch
+    "torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1" 
 ).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
@@ -65,7 +67,7 @@ final_image = build_image.run_commands(
 ).run_commands(
     # Explicitly install ComfyUI-LTXVideo requirements first to ensure ltx_video and comfyui-workflow-templates are present
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
-    # Then install remaining nodes recursively
+    # Then install remaining nodes recursively (These will now safely inherit PIP_EXTRA_INDEX_URL)
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
     # Force reinstall specific compatible versions of numpy and kornia to protect against late upgrades
