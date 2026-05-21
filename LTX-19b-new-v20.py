@@ -42,6 +42,7 @@ compiled_image = build_image.run_commands(
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
+# Clone ComfyUI and install required custom nodes based on the workflow JSON
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -53,7 +54,11 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
-    "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials"
+    "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
+    "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes",
+    "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts",
+    "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
+    "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
@@ -160,12 +165,19 @@ class LTXEngine:
             raise HTTPException(status_code=403, detail="Unauthorized")
         
         body = await request.json()
-        if isinstance(body, dict) and "json" in body:
-            body = body["json"]
+        
+        # Unpack nested payloads wrapper if sent via n8n or specific webhooks
+        if isinstance(body, dict):
+            if "json" in body:
+                body = body["json"]
+            elif "body" in body:
+                body = body["body"]
 
-        image_url = body.get("image_url")
-        workflow = body.get("workflow")
-        requested_length = body.get("length")
+        image_url = body.get("image_url") if isinstance(body, dict) else None
+        workflow = body.get("workflow") if isinstance(body, dict) else body
+        requested_length = body.get("length") if isinstance(body, dict) else None
+        prompts_override = body.get("prompts") if isinstance(body, dict) else None
+        prompt_override = body.get("prompt") if isinstance(body, dict) else None
 
         if isinstance(workflow, str):
             try: workflow = json.loads(workflow)
@@ -196,6 +208,7 @@ class LTXEngine:
             if requested_length is not None:
                 try:
                     tgt_len = int(requested_length)
+                    # Enforce temporal compression multiplier layout
                     if (tgt_len - 1) % 8 != 0:
                         tgt_len = ((tgt_len - 1) // 8) * 8 + 1
                         if tgt_len < 9: tgt_len = 9
@@ -207,8 +220,28 @@ class LTXEngine:
                         workflow[video_latent_node]["inputs"]["length"] = tgt_len
                     if audio_latent_node:
                         workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
+
+                    # Update frame count on dynamic prompt batch schedulers
+                    batch_prompt_nodes = [k for k, v in workflow.items() if v.get("class_type") == "BatchPromptSchedule"]
+                    for node in batch_prompt_nodes:
+                        workflow[node]["inputs"]["max_frames"] = tgt_len
                 except Exception as e:
                     print(f"⚠️ Dynamic framing error: {e}")
+
+            # Dynamic prompt injection for n8n payload flexibility
+            if prompts_override or prompt_override:
+                multi_string_node = find_node("MultiStringPrompts")
+                if multi_string_node:
+                    if prompts_override:
+                        if isinstance(prompts_override, list):
+                            for idx, p_text in enumerate(prompts_override[:5]):
+                                workflow[multi_string_node]["inputs"][f"multi_prompt_{idx+1}"] = p_text
+                        elif isinstance(prompts_override, dict):
+                            for k, p_text in prompts_override.items():
+                                if k in workflow[multi_string_node]["inputs"]:
+                                    workflow[multi_string_node]["inputs"][k] = p_text
+                    elif prompt_override and isinstance(prompt_override, str):
+                        workflow[multi_string_node]["inputs"]["multi_prompt_1"] = prompt_override
 
             # Sanitizer and synchronizer loop
             sanitized_workflow = {}
@@ -258,20 +291,19 @@ class LTXEngine:
 
                     # LoRA mapping config
                     if class_type == "LoraLoader":
-                        lora_input_name = node_data["inputs"].get("lora_name", "")
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                        lora_input_name = node_data["inputs"].get("lora_name") or ""
+                        if not lora_input_name and "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                             if len(node_data["widgets_values"]) > 0:
-                                lora_input_name = node_data["widgets_values"][0]
+                                lora_input_name = node_data["widgets_values"][0] or ""
                         
                         resolved_lora = None
-                        if "distilled" in str(lora_input_name).lower():
+                        if "distilled" in str(lora_input_name).lower() or not lora_input_name:
                             resolved_lora = target_distilled_lora
                         elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
                             resolved_lora = target_detailer_lora
                         
                         if resolved_lora:
-                            if "lora_name" in node_data["inputs"]:
-                                node_data["inputs"]["lora_name"] = resolved_lora
+                            node_data["inputs"]["lora_name"] = resolved_lora
                             if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                                 if len(node_data["widgets_values"]) > 0:
                                     node_data["widgets_values"][0] = resolved_lora
@@ -376,7 +408,7 @@ class LTXEngine:
                         raise HTTPException(status_code=540, detail="Execution timeout reached.")
                     await asyncio.sleep(5)
 
-            videos = [v for v in os.listdir(out_dir) if v.endswith(".mp4")]
+            videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
             if not videos:
                 raise HTTPException(status_code=500, detail="Output generation target missing.")
                 
