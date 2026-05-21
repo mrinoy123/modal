@@ -62,15 +62,15 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
-    # 🔥 THE SYSTEM PATH PATCH: Using hex escape values to inject absolute string without breaking Dockerfile parsers
-    "python3 -c 'with open(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py\", \"a\") as f: f.write(\"\nimport sys\nsys.path.append(\x22/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\x22)\n\")'"
+    # 🔥 THE BULLETPROOF PATH PATCH: Line-by-line append. No escapes, no newlines.
+    "echo 'import sys' >> /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py",
+    "echo 'sys.path.append(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\")' >> /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
 ).run_commands(
     # 🔥 CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4"
 )
-
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
