@@ -73,7 +73,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,
+    memory=8192, # 🔥 RESTORED to 8GB RAM (No increase)
     scaledown_window=60,
     timeout=3600 
 )
@@ -139,7 +139,8 @@ class LTXEngine:
         
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
+            # 🔥 DIRECT DISK STREAMING: `--mmap` and `--normalvram` locks direct hard drive streaming logic
+            "--mmap", "--normalvram", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"        
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
@@ -403,12 +404,21 @@ class LTXEngine:
                         raise HTTPException(status_code=540, detail="Execution timeout reached.")
                     await asyncio.sleep(5)
 
-            videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
-            if not videos:
-                raise HTTPException(status_code=500, detail="Output generation target missing.")
+                videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
+                if not videos:
+                    raise HTTPException(status_code=500, detail="Output generation target missing.")
+                    
+                videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
                 
-            videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-            with open(os.path.join(out_dir, videos[0]), "rb") as f:
-                return Response(content=f.read(), media_type="video/mp4")
+                # 🔥 VRAM PURGE: Aggressively unload models and dump cache to maintain 8GB limit
+                print("🧹 Generation Complete. Purging VRAM & Unloading Models...")
+                try:
+                    await session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True})
+                    await session.post("http://127.0.0.1:8188/api/free", json={"unload_models": True, "free_memory": True})
+                except Exception as e:
+                    print(f"VRAM Purge Notice: {e}")
+
+                with open(os.path.join(out_dir, videos[0]), "rb") as f:
+                    return Response(content=f.read(), media_type="video/mp4")
         finally:
             ram_task.cancel()
