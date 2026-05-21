@@ -43,11 +43,12 @@ build_image = base_image.env({
 # Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
+    # 🔥 SYNC FIX: Roll back ComfyUI Core to match the LTXVideo custom node version perfectly
+    "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-    # 🔥 THE ROLLBACK FIX: Rewind the Lightricks repository to a stable commit before they deleted the Guider node
     "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
@@ -58,20 +59,16 @@ final_image = build_image.run_commands(
     "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
-    # Install specific core prerequisites for Lightricks
     "pip install diffusers accelerate transformers",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
-    # 🔥 FIZZ NODES PATCH: Fix NoneType concatenation crash so LTX/Gemma text conditioning succeeds
     "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
 ).run_commands(
-    # 🔥 CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4"
 )
-
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -195,7 +192,7 @@ class LTXEngine:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
         # =========================================================================
-        # 🔗 FUZZYLINKER: DYNAMIC MODEL & NODE INJECTION
+        # 🔗 AGGRESSIVE FUZZYLINKER: FORCED MODEL INJECTION
         # =========================================================================
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
@@ -206,37 +203,37 @@ class LTXEngine:
         target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
 
         def fuzzy_linker(wf_data):
-            """Intelligently assigns correct models based on node contextual logic."""
             for node_id, node in wf_data.items():
                 if not isinstance(node, dict) or "inputs" not in node:
                     continue
                 
-                cls = node.get("class_type", "").lower()
+                cls = node.get("class_type", "")
                 inputs = node["inputs"]
                 
-                # 1. UNET / Base Model Routing
-                if any(x in cls for x in ["unet", "model", "checkpoint"]):
-                    if "unet_name" in inputs: inputs["unet_name"] = target_unet
-                    if "ckpt_name" in inputs: inputs["ckpt_name"] = target_unet
+                # 1. UNET & Checkpoint Forcing
+                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                    inputs["unet_name"] = target_unet
+                    inputs["ckpt_name"] = target_unet
                     if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                         node["widgets_values"][0] = target_unet
 
-                # 2. Text Encoder (Gemma) Routing
-                if "textencoder" in cls or "gemma" in cls:
-                    if "text_encoder" in inputs: inputs["text_encoder"] = target_gemma
-                    if "ckpt_name" in inputs: inputs["ckpt_name"] = target_connector
+                # 2. Text Encoder (Gemma) Forcing
+                elif cls == "LTXAVTextEncoderLoader":
+                    inputs["text_encoder"] = target_gemma
+                    inputs["ckpt_name"] = target_connector
 
-                # 3. VAE Routing (Audio vs Video Logic)
-                if "vae" in cls:
-                    if "audio" in cls:
-                        if "ckpt_name" in inputs: inputs["ckpt_name"] = target_audio_vae
-                        if "vae_name" in inputs: inputs["vae_name"] = target_audio_vae
-                    else:
-                        if "vae_name" in inputs: inputs["vae_name"] = target_video_vae
-                        if "ckpt_name" in inputs: inputs["ckpt_name"] = target_video_vae
+                # 3. Video VAE Forcing
+                elif cls in ["VAELoaderKJ", "VAELoader"]:
+                    inputs["vae_name"] = target_video_vae
+                    inputs["ckpt_name"] = target_video_vae
 
-                # 4. LoRA Assignment Logic
-                if "lora" in cls:
+                # 4. Audio VAE Forcing
+                elif cls == "LTXVAudioVAELoader":
+                    inputs["ckpt_name"] = target_audio_vae
+                    inputs["vae_name"] = target_audio_vae
+
+                # 5. LoRA Assignment Logic
+                elif cls == "LoraLoader":
                     current_lora = str(inputs.get("lora_name", "")).lower()
                     resolved = target_distilled_lora
                     if "detail" in current_lora or "ic-lora" in current_lora:
@@ -246,9 +243,9 @@ class LTXEngine:
                     if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                         node["widgets_values"][0] = resolved
 
-                # 5. Native Deno Multi Image Pathing
-                if "deno" in cls and "image" in cls:
-                    if "image_paths" in inputs: inputs["image_paths"] = "input/dynamic_guides"
+                # 6. Guide Image Input
+                elif cls == "DenoMultiImageLoader":
+                    inputs["image_paths"] = "input/dynamic_guides"
 
             return wf_data
 
@@ -266,11 +263,13 @@ class LTXEngine:
                     for node_id, node in workflow.items():
                         if not isinstance(node, dict) or "inputs" not in node: continue
                         cls = node.get("class_type", "")
-                        if "EmptyLTXVLatentVideo" in cls: node["inputs"]["length"] = tgt_len
+                        if "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls: 
+                            node["inputs"]["length"] = tgt_len
                         if "LTXVEmptyLatentAudio" in cls: 
                             node["inputs"]["frames_number"] = tgt_len
                             node["inputs"]["frame_rate"] = 12
-                        if "BatchPromptSchedule" in cls: node["inputs"]["max_frames"] = tgt_len
+                        if "BatchPromptSchedule" in cls: 
+                            node["inputs"]["max_frames"] = tgt_len
                 except Exception as e:
                     print(f"⚠️ Dynamic framing error: {e}")
 
