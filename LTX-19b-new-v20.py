@@ -110,47 +110,31 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        def get_target_dirs(filename: str):
-            fn = filename.lower()
-            # 1. Distilled base model & Quantized GGUF models
-            if "distilled-fp8" in fn or "dev-fp8" in fn or "dev-q3" in fn or fn.endswith(".gguf"):
-                return ["unet", "diffusion_models"]
-            # 2. Gemma Text Encoders
-            if "gemma" in fn:
-                return ["text_encoders", "text_encoder"]
-            # 3. Embedding Connectors
-            if "embeddings_connector" in fn:
-                return ["clip"]
-            # 4. Audio and Video VAEs
-            if "video_vae" in fn or "audio_vae" in fn:
-                return ["vae"]
-            # 5. IC-LoRAs and Standard LoRAs
-            if "lora" in fn:
-                return ["loras"]
-            # 6. Fallback CLIPs
-            if "clip_l" in fn:
-                return ["clip"]
-            # 7. Safe Fallbacks based on standard file extension mappings
-            if fn.endswith((".pth", ".pt")):
-                return ["unet"]
-            return ["checkpoints"]
+        # Explicit target-specific file mapper
+        exact_mapping = {
+            "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
+            "ltx-2-19b-embeddings_connector_dev_bf16.safetensors": ["checkpoints"],
+            "ltx-2-19b-distilled-fp8.safetensors": ["unet", "diffusion_models"],
+            "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
+            "ltx-2-19b-dev_audio_vae.safetensors": ["checkpoints"],
+            "ltx-2-19b-dev_video_vae.safetensors": ["vae"]
+        }
 
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
-                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
-                        continue
-                        
-                    src_path = os.path.join(root_dir, filename)
-                    target_dirs = get_target_dirs(filename)
-                    
-                    for target_dir in target_dirs:
-                        dest = os.path.join(base_models_dir, target_dir, filename)
-                        if not os.path.exists(dest):
-                            try: 
-                                os.symlink(src_path, dest)
-                                print(f"🔗 Linked weight: {filename} -> models/{target_dir}")
-                            except FileExistsError: pass
+                    if filename in exact_mapping:
+                        src_path = os.path.join(root_dir, filename)
+                        target_dirs = exact_mapping[filename]
+                        for target_dir in target_dirs:
+                            dest = os.path.join(base_models_dir, target_dir, filename)
+                            if not os.path.exists(dest):
+                                try: 
+                                    os.symlink(src_path, dest)
+                                    print(f"🔗 Linked target weight: {filename} -> models/{target_dir}")
+                                except FileExistsError: pass
+                    else:
+                        print(f"🛑 Skipping unused weight file: {filename}")
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -224,14 +208,13 @@ class LTXEngine:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
         # =========================================================================
-        # 🔗 AGGRESSIVE FUZZYLINKER: FORCED MODEL INJECTION
+        # 🔗 FUZZYLINKER: STRICTOR NODAL SPECIFIC FILE FORCING
         # =========================================================================
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
-        target_distilled_lora = "ltx-2-19b-distilled-lora-384.safetensors"
         target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
 
         def fuzzy_linker(wf_data):
@@ -254,26 +237,21 @@ class LTXEngine:
                     inputs["text_encoder"] = target_gemma
                     inputs["ckpt_name"] = target_connector
 
-                # 3. Video VAE Forcing
+                # 3. Video VAE Forcing (VAELoaderKJ Node)
                 elif cls in ["VAELoaderKJ", "VAELoader"]:
                     inputs["vae_name"] = target_video_vae
                     inputs["ckpt_name"] = target_video_vae
 
-                # 4. Audio VAE Forcing
+                # 4. Audio VAE Forcing (LTXVAudioVAELoader Node)
                 elif cls == "LTXVAudioVAELoader":
                     inputs["ckpt_name"] = target_audio_vae
                     inputs["vae_name"] = target_audio_vae
 
-                # 5. LoRA Assignment Logic
+                # 5. LoRA Loader (Loads strictly the Detailer Lora)
                 elif cls == "LoraLoader":
-                    current_lora = str(inputs.get("lora_name", "")).lower()
-                    resolved = target_distilled_lora
-                    if "detail" in current_lora or "ic-lora" in current_lora:
-                        resolved = target_detailer_lora
-                    
-                    inputs["lora_name"] = resolved
+                    inputs["lora_name"] = target_detailer_lora
                     if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = resolved
+                        node["widgets_values"][0] = target_detailer_lora
 
                 # 6. Guide Image Input
                 elif cls == "DenoMultiImageLoader":
