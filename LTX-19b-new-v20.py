@@ -40,7 +40,6 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-
 # Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
@@ -48,6 +47,8 @@ final_image = build_image.run_commands(
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
+    # 🔥 THE ROLLBACK FIX: Rewind the Lightricks repository to a stable commit before they deleted the Guider node
+    "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
@@ -58,19 +59,18 @@ final_image = build_image.run_commands(
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
     # Install specific core prerequisites for Lightricks
-    "pip install diffusers accelerate transformers specification",
+    "pip install diffusers accelerate transformers",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
-).run_commands(
-    # 🔥 THE BULLETPROOF PATH PATCH: Line-by-line append. No escapes, no newlines.
-    "echo 'import sys' >> /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py",
-    "echo 'sys.path.append(\"/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo\")' >> /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
 ).run_commands(
     # 🔥 CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4"
 )
+
+
+
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
