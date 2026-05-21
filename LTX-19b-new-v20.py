@@ -40,7 +40,7 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# Clone ComfyUI and install required custom nodes (VFI Purged)
+
 # Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
@@ -57,16 +57,16 @@ final_image = build_image.run_commands(
     "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
-    # Install specific core requirements for the heavy mathematical pipelines natively
+    # Force-install prerequisites for the Lightricks node wrapper specifically
+    "pip install diffusers accelerate transformers specification",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
 ).run_commands(
-    # 🔥 ULTIMATE CLEANUP STACK: Wipe corrupt overlapping sets and rebuild clean binary dependencies
+    # 🔥 ULTIMATE CLEANUP STACK: Re-verify clean binary wheels match torch framework
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4"
 )
-
 
 
 app = modal.App("ltx-2-19b-v20-api")
