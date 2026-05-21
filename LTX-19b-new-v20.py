@@ -21,7 +21,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Build image with explicit cache-locked custom node dependencies to ensure imports do not fail
+# Build image with explicit cache-locked dependencies
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -29,32 +29,23 @@ build_image = base_image.env({
     "TORCH_CUDA_ARCH_LIST": "8.9", 
     "MAX_JOBS": "1",
     "CC": "gcc",
-    "CXX": "g++",
-    # 🔥 THE FIX: Globally force PIP to use the CUDA 12.4 registry for ALL node installations
-    "PIP_EXTRA_INDEX_URL": "https://download.pytorch.org/whl/cu124" 
+    "CXX": "g++"
 }).pip_install(
-    # 🔥 THE FIX: Strictly pin the ecosystem to prevent ABI mismatch
-    "torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1" 
-).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
 ).pip_install(
-    # Explicitly lock and cache deep dependency trees of our custom nodes
     "pandas", "numexpr", "pytz", "python-dateutil", 
     "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
     "decord", "imageio", "scikit-image", "numba", "einops", 
-    "transformers", "diffusers", "accelerate", "bitsandbytes",
-    "kornia<=0.7.3"
+    "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# Clone ComfyUI and install required custom nodes based on the workflow JSON
+# Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
-    "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
-    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
@@ -65,15 +56,13 @@ final_image = build_image.run_commands(
     "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
 ).run_commands(
-    # Explicitly install ComfyUI-LTXVideo requirements first to ensure ltx_video and comfyui-workflow-templates are present
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
-    # Then install remaining nodes recursively (These will now safely inherit PIP_EXTRA_INDEX_URL)
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # Force reinstall specific compatible versions of numpy and kornia to protect against late upgrades
+    # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
+    "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
+    # Re-enforce kornia and numpy limits to prevent array mismatches
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
-).run_commands(
-    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -110,7 +99,8 @@ class LTXEngine:
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf", "loras"]
+        # Removed "vfi" from the directory list
+        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -121,7 +111,7 @@ class LTXEngine:
                         continue
                         
                     src_path = os.path.join(root_dir, filename)
-                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "vfi", "loras"]:
+                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "loras"]:
                         dest = os.path.join(base_models_dir, target_dir, filename)
                         if not os.path.exists(dest):
                             try: os.symlink(src_path, dest)
@@ -177,7 +167,6 @@ class LTXEngine:
         
         body = await request.json()
         
-        # Unpack nested payloads wrapper if sent via n8n or specific webhooks
         if isinstance(body, dict):
             if "json" in body:
                 body = body["json"]
@@ -202,7 +191,6 @@ class LTXEngine:
             if "nodes" in workflow and "last_node_id" in workflow:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
-        # Real model file names from weight volume
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
@@ -215,11 +203,9 @@ class LTXEngine:
             return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
 
         if isinstance(workflow, dict):
-            # Dynamic frame length calculator
             if requested_length is not None:
                 try:
                     tgt_len = int(requested_length)
-                    # Enforce temporal compression multiplier layout
                     if (tgt_len - 1) % 8 != 0:
                         tgt_len = ((tgt_len - 1) // 8) * 8 + 1
                         if tgt_len < 9: tgt_len = 9
@@ -232,14 +218,12 @@ class LTXEngine:
                     if audio_latent_node:
                         workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
 
-                    # Update frame count on dynamic prompt batch schedulers
                     batch_prompt_nodes = [k for k, v in workflow.items() if v.get("class_type") == "BatchPromptSchedule"]
                     for node in batch_prompt_nodes:
                         workflow[node]["inputs"]["max_frames"] = tgt_len
                 except Exception as e:
                     print(f"⚠️ Dynamic framing error: {e}")
 
-            # Dynamic prompt injection for n8n payload flexibility
             if prompts_override or prompt_override:
                 multi_string_node = find_node("MultiStringPrompts")
                 if multi_string_node:
@@ -254,7 +238,6 @@ class LTXEngine:
                     elif prompt_override and isinstance(prompt_override, str):
                         workflow[multi_string_node]["inputs"]["multi_prompt_1"] = prompt_override
 
-            # Sanitizer and synchronizer loop
             sanitized_workflow = {}
             for node_id, node_data in workflow.items():
                 if isinstance(node_data, dict) and "class_type" in node_data:
@@ -263,7 +246,6 @@ class LTXEngine:
 
                     class_type = node_data.get("class_type")
 
-                    # UNET loader config
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
                         if "unet_name" in node_data["inputs"]:
                             node_data["inputs"]["unet_name"] = target_unet
@@ -273,34 +255,28 @@ class LTXEngine:
                             if len(node_data["widgets_values"]) > 0:
                                 node_data["widgets_values"][0] = target_unet
 
-                    # Text encoder loader config
                     if class_type == "LTXAVTextEncoderLoader":
                         node_data["inputs"]["text_encoder"] = target_gemma
                         node_data["inputs"]["ckpt_name"] = target_connector
 
-                    # Video VAE loader config
                     if class_type in ["VAELoaderKJ", "VAELoader"]:
                         if "vae_name" in node_data["inputs"]:
                             node_data["inputs"]["vae_name"] = target_video_vae
                         if "ckpt_name" in node_data["inputs"]:
                             node_data["inputs"]["ckpt_name"] = target_video_vae
 
-                    # Audio VAE loader config
                     if class_type == "LTXVAudioVAELoader":
                         if "ckpt_name" in node_data["inputs"]:
                             node_data["inputs"]["ckpt_name"] = target_audio_vae
                         if "vae_name" in node_data["inputs"]:
                             node_data["inputs"]["vae_name"] = target_audio_vae
 
-                    # Multi-Image Directory Config
                     if class_type == "DenoMultiImageLoader":
                         node_data["inputs"]["image_paths"] = "input/dynamic_guides"
 
-                    # Frame rate configuration
                     if class_type == "LTXVEmptyLatentAudio":
                         node_data["inputs"]["frame_rate"] = 12
 
-                    # LoRA mapping config
                     if class_type == "LoraLoader":
                         lora_input_name = node_data["inputs"].get("lora_name") or ""
                         if not lora_input_name and "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
@@ -321,7 +297,6 @@ class LTXEngine:
 
                     sanitized_workflow[str(node_id)] = node_data
             
-            # Automatically bypass SageAttention node if present, as compilation is removed
             sage_node_id = find_node("LTX2MemoryEfficientSageAttentionPatch")
             if sage_node_id:
                 sage_input = sanitized_workflow[sage_node_id]["inputs"].get("model")
@@ -335,13 +310,11 @@ class LTXEngine:
 
             workflow = sanitized_workflow
 
-        # Dynamic download directory path setup
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
         if os.path.exists(dynamic_guides_dir):
             shutil.rmtree(dynamic_guides_dir)
         os.makedirs(dynamic_guides_dir, exist_ok=True)
 
-        # Concurrently decode and download multi-image reference inputs
         urls_to_download = []
         if image_url:
             if isinstance(image_url, list):
@@ -353,7 +326,6 @@ class LTXEngine:
                     urls_to_download = [image_url.strip()]
 
         if not urls_to_download:
-            # Fallback blank canvas
             from PIL import Image
             img = Image.new('RGB', (1024, 1024), color='black')
             img.save(os.path.join(dynamic_guides_dir, "guide_0.png"))
