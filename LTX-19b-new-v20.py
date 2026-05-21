@@ -21,6 +21,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
+# Build image with explicit cache-locked custom node dependencies to ensure imports do not fail
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -35,6 +36,12 @@ build_image = base_image.env({
 ).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
+).pip_install(
+    # Explicitly lock and cache deep dependency trees of our custom nodes
+    "pandas", "numexpr", "pytz", "python-dateutil", 
+    "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
+    "decord", "imageio", "scikit-image", "numba", "einops", 
+    "transformers", "diffusers", "accelerate"
 )
 
 compiled_image = build_image.run_commands(
