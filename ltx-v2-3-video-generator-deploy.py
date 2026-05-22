@@ -176,6 +176,7 @@ def bake_private_workflow_into_image():
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
+
 # ⚡ FIXED: Runtime monkey-patch to bypass the LTXBaseModel ImportError on ComfyUI 0.10.x backend
 def patch_ltx_video_imports():
     import os
@@ -184,15 +185,89 @@ def patch_ltx_video_imports():
         with open(init_path, "r") as f:
             content = f.read()
         
+        # Wrapped patch to intercept and gracefully recover/define the missing attributes at initialization
         patch_code = (
-            "import comfy.ldm.lightricks.model\n"
-            "if not hasattr(comfy.ldm.lightricks.model, 'precompute_freqs_cis'):\n"
-            "    comfy.ldm.lightricks.model.precompute_freqs_cis = getattr(comfy.ldm.lightricks.model.LTXBaseModel, '_precompute_freqs_cis', getattr(comfy.ldm.lightricks.model.LTXBaseModel, 'precompute_freqs_cis', None))\n"
+            "import sys\n"
+            "import torch\n"
+            "import math\n"
+            "try:\n"
+            "    import comfy.ldm.lightricks.model as m\n"
+            "    if not hasattr(m, 'precompute_freqs_cis'):\n"
+            "        def precompute_freqs_cis(coords, dim, out_dtype):\n"
+            "            try:\n"
+            "                if hasattr(m, 'LTXBaseModel'):\n"
+            "                    for name in ['_precompute_freqs_cis', 'precompute_freqs_cis']:\n"
+            "                        if hasattr(m.LTXBaseModel, name):\n"
+            "                            return getattr(m.LTXBaseModel, name)(coords, dim, out_dtype)\n"
+            "            except Exception: pass\n"
+            "            theta = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=coords.device, dtype=torch.float32) / dim))\n"
+            "            freqs = torch.einsum('... , d -> ... d', coords.flatten(1, -2).to(torch.float32), theta)\n"
+            "            freqs = freqs.view(*coords.shape[:-1], -1)\n"
+            "            return torch.polar(torch.ones_like(freqs), freqs.to(out_dtype))\n"
+            "        m.precompute_freqs_cis = precompute_freqs_cis\n"
+            "except Exception as e:\n"
+            "    print(f'⚠️ Warning: LTX-Video import monkeypatch failed: {e}')\n"
         )
         
         with open(init_path, "w") as f:
             f.write(patch_code + content)
         print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
+
+
+# ⚡ NEW: Global fallback patch directly applied to the core ComfyUI model file to handle load-order conflicts
+def patch_comfy_lightricks_model():
+    import os
+    model_path = "/workspace/ComfyUI/comfy/ldm/lightricks/model.py"
+    if os.path.exists(model_path):
+        with open(model_path, "r") as f:
+            content = f.read()
+        
+        if "def precompute_freqs_cis" not in content:
+            print("🔧 Patching comfy/ldm/lightricks/model.py to add backward compatibility helpers...")
+            fallback_code = """
+
+# --- LTX-Video/LTX-2.3 Compatibility Patch ---
+import torch
+import math
+
+def precompute_freqs_cis(coords, dim, out_dtype):
+    try:
+        if "LTXBaseModel" in globals():
+            base_model = globals()["LTXBaseModel"]
+            for method_name in ["_precompute_freqs_cis", "precompute_freqs_cis"]:
+                if hasattr(base_model, method_name):
+                    return getattr(base_model, method_name)(coords, dim, out_dtype)
+    except Exception:
+        pass
+        
+    theta = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=coords.device, dtype=torch.float32) / dim))
+    freqs = torch.einsum('... , d -> ... d', coords.flatten(1, -2).to(torch.float32), theta)
+    freqs = freqs.view(*coords.shape[:-1], -1)
+    return torch.polar(torch.ones_like(freqs), freqs.to(out_dtype))
+
+def apply_rotary_emb(x, freqs):
+    try:
+        if "LTXBaseModel" in globals():
+            base_model = globals()["LTXBaseModel"]
+            for name in ["_apply_rotary_emb", "apply_rotary_emb"]:
+                if hasattr(base_model, name):
+                    return getattr(base_model, name)(x, freqs)
+    except Exception:
+        pass
+    from comfy.ldm.flux.layers import apply_rotary_emb as flux_apply_rope
+    try:
+        return flux_apply_rope(x, freqs)
+    except Exception:
+        pass
+    return x
+
+globals()["precompute_freqs_cis"] = precompute_freqs_cis
+globals()["apply_rotary_emb"] = apply_rotary_emb
+"""
+            with open(model_path, "w") as f:
+                f.write(content + fallback_code)
+            print("✅ Successfully patched comfy/ldm/lightricks/model.py!")
+
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
@@ -205,7 +280,7 @@ final_image = (
         "torchaudio==2.5.1",
         index_url="https://download.pytorch.org/whl/cu124"
     )
-    .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers")
+    .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers", "comfyui-workflow-templates")
     .run_commands(
         "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -230,6 +305,7 @@ final_image = (
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
     )
+    .run_function(patch_comfy_lightricks_model)
     .run_function(patch_ltx_video_imports)
     .run_function(bake_private_workflow_into_image)
 )
