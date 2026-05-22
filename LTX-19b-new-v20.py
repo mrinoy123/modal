@@ -208,7 +208,6 @@ final_image = (
     .run_function(bake_private_workflow_into_image)
 )
 
-
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -219,7 +218,8 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     secrets=[modal.Secret.from_dict({
         "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
         "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
-        "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
+        "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
+        "API_KEY": "secure-video-n8n-workflow-2026"
     })],
     memory=8192, 
     scaledown_window=5,  # Zero-waste scale down execution windows
@@ -321,8 +321,7 @@ class LTXEngine:
                 time.sleep(2)
         os._exit(1)
 
-
-    @modal.web_endpoint(method="POST")
+    @modal.fastapi_endpoint(method="POST")
     async def generate(self, body: dict, x_api_key: str = Header(None)):
         import aiohttp
         import json
@@ -330,6 +329,9 @@ class LTXEngine:
         import uuid
         import shutil
         from urllib.parse import urlparse
+
+        if x_api_key != os.environ.get("API_KEY"):
+            raise HTTPException(status_code=403, detail="Unauthorized")
 
         image_url = body.get("image_url")
         workflow_str = body.get("workflow")
