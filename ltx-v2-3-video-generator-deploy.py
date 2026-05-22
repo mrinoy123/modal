@@ -176,6 +176,24 @@ def bake_private_workflow_into_image():
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
+# ⚡ FIXED: Runtime monkey-patch to bypass the LTXBaseModel ImportError on ComfyUI 0.10.x backend
+def patch_ltx_video_imports():
+    import os
+    init_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
+    if os.path.exists(init_path):
+        with open(init_path, "r") as f:
+            content = f.read()
+        
+        patch_code = (
+            "import comfy.ldm.lightricks.model\n"
+            "if not hasattr(comfy.ldm.lightricks.model, 'precompute_freqs_cis'):\n"
+            "    comfy.ldm.lightricks.model.precompute_freqs_cis = getattr(comfy.ldm.lightricks.model.LTXBaseModel, '_precompute_freqs_cis', getattr(comfy.ldm.lightricks.model.LTXBaseModel, 'precompute_freqs_cis', None))\n"
+        )
+        
+        with open(init_path, "w") as f:
+            f.write(patch_code + content)
+        print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
+
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
 # ==========================================
@@ -189,7 +207,6 @@ final_image = (
     )
     .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers")
     .run_commands(
-        # ⚡ FIXED: The core rollback command has been removed to allow compatibility with LTX 2.3 Nodes
         "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
         "pip install -r /workspace/ComfyUI/requirements.txt"
     )
@@ -213,6 +230,7 @@ final_image = (
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
     )
+    .run_function(patch_ltx_video_imports)
     .run_function(bake_private_workflow_into_image)
 )
 
