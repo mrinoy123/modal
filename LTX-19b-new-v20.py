@@ -1,7 +1,3 @@
-# ==========================================
-# PART 1: Infrastructure Setup & Base Dependencies
-# ==========================================
-
 import modal
 import subprocess
 import time
@@ -15,6 +11,10 @@ import asyncio
 import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
+
+# ==========================================
+# PART 1: Infrastructure Configuration & Base Dependencies
+# ==========================================
 
 # Setup optimized development container image with required compilation tooling
 base_image = modal.Image.from_registry(
@@ -44,17 +44,25 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
+# Global variables defining immutable model file mappings
+TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
+TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
+TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
+TARGET_VIDEO_VAE = "ltx-2-19b-dev_video_vae.safetensors"
+TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
+TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
+TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
-# PART 2: The Secure Build-Time Appliance Baker
+# PART 2: Secure Build-Time Appliance Baker
 # ==========================================
-
 
 def bake_private_workflow_into_image():
     """
     Executes strictly during the 'modal deploy' image assembly layer.
     Securely accesses the private R2 bucket, downloads the JSON, wires the target
-    model weights permanently to the nodes, and freezes it into the container disk.
+    model weights permanently to the nodes, and freezes it into the container disk
+    to serve as the hyper-fast appliance fallback.
     """
     import boto3
     import json
@@ -73,70 +81,60 @@ def bake_private_workflow_into_image():
 
     # Download the private blueprint
     raw_path = "/tmp/raw_workflow.json"
-    s3.download_file(
-        "video-asset-files-storage-workflow", 
-        "Comfyui-workflows-json/new-workflow-modified-vastly-change(api)new.json", 
-        raw_path
-    )
+    try:
+        s3.download_file(
+            "video-asset-files-storage-workflow", 
+            "Comfyui-workflows-json/new-workflow-modified-vastly-change(api)new.json", 
+            raw_path
+        )
 
-    with open(raw_path, "r") as f:
-        wf_data = json.load(f)
+        with open(raw_path, "r") as f:
+            wf_data = json.load(f)
 
-    if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
-        wf_data = wf_data["workflow"]
+        if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
+            wf_data = wf_data["workflow"]
 
-    print("🏗️ Build Phase: Executing Hardcoded Model Injection Mapping...")
-    
-    TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
-    TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
-    TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
-    TARGET_VIDEO_VAE = "ltx-2-19b-dev_video_vae.safetensors"
-    TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
-    TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
-    TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
-
-    for node_id, node in wf_data.items():
-        if not isinstance(node, dict) or "inputs" not in node:
-            continue
+        print("🏗️ Build Phase: Executing Hardcoded Model Injection Mapping...")
+        
+        for node_id, node in wf_data.items():
+            if not isinstance(node, dict) or "inputs" not in node:
+                continue
+                
+            cls = node.get("class_type", "")
+            inputs = node["inputs"]
             
-        cls = node.get("class_type", "")
-        inputs = node["inputs"]
-        
-        if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
-            inputs["unet_name"] = TARGET_UNET
-            inputs["ckpt_name"] = TARGET_UNET
-            if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                node["widgets_values"][0] = TARGET_UNET
-        elif cls == "LTXAVTextEncoderLoader":
-            inputs["text_encoder"] = TARGET_GEMMA
-            inputs["ckpt_name"] = TARGET_CONNECTOR
-        elif cls in ["VAELoaderKJ", "VAELoader"]:
-            inputs["vae_name"] = TARGET_VIDEO_VAE
-            inputs["ckpt_name"] = TARGET_VIDEO_VAE
-        elif cls == "LTXVAudioVAELoader":
-            inputs["ckpt_name"] = TARGET_AUDIO_VAE
-            inputs["vae_name"] = TARGET_AUDIO_VAE
-        elif cls == "LoraLoader":
-            current_lora = str(inputs.get("lora_name", "")).lower()
-            resolved = TARGET_DISTILLED_LORA
-            if "detail" in current_lora or "ic-lora" in current_lora:
-                resolved = TARGET_DETAILER_LORA
-            inputs["lora_name"] = resolved
-            if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                node["widgets_values"][0] = resolved
-        elif cls == "DenoMultiImageLoader":
-            inputs["image_paths"] = "input/dynamic_guides"
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                inputs["unet_name"] = TARGET_UNET
+                inputs["ckpt_name"] = TARGET_UNET
+                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                    node["widgets_values"][0] = TARGET_UNET
+            elif cls == "LTXAVTextEncoderLoader":
+                inputs["text_encoder"] = TARGET_GEMMA
+                inputs["ckpt_name"] = TARGET_CONNECTOR
+            elif cls in ["VAELoaderKJ", "VAELoader"]:
+                inputs["vae_name"] = TARGET_VIDEO_VAE
+                inputs["ckpt_name"] = TARGET_VIDEO_VAE
+            elif cls == "LTXVAudioVAELoader":
+                inputs["ckpt_name"] = TARGET_AUDIO_VAE
+                inputs["vae_name"] = TARGET_AUDIO_VAE
+            elif cls == "LoraLoader":
+                current_lora = str(inputs.get("lora_name", "")).lower()
+                resolved = TARGET_DISTILLED_LORA
+                if "detail" in current_lora or "ic-lora" in current_lora:
+                    resolved = TARGET_DETAILER_LORA
+                inputs["lora_name"] = resolved
+                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                    node["widgets_values"][0] = resolved
+            elif cls == "DenoMultiImageLoader":
+                inputs["image_paths"] = "input/dynamic_guides"
 
-    os.makedirs("/workspace", exist_ok=True)
-    with open("/workspace/prebaked_workflow.json", "w") as f:
-        json.dump(wf_data, f, indent=2)
-        
-    print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
-
-
-# ==========================================
-# PART 3: ComfyUI Installation & Private Pipeline Injection
-# ==========================================
+        os.makedirs("/workspace", exist_ok=True)
+        with open("/workspace/prebaked_workflow.json", "w") as f:
+            json.dump(wf_data, f, indent=2)
+            
+        print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
+    except Exception as e:
+        print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
 
 final_image = (
@@ -155,7 +153,7 @@ final_image = (
         "pip install -r /workspace/ComfyUI/requirements.txt"
     )
     
-    # 2. Clone custom nodes sequentially into absolute directory paths
+    # 2. Clone custom nodes sequentially
     .run_commands(
         "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
         "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
@@ -169,27 +167,26 @@ final_image = (
         "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
     )
     
-    # 3. Handle checkout constraints and custom node dependencies
+    # 3. Handle checkout constraints
     .run_commands(
         "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
     )
     
-    # 4. Apply critical patches
+    # 4. Apply critical engine patches
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
         "sed -i 's/guider.raw_conds/guider.inner_set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
     )
 
-    # 5. Execute Private R2 Ingestion (Passes the secrets securely into the build environment)
+    # 5. Execute Private R2 Ingestion
     .run_function(bake_private_workflow_into_image, secrets=[modal.Secret.from_name("video-generator-workflow")])
 )
 
 # ==========================================
-# PART 4: The Serverless Runtime & Dynamic Scene Processor
+# PART 3: Reclamation Loops & Storage Linker
 # ==========================================
-
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -215,7 +212,7 @@ class LTXEngine:
                 with open('/proc/sys/vm/drop_caches', 'w') as f: f.write('1\n')
             except Exception:
                 try: ctypes.CDLL("libc.so.6").malloc_trim(0)
-                except Exception: pass
+            except Exception: pass
             await asyncio.sleep(2)
 
     @modal.enter()
@@ -287,6 +284,10 @@ class LTXEngine:
             except Exception: time.sleep(2)
         os._exit(1)
 
+# ==========================================
+# PART 4: Hybrid Gateway Interceptor & Runtime Execution
+# ==========================================
+
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
@@ -297,7 +298,6 @@ class LTXEngine:
             if "json" in body: body = body["json"]
             elif "body" in body: body = body["body"]
 
-        # 1. READ LIGHTWEIGHT PARAMS FROM N8N
         image_url = body.get("image_url")
         requested_length = body.get("length", 73)
         width = body.get("width", 384)
@@ -305,12 +305,67 @@ class LTXEngine:
         prompt_timeline = body.get("prompts", {})
         negative_prompt = body.get("negative", "worst quality, blurry")
         filename_prefix = body.get("filename", "output_scene")
+        
+        # Capture the dynamic workflow sent from n8n (if it exists)
+        inbound_wf = body.get("workflow")
 
-        # 2. LOAD PREBAKED GRAPH FROM DISK
-        with open("/workspace/prebaked_workflow.json", "r") as f:
-            workflow = json.load(f)
+        # ⚡ INTELLIGENT HYBRID OVERRIDE HANDSHAKE
+        workflow = None
+        if inbound_wf:
+            if isinstance(inbound_wf, str):
+                try: workflow = json.loads(inbound_wf)
+                except Exception: pass
+            elif isinstance(inbound_wf, dict):
+                workflow = inbound_wf
 
-        # 3. DYNAMICALLY APPLY N8N CONFIGURATIONS TO THE BAKED NODES
+        # Fallback to local image copy if n8n passes no workflow parameters
+        if not workflow or not isinstance(workflow, dict):
+            print("💡 Appliance Fallback: Processing script via internal prebaked template layout...")
+            with open("/workspace/prebaked_workflow.json", "r") as f:
+                workflow = json.load(f)
+        else:
+            print("⚡ Dynamic Ingress Override: Processing live mutated template directly from n8n network...")
+
+        if "workflow" in workflow and not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
+            workflow = workflow["workflow"]
+
+        # ⚡ AGGRESSIVE FUZZY LINKER RUNTIME FORCING 
+        # (Guarantees no filename conflicts, even if n8n modified the graph)
+        def fuzzy_linker(wf_data):
+            for node_id, node in wf_data.items():
+                if not isinstance(node, dict) or "inputs" not in node: continue
+                cls = node.get("class_type", "")
+                inputs = node["inputs"]
+                
+                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                    inputs["unet_name"] = TARGET_UNET
+                    inputs["ckpt_name"] = TARGET_UNET
+                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                        node["widgets_values"][0] = TARGET_UNET
+                elif cls == "LTXAVTextEncoderLoader":
+                    inputs["text_encoder"] = TARGET_GEMMA
+                    inputs["ckpt_name"] = TARGET_CONNECTOR
+                elif cls in ["VAELoaderKJ", "VAELoader"]:
+                    inputs["vae_name"] = TARGET_VIDEO_VAE
+                    inputs["ckpt_name"] = TARGET_VIDEO_VAE
+                elif cls == "LTXVAudioVAELoader":
+                    inputs["ckpt_name"] = TARGET_AUDIO_VAE
+                    inputs["vae_name"] = TARGET_AUDIO_VAE
+                elif cls == "LoraLoader":
+                    current_lora = str(inputs.get("lora_name", "")).lower()
+                    resolved = TARGET_DISTILLED_LORA
+                    if "detail" in current_lora or "ic-lora" in current_lora:
+                        resolved = TARGET_DETAILER_LORA
+                    inputs["lora_name"] = resolved
+                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                        node["widgets_values"][0] = resolved
+                elif cls == "DenoMultiImageLoader":
+                    inputs["image_paths"] = "input/dynamic_guides"
+            return wf_data
+
+        workflow = fuzzy_linker(workflow)
+
+        # 3. DYNAMICALLY APPLY N8N CONFIGURATIONS TO THE ACTIVE NODES
         try:
             tgt_len = int(requested_length)
             if (tgt_len - 1) % 8 != 0:
