@@ -17,7 +17,6 @@ from typing import Optional
 # PART 1: Infrastructure Configuration & Base Image
 # ==========================================
 
-# Cloudflare R2 explicit provisioning configurations
 R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
 R2_ACCESS_KEY_ID = "3c33425ba6e5abbd3e63afab14dc8866"
 R2_SECRET_ACCESS_KEY = "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8"
@@ -31,7 +30,6 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Clean, ultra-fast environment setup without slow native compilation tasks
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -53,7 +51,6 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# ⚡ LTX-2.3 Specific Weights & Dev Models
 TARGET_UNET = "ltx-2.3-22b-dev-fp8.safetensors"
 TARGET_GEMMA = "gemma_3_12B_it_fp8_scaled.safetensors"
 TARGET_CONNECTOR = "ltx-2.3_text_projection_bf16.safetensors"
@@ -61,7 +58,6 @@ TARGET_VIDEO_VAE = "LTX23_video_vae_bf16.safetensors"
 TARGET_AUDIO_VAE = "LTX23_audio_vae_bf16.safetensors"
 TARGET_TAE = "taeltx2_3.safetensors"
 
-# ⚡ Dual-LoRA Chain Components (Cross-version merging)
 TARGET_DISTILLED_LORA = "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors"
 TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
@@ -86,7 +82,6 @@ def bake_private_workflow_into_image():
 
     raw_path = "/tmp/raw_workflow.json"
     try:
-        # Pulling the newly modified 2.3 API workflow you uploaded
         s3.download_file(
             "video-asset-files-storage-workflow", 
             "Comfyui-workflows-json/ltx-23-new-workflow-modified(api)new.json", 
@@ -151,7 +146,6 @@ def bake_private_workflow_into_image():
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            # Injecting LTX 2.3 specific components
             if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
                 inputs["unet_name"] = TARGET_UNET
                 inputs["ckpt_name"] = TARGET_UNET
@@ -195,8 +189,8 @@ final_image = (
     )
     .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers")
     .run_commands(
+        # ⚡ FIXED: The core rollback command has been removed to allow compatibility with LTX 2.3 Nodes
         "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-        "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
         "pip install -r /workspace/ComfyUI/requirements.txt"
     )
     .run_commands(
@@ -219,7 +213,6 @@ final_image = (
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
     )
-    # ⚡ FIXED: The destructive regex python patch for looping_sampler.py has been completely removed.
     .run_function(bake_private_workflow_into_image)
 )
 
@@ -229,7 +222,6 @@ final_image = (
 
 app = modal.App("ltx-2-3-v20-api")
 
-# ⚡ MODIFICATION: Mapping TWO separate volumes so it can find both the 2.3 base weights AND the old 19b detailer LoRA
 weights_volume_23 = modal.Volume.from_name("ltx-video-weights-23", create_if_missing=True)
 weights_volume_19 = modal.Volume.from_name("ltx-20-19b-weights", create_if_missing=True)
 
@@ -279,7 +271,6 @@ class LTXEngine:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # ⚡ MODIFICATION: Exact Mapping for all LTX 2.3 assets + the old 19b IC-Detailer
         exact_mapping = {
             "gemma_3_12B_it_fp8_scaled.safetensors": ["text_encoders", "text_encoder"],
             "ltx-2.3_text_projection_bf16.safetensors": ["checkpoints"],
@@ -291,7 +282,6 @@ class LTXEngine:
             "taeltx2_3.safetensors": ["vae"]
         }
 
-        # Recursively search both mounted volumes to link assets
         for mount_point in ["/mnt/weights_23", "/mnt/weights_19"]:
             if os.path.exists(mount_point):
                 for root_dir, _, files in os.walk(mount_point):
@@ -366,7 +356,7 @@ class LTXEngine:
 
         image_url = body.get("image_url")
         workflow_str = body.get("workflow")
-        requested_length = body.get("length", 65)  # Defaulting to a clean 16n+1 value
+        requested_length = body.get("length", 65)
         filename_prefix = body.get("filename", "output_video")
 
         if not workflow_str:
@@ -448,7 +438,6 @@ class LTXEngine:
                 else:
                     assignments[l_id] = TARGET_DISTILLED_LORA
 
-        # ⚡ MODIFICATION: LTX-2.3 strict Frame Math Constraint (16n + 1)
         tgt_len = int(requested_length)
         if (tgt_len - 1) % 16 != 0:
             tgt_len = ((tgt_len - 1) // 16) * 16 + 1
@@ -483,12 +472,10 @@ class LTXEngine:
                     node["widgets_values"][0] = resolved
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = "input/dynamic_guides"
-            # Hard-cramming constraints for safety
             elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
-            # ⚡ MODIFICATION: Overriding Decoder limits so 24GB L4 GPU doesn't crash
             elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode"]:
                 inputs["tile_size"] = 512
                 inputs["overlap"] = 64
