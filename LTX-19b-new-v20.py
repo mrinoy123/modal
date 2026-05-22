@@ -27,13 +27,13 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Bind authentication tokens directly to environment to eliminate build-time KeyError issues
+# Clean, ultra-fast environment setup without slow native compilation tasks
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
     "FORCE_CUDA": "1",
     "TORCH_CUDA_ARCH_LIST": "8.9", 
-    "MAX_JOBS": "1",
+    "MAX_JOBS": "4",
     "CC": "gcc",
     "CXX": "g++",
     "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
@@ -209,9 +209,9 @@ final_image = (
 )
 
 
+
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
-
 
 @app.cls(
     gpu="L4", 
@@ -223,7 +223,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
     })],
     memory=8192, 
-    scaledown_window=5,  # Zero-waste scale down
+    scaledown_window=5,  # Zero-waste scale down execution windows
     timeout=3600
 )
 class LTXEngine:
@@ -299,6 +299,7 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # Core Optimization: --mmap-torch-files enables fast disk memory mapping streams
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -321,7 +322,8 @@ class LTXEngine:
                 time.sleep(2)
         os._exit(1)
 
-    @modal.fastapi_endpoint(method="POST")
+
+@modal.web_endpoint(method="POST")
     async def generate(self, body: dict, x_api_key: str = Header(None)):
         import aiohttp
         import json
@@ -337,12 +339,11 @@ class LTXEngine:
         if not workflow_str:
             raise HTTPException(status_code=400, detail="Missing 'workflow' in request body")
 
-        # Parse stringified workflow payload from n8n
         if isinstance(workflow_str, str):
             try:
                 wf_data = json.loads(workflow_str)
             except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid JSON format in workflow parameter: {e}")
+                raise HTTPException(status_code=400, detail=f"Invalid JSON format: {e}")
         else:
             wf_data = workflow_str
 
@@ -358,23 +359,17 @@ class LTXEngine:
             ext = os.path.splitext(image_url.split("?")[0])[1] or ".png"
             target_image_path = os.path.join(dynamic_guides_dir, f"guide_image{ext}")
             
-            # CHANGED: Securely download from R2 using S3 credentials if URL is from our R2 domain
             if "r2.dev" in image_url or R2_ACCOUNT_ID in image_url:
                 parsed_url = urlparse(image_url)
                 key = parsed_url.path.lstrip("/")
                 print(f"🔐 Private Bucket Access Detected. Downloading '{key}' securely via R2 S3 Client...")
                 try:
-                    self.s3.download_file(
-                        "video-asset-files-storage-workflow", 
-                        key, 
-                        target_image_path
-                    )
+                    self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
                     print(f"✅ Securely downloaded private R2 file to {target_image_path}")
                 except Exception as e:
                     print(f"❌ Secure R2 download failed: {e}")
                     raise HTTPException(status_code=400, detail=f"S3 R2 download failure: {e}")
             else:
-                # Public fallback downloader
                 async with aiohttp.ClientSession() as session:
                     async with session.get(image_url) as resp:
                         if resp.status == 200:
@@ -382,7 +377,7 @@ class LTXEngine:
                                 f.write(await resp.read())
                             print(f"✅ Guide image downloaded successfully (Public URL): {target_image_path}")
                         else:
-                            raise HTTPException(status_code=400, detail=f"Failed to download guide image from public URL. HTTP {resp.status}")
+                            raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
 
         # 3. Dynamic Fuzzy Weight Linker (Inject weight names by tracing topology at runtime)
         unet_nodes = []
@@ -400,14 +395,12 @@ class LTXEngine:
             unet_id = unet_nodes[0]
             first_lora, second_lora = None, None
             
-            # Identify first LoRA connected directly to UNET
             for l_id in lora_nodes:
                 model_input = wf_data[l_id].get("inputs", {}).get("model")
                 if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
                     first_lora = l_id
                     break
             
-            # Identify second LoRA chained from the first
             if first_lora:
                 for l_id in lora_nodes:
                     if l_id == first_lora: continue
@@ -421,7 +414,6 @@ class LTXEngine:
                 assignments[first_lora] = TARGET_DISTILLED_LORA
                 assignments[second_lora] = TARGET_DETAILER_LORA
         
-        # Apply semantic backfalls if path tracing is incomplete
         for l_id in lora_nodes:
             if l_id not in assignments:
                 node = wf_data[l_id]
@@ -461,6 +453,19 @@ class LTXEngine:
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = "input/dynamic_guides"
 
+        # 🛡️ THE GRAPH HEALER: Bypasses the strict runtime compilation constraint completely
+        sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
+        if sage_node_id:
+            print("🛡️ Graph Healer Active: Safe bypass layout routing on SageAttention Node...")
+            sage_input = wf_data[sage_node_id]["inputs"].get("model")
+            if sage_input:
+                for node_id, node_data in wf_data.items():
+                    if isinstance(node_data, dict) and "inputs" in node_data:
+                        for k, v in node_data["inputs"].items():
+                            if isinstance(v, list) and len(v) > 0 and str(v[0]) == str(sage_node_id):
+                                node_data["inputs"][k] = sage_input
+            del wf_data[sage_node_id]
+
         # 4. Trigger local ComfyUI API Execution
         print("⚡ Dispatching processed workflow to ComfyUI local endpoint...")
         comfy_url = "http://127.0.0.1:8188/prompt"
@@ -470,7 +475,6 @@ class LTXEngine:
             async with session.post(comfy_url, json=payload) as resp:
                 if resp.status != 200:
                     err_txt = await resp.text()
-                    print(f"❌ ComfyUI local queue rejected: {err_txt}")
                     raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_txt}")
                 
                 res_json = await resp.json()
@@ -505,7 +509,6 @@ class LTXEngine:
                         output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
                         break
             
-            # Fallback path checking if history nested keys are absent
             if not output_file_path or not os.path.exists(output_file_path):
                 output_dir = "/workspace/ComfyUI/output"
                 files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if filename_prefix in f]
@@ -526,7 +529,6 @@ class LTXEngine:
                     ExtraArgs={"ContentType": "video/mp4"}
                 )
                 
-                # Generate signed URL valid for 24 hours
                 signed_url = self.s3.generate_presigned_url(
                     'get_object',
                     Params={
@@ -542,3 +544,6 @@ class LTXEngine:
             except Exception as e:
                 print(f"❌ Failed to transfer output asset to Cloudflare R2: {e}")
                 raise HTTPException(status_code=500, detail=f"R2 asset storage exception: {e}")
+
+
+    
