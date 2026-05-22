@@ -63,7 +63,7 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# Purpose: Pre-downloads the master workflow from Cloudflare R2 during container build time, traces the node connections to assign the correct LoRAs, and seals the preconfigured JSON directly into the image disk for faster boot times.
+# Purpose: Pre-downloads the master workflow, injects the Execution Fence logic, and routes explicit model pathways into the prebaked appliance image.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -95,29 +95,30 @@ def bake_private_workflow_into_image():
         if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
             wf_data = wf_data["workflow"]
 
-        print("🏗️ Build Phase: Executing Topological Graph Tracing for Multi-LoRA Injections...")
+        print("🏗️ Build Phase: Executing Topological Graph Tracing for Multi-LoRA & Execution Fence Injections...")
         
         unet_nodes = []
         lora_nodes = []
+        text_loader_id = None
         for node_id, node in wf_data.items():
             if not isinstance(node, dict): continue
             cls = node.get("class_type", "")
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
                 unet_nodes.append(node_id)
             elif cls == "LoraLoader":
                 lora_nodes.append(node_id)
+            elif cls == "LTXAVTextEncoderLoader":
+                text_loader_id = node_id
 
         assignments = {}
         if unet_nodes and len(lora_nodes) >= 2:
             unet_id = unet_nodes[0]
             first_lora, second_lora = None, None
-            
             for l_id in lora_nodes:
                 model_input = wf_data[l_id].get("inputs", {}).get("model")
                 if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
                     first_lora = l_id
                     break
-            
             if first_lora:
                 for l_id in lora_nodes:
                     if l_id == first_lora: continue
@@ -147,11 +148,18 @@ def bake_private_workflow_into_image():
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+            # ⚡ Injection of the LowVRAM Execution Fence 
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
+                node["class_type"] = "LowVRAMUNETLoader"
                 inputs["unet_name"] = TARGET_UNET
                 inputs["ckpt_name"] = TARGET_UNET
+                if "weight_dtype" not in inputs:
+                    inputs["weight_dtype"] = "default"
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                     node["widgets_values"][0] = TARGET_UNET
+                if text_loader_id:
+                    inputs["dependencies"] = [text_loader_id, 0] # Forces text encoder to clear before NVMe mapping
+
             elif cls == "LTXAVTextEncoderLoader":
                 inputs["text_encoder"] = TARGET_GEMMA
                 inputs["ckpt_name"] = TARGET_CONNECTOR
@@ -179,7 +187,7 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Installs ComfyUI and all required custom repositories. Injects precise Python monkey patches to correct bugs inside 'ComfyUI-LTXVideo' core files (like `precompute_freqs_cis` and `kornia.pad`) so the nodes register without validation failure on startup.
+# Purpose: Applies necessary backwards-compatibility patches, establishes the 2GB VRAM reserve rule, and deploys the Execution Fence node directly into the application space.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -188,7 +196,6 @@ def patch_ltx_video_imports():
     if os.path.exists(init_path):
         with open(init_path, "r") as f:
             content = f.read()
-        
         patch_code = (
             "import sys\n"
             "import torch\n"
@@ -211,7 +218,6 @@ def patch_ltx_video_imports():
             "except Exception as e:\n"
             "    print(f'⚠️ Warning: LTX-Video import monkeypatch failed: {e}')\n"
         )
-        
         with open(init_path, "w") as f:
             f.write(patch_code + content)
         print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
@@ -222,11 +228,9 @@ def patch_comfy_lightricks_model():
     if os.path.exists(model_path):
         with open(model_path, "r") as f:
             content = f.read()
-        
         if "def precompute_freqs_cis" not in content:
             print("🔧 Patching comfy/ldm/lightricks/model.py to add backward compatibility helpers...")
             fallback_code = """
-
 # --- LTX-Video/LTX-2.3 Compatibility Patch ---
 import torch
 import math
@@ -275,36 +279,82 @@ def patch_ltx_kornia_pad():
     if os.path.exists(pyramid_blending_path):
         with open(pyramid_blending_path, "r") as f:
             lines = f.readlines()
-        
         print("🔧 Patching pyramid_blending.py to resolve kornia pad Import Error...")
         new_lines = []
         in_pyramid_import = False
         patched = False
-        
         for line in lines:
             if "from kornia.geometry.transform.pyramid import" in line:
                 in_pyramid_import = True
                 new_lines.append(line)
                 continue
-            
             if in_pyramid_import:
                 if ")" in line:
                     in_pyramid_import = False
-                
                 import re
                 if re.search(r'\bpad\b', line):
                     patched = True
                     line = re.sub(r'\bpad\b\s*,?', '', line)
                     if line.strip() == "," or not line.strip():
                         continue
-            
             new_lines.append(line)
-            
         if patched:
             new_lines.insert(0, "from torch.nn.functional import pad\n")
             with open(pyramid_blending_path, "w") as f:
                 f.writelines(new_lines)
             print("✅ Successfully patched pyramid_blending.py!")
+
+def patch_comfyui_model_management():
+    import os
+    mm_path = "/workspace/ComfyUI/comfy/model_management.py"
+    if os.path.exists(mm_path):
+        with open(mm_path, "a") as f:
+            f.write("\n# --- 2.0 GB VRAM Reservation Patch ---\n")
+            f.write("import sys\n")
+            f.write("_orig_get_free_memory = get_free_memory\n")
+            f.write("def get_free_memory(dev=None, torch_free_too=False):\n")
+            f.write("    free_mem = _orig_get_free_memory(dev, torch_free_too)\n")
+            f.write("    reserve_bytes = 2 * 1024 * 1024 * 1024  # Force strict 2.0 GB Reserve for NVMe mapping safety\n")
+            f.write("    return max(0, free_mem - reserve_bytes)\n")
+        print("✅ Successfully injected 2.0 GB VRAM Reservation into ComfyUI allocator!")
+
+def install_execution_fence_node():
+    import os
+    os.makedirs("/workspace/ComfyUI/custom_nodes", exist_ok=True)
+    node_path = "/workspace/ComfyUI/custom_nodes/LowVRAM_Execution_Fence.py"
+    code = """
+import folder_paths
+import nodes
+import gc
+import torch
+import ctypes
+
+class LowVRAMUNETLoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": { "unet_name": (folder_paths.get_filename_list("diffusion_models"), ),
+                              "weight_dtype": (["default", "fp8_e4m3fn", "fp8_e5m2"],) },
+                "optional": { "dependencies": ("*", )}}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_unet"
+    CATEGORY = "advanced/loaders"
+
+    def load_unet(self, unet_name, weight_dtype="default", dependencies=None):
+        print("🛡️ Execution Fence Triggered! Flushing text-encoder memory before NVMe streaming UNet...")
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        return nodes.UNETLoader().load_unet(unet_name, weight_dtype)
+
+NODE_CLASS_MAPPINGS = { "LowVRAMUNETLoader": LowVRAMUNETLoader }
+NODE_DISPLAY_NAME_MAPPINGS = { "LowVRAMUNETLoader": "🛡️ LowVRAM Execution Fence UNET Loader" }
+"""
+    with open(node_path, "w") as f:
+        f.write(code)
+    print("✅ Successfully installed custom LowVRAM Execution Fence Node!")
 
 final_image = (
     build_image.pip_install(
@@ -318,28 +368,28 @@ final_image = (
         "comfyui-workflow-templates", "peft"
     )
     .run_commands(
-        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_v3",
-        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_v3"
+        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_v4",
+        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_v4"
     )
     .run_commands(
-        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor # cache_bust=2026_05_23_v3",
-        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_v3"
+        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor # cache_bust=2026_05_23_v4",
+        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_v4"
     )
     .run_commands(
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_v3",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_v3"
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_v4",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_v4"
     )
     .run_commands(
-        "pip install kornia==0.6.12 # cache_bust=2026_05_23_v3"
+        "pip install kornia==0.6.12 # cache_bust=2026_05_23_v4"
     )
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
@@ -347,12 +397,14 @@ final_image = (
     .run_function(patch_comfy_lightricks_model)
     .run_function(patch_ltx_video_imports)
     .run_function(patch_ltx_kornia_pad)
+    .run_function(install_execution_fence_node)
+    .run_function(patch_comfyui_model_management)
     .run_function(bake_private_workflow_into_image)
 )
 
 # ==========================================
 # PART 4: Production Class Definition & Resource Reclamation Loops
-# Purpose: Manages the Modal lifecycle, attaches the dual storage volumes for LTX-2.3 and 19b LoRA weights, symlinks models into expected ComfyUI directories to prevent validation failures, and initiates background garbage collection to maintain stable memory pressure.
+# Purpose: Manages the Modal lifecycle, attaches the dual storage volumes, prevents validation failures, and initiates background garbage collection to maintain stable System RAM thresholds.
 # ==========================================
 
 app = modal.App("ltx-2-3-v20-api")
@@ -486,11 +538,10 @@ except Exception as e:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # ⚡ FIXED: Added "checkpoints" to the audio VAE path arrays to prevent Node 228/232 validation failure
         exact_mapping = {
             "gemma_3_12B_it_fp8_scaled.safetensors": ["text_encoders"],
             "ltx-2.3_text_projection_bf16.safetensors": ["checkpoints"],
-            "ltx-2.3-22b-dev-fp8.safetensors": ["unet"],
+            "ltx-2.3-22b-dev-fp8.safetensors": ["unet", "diffusion_models"],
             "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors": ["loras"],
             "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
             "LTX23_audio_vae_bf16.safetensors": ["checkpoints", "vae"],
@@ -515,7 +566,6 @@ except Exception as e:
                                     except Exception as e:
                                         print(f"⚠️ Failed linking {filename}: {e}")
 
-        # Inject system memory limits before starting server
         self.patch_comfyui_main_ram()
 
         self.s3 = boto3.client(
@@ -526,7 +576,7 @@ except Exception as e:
             region_name="auto"
         )
 
-        print("🚀 Launching Clean LTX-2.3 Server Engine...")
+        print("🚀 Launching Clean LTX-2.3 NVMe-Streaming Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
@@ -538,6 +588,7 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # ⚡ Direct Hard Drive mapping configured via flags
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -548,7 +599,6 @@ except Exception as e:
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
 
-        # Start background watchdog RAM collector to keep host memory clean
         asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
 
         start_time = time.time()
@@ -566,7 +616,7 @@ except Exception as e:
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
-# Purpose: Intercepts POST requests, modifies the JSON payload dynamically to insert the generated image URLs and workflow parameters. Adjusts decoder constraints to prevent VRAM crashes while keeping parameter injections safely isolated by node class.
+# Purpose: Intercepts POST requests, modifies the JSON payload dynamically to insert the Execution Fence, and applies 2.3 constraints to maximize performance.
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -627,13 +677,16 @@ except Exception as e:
 
         unet_nodes = []
         lora_nodes = []
+        text_loader_id = None
         for node_id, node in wf_data.items():
             if not isinstance(node, dict): continue
             cls = node.get("class_type", "")
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
                 unet_nodes.append(node_id)
             elif cls == "LoraLoader":
                 lora_nodes.append(node_id)
+            elif cls == "LTXAVTextEncoderLoader":
+                text_loader_id = node_id
 
         assignments = {}
         if unet_nodes and len(lora_nodes) >= 2:
@@ -680,11 +733,18 @@ except Exception as e:
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+            # ⚡ The Dynamic API Injection: Intercepts the standard loader, changes the class to our custom Fence, and attaches the text encoder dependency so they stream sequentially.
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
+                node["class_type"] = "LowVRAMUNETLoader"
                 inputs["unet_name"] = TARGET_UNET
                 inputs["ckpt_name"] = TARGET_UNET
+                if "weight_dtype" not in inputs:
+                    inputs["weight_dtype"] = "default"
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                     node["widgets_values"][0] = TARGET_UNET
+                if text_loader_id:
+                    inputs["dependencies"] = [text_loader_id, 0]
+
             elif cls == "LTXAVTextEncoderLoader":
                 inputs["text_encoder"] = TARGET_GEMMA
                 inputs["ckpt_name"] = TARGET_CONNECTOR
@@ -705,7 +765,6 @@ except Exception as e:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
-            # ⚡ FIXED: Isolated LTXVSpatioTemporalTiledVAEDecode parameter injection to prevent overwriting JSON keys that trigger output validation failures
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
             elif cls in ["VAEDecodeTiled", "VAEDecode"]:
@@ -726,7 +785,7 @@ except Exception as e:
                                 node_data["inputs"][k] = sage_input
             del wf_data[sage_node_id]
 
-        print("⚡ Dispatching LTX-2.3 workflow to local endpoint...")
+        print("⚡ Dispatching NVMe Stream-Optimized LTX-2.3 workflow to local endpoint...")
         comfy_url = "http://127.0.0.1:8188/prompt"
         payload = {"prompt": wf_data}
         
