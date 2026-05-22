@@ -13,6 +13,10 @@ import uuid
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
+# ==========================================
+# PART 1: Infrastructure Configuration & Base Image
+# ==========================================
+
 # Cloudflare R2 explicit provisioning configurations
 R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
 R2_ACCESS_KEY_ID = "3c33425ba6e5abbd3e63afab14dc8866"
@@ -58,6 +62,9 @@ TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
 TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
 TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
+# ==========================================
+# PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
+# ==========================================
 
 def bake_private_workflow_into_image():
     import boto3
@@ -170,6 +177,9 @@ def bake_private_workflow_into_image():
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
+# ==========================================
+# PART 3: Advanced Optimization Patches & Custom Node Installation
+# ==========================================
 
 final_image = (
     build_image.pip_install(
@@ -197,7 +207,6 @@ final_image = (
         "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor"
     )
     .run_commands(
-        "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before='2026-03-01' HEAD)",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
     )
@@ -207,6 +216,10 @@ final_image = (
     )
     .run_function(bake_private_workflow_into_image)
 )
+
+# ==========================================
+# PART 4: Production Class Definition & Resource Reclamation Loops
+# ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -222,7 +235,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "API_KEY": "secure-video-n8n-workflow-2026"
     })],
     memory=8192, 
-    scaledown_window=5,  # Zero-waste scale down execution windows
+    scaledown_window=5,  
     timeout=3600
 )
 class LTXEngine:
@@ -298,7 +311,6 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Core Optimization: --mmap-torch-files enables fast disk memory mapping streams
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -320,6 +332,10 @@ class LTXEngine:
             except Exception:
                 time.sleep(2)
         os._exit(1)
+
+# ==========================================
+# PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
+# ==========================================
 
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, body: dict, x_api_key: str = Header(None)):
@@ -348,13 +364,11 @@ class LTXEngine:
         else:
             wf_data = workflow_str
 
-        # 1. Clean dynamic guide directory to prevent overlapping resources
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
         if os.path.exists(dynamic_guides_dir):
             shutil.rmtree(dynamic_guides_dir)
         os.makedirs(dynamic_guides_dir, exist_ok=True)
 
-        # 2. Download dynamic guide image if provided in payload
         if image_url:
             print(f"📥 Downloading dynamic guide image: {image_url}")
             ext = os.path.splitext(image_url.split("?")[0])[1] or ".png"
@@ -380,7 +394,6 @@ class LTXEngine:
                         else:
                             raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
 
-        # 3. Dynamic Fuzzy Weight Linker (Inject weight names by tracing topology at runtime)
         unet_nodes = []
         lora_nodes = []
         for node_id, node in wf_data.items():
@@ -424,7 +437,6 @@ class LTXEngine:
                 else:
                     assignments[l_id] = TARGET_DISTILLED_LORA
 
-        # Inject final matched target filenames into the operational execution dict
         for node_id, node in wf_data.items():
             if not isinstance(node, dict) or "inputs" not in node:
                 continue
@@ -454,7 +466,6 @@ class LTXEngine:
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = "input/dynamic_guides"
 
-        # 🛡️ THE GRAPH HEALER: Bypasses the strict runtime compilation constraint completely
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
             print("🛡️ Graph Healer Active: Safe bypass layout routing on SageAttention Node...")
@@ -467,7 +478,6 @@ class LTXEngine:
                                 node_data["inputs"][k] = sage_input
             del wf_data[sage_node_id]
 
-        # 4. Trigger local ComfyUI API Execution
         print("⚡ Dispatching processed workflow to ComfyUI local endpoint...")
         comfy_url = "http://127.0.0.1:8188/prompt"
         payload = {"prompt": wf_data}
@@ -482,7 +492,6 @@ class LTXEngine:
                 prompt_id = res_json.get("prompt_id")
                 print(f"🎉 Job queued successfully. Prompt ID: {prompt_id}")
 
-            # 5. Poll local History endpoint for generation complete
             history_url = f"http://127.0.0.1:8188/history/{prompt_id}"
             print("⏳ Polling local ComfyUI history for rendering outputs...")
             
@@ -495,7 +504,6 @@ class LTXEngine:
                             break
                 await asyncio.sleep(2)
 
-            # 6. Locate final compiled video file on disk
             outputs = hist_data[prompt_id].get("outputs", {})
             output_file_path = None
             for node_id, node_output in outputs.items():
@@ -518,7 +526,6 @@ class LTXEngine:
                 else:
                     raise HTTPException(status_code=500, detail="Output video file not found in output directory")
 
-            # 7. Upload final video to Cloudflare R2 and generate temporary secure URL
             r2_output_key = f"rendered-videos/{uuid.uuid4()}_{os.path.basename(output_file_path)}"
             print(f"📤 Uploading final rendering to Cloudflare R2 path: {r2_output_key}")
             
