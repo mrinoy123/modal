@@ -203,7 +203,7 @@ final_image = (
     )
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
-        "sed -i 's/guider.raw_conds/guider.inner_set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+        "sed -i 's/guider.raw_conds/guider.inner_set_conds()/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
     )
     .run_function(bake_private_workflow_into_image)
 )
