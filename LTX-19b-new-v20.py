@@ -1,6 +1,6 @@
-==========================================
-PART 1: Infrastructure Setup & Base Dependencies
-==========================================
+# ==========================================
+# PART 1: Infrastructure Setup & Base Dependencies
+# ==========================================
 
 import modal
 import subprocess
@@ -45,9 +45,9 @@ build_image = base_image.env({
 )
 
 
-==========================================
-PART 2: The Secure Build-Time Appliance Baker
-==========================================
+# ==========================================
+# PART 2: The Secure Build-Time Appliance Baker
+# ==========================================
 
 
 def bake_private_workflow_into_image():
@@ -134,10 +134,9 @@ def bake_private_workflow_into_image():
     print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
 
 
-
-==========================================
-PART 3: ComfyUI Installation & Private Pipeline Injection
-==========================================
+# ==========================================
+# PART 3: ComfyUI Installation & Private Pipeline Injection
+# ==========================================
 
 
 final_image = (
@@ -187,9 +186,9 @@ final_image = (
     .run_function(bake_private_workflow_into_image, secrets=[modal.Secret.from_name("video-generator-workflow")])
 )
 
-==========================================
-PART 4: The Serverless Runtime & Dynamic Scene Processor
-==========================================
+# ==========================================
+# PART 4: The Serverless Runtime & Dynamic Scene Processor
+# ==========================================
 
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -441,4 +440,3 @@ class LTXEngine:
                     return Response(content=f.read(), media_type="video/mp4")
         finally:
             ram_task.cancel()
-    
