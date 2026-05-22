@@ -203,16 +203,20 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 class LTXEngine:
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
-            if line: print(f"[ComfyUI] {line.strip()}")
+            if line:
+                print(f"[ComfyUI] {line.strip()}")
 
     async def _ram_squeezer(self):
         print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
             try:
-                with open('/proc/sys/vm/drop_caches', 'w') as f: f.write('1\n')
+                with open('/proc/sys/vm/drop_caches', 'w') as f:
+                    f.write('1\n')
             except Exception:
-                try: ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception: pass
+                try:
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
             await asyncio.sleep(2)
 
     @modal.enter()
@@ -222,7 +226,8 @@ class LTXEngine:
         base_models_dir = "/workspace/ComfyUI/models"
         
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
-        for d in dirs: os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
+        for d in dirs:
+            os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         exact_mapping = {
             "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
@@ -241,8 +246,10 @@ class LTXEngine:
                         for target_dir in exact_mapping[filename]:
                             dest = os.path.join(base_models_dir, target_dir, filename)
                             if not os.path.exists(dest):
-                                try: os.symlink(src_path, dest)
-                                except FileExistsError: pass
+                                try:
+                                    os.symlink(src_path, dest)
+                                except FileExistsError:
+                                    pass
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -275,13 +282,15 @@ class LTXEngine:
 
         start_time = time.time()
         while time.time() - start_time < 300:
-            if self.process.poll() is not None: os._exit(1)
+            if self.process.poll() is not None:
+                os._exit(1)
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
                     if response.status == 200:
                         print("⚡ LTX-2 API ONLINE!")
                         return
-            except Exception: time.sleep(2)
+            except Exception:
+                time.sleep(2)
         os._exit(1)
 
 # ==========================================
@@ -295,8 +304,10 @@ class LTXEngine:
         
         body = await request.json()
         if isinstance(body, dict):
-            if "json" in body: body = body["json"]
-            elif "body" in body: body = body["body"]
+            if "json" in body:
+                body = body["json"]
+            elif "body" in body:
+                body = body["body"]
 
         image_url = body.get("image_url")
         requested_length = body.get("length", 73)
@@ -313,8 +324,10 @@ class LTXEngine:
         workflow = None
         if inbound_wf:
             if isinstance(inbound_wf, str):
-                try: workflow = json.loads(inbound_wf)
-                except Exception: pass
+                try:
+                    workflow = json.loads(inbound_wf)
+                except Exception:
+                    pass
             elif isinstance(inbound_wf, dict):
                 workflow = inbound_wf
 
@@ -333,7 +346,8 @@ class LTXEngine:
         # (Guarantees no filename conflicts, even if n8n modified the graph)
         def fuzzy_linker(wf_data):
             for node_id, node in wf_data.items():
-                if not isinstance(node, dict) or "inputs" not in node: continue
+                if not isinstance(node, dict) or "inputs" not in node:
+                    continue
                 cls = node.get("class_type", "")
                 inputs = node["inputs"]
                 
@@ -370,7 +384,8 @@ class LTXEngine:
             tgt_len = int(requested_length)
             if (tgt_len - 1) % 8 != 0:
                 tgt_len = ((tgt_len - 1) // 8) * 8 + 1
-                if tgt_len < 9: tgt_len = 9
+                if tgt_len < 9:
+                    tgt_len = 9
 
             schedule_lines = []
             for frame, p_text in prompt_timeline.items():
@@ -404,7 +419,8 @@ class LTXEngine:
                     inputs["temporal_overlap"] = 8
                 elif cls == "VHS_VideoCombine":
                     inputs["frame_rate"] = 24
-                    if "filename_prefix" in inputs: inputs["filename_prefix"] = filename_prefix
+                    if "filename_prefix" in inputs:
+                        inputs["filename_prefix"] = filename_prefix
 
             sage_node_id = next((k for k, v in workflow.items() if v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
             if sage_node_id:
@@ -422,12 +438,14 @@ class LTXEngine:
 
         # 4. DOWNLOAD GUIDING ASSETS
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
-        if os.path.exists(dynamic_guides_dir): shutil.rmtree(dynamic_guides_dir)
+        if os.path.exists(dynamic_guides_dir):
+            shutil.rmtree(dynamic_guides_dir)
         os.makedirs(dynamic_guides_dir, exist_ok=True)
 
         urls_to_download = []
         if image_url:
-            if isinstance(image_url, list): urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
+            if isinstance(image_url, list):
+                urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
             elif isinstance(image_url, str) and image_url.strip():
                 urls_to_download = [u.strip() for u in image_url.split(",")] if "," in image_url else [image_url.strip()]
 
@@ -443,14 +461,17 @@ class LTXEngine:
                 
                 if is_r2_storage:
                     file_key = parsed.path.lstrip('/')
-                    while "//" in file_key: file_key = file_key.replace("//", "/")
+                    while "//" in file_key:
+                        file_key = file_key.replace("//", "/")
                     await asyncio.get_event_loop().run_in_executor(None, self.s3.download_file, "video-asset-files-storage-workflow", file_key, target_dest)
                 else:
                     try:
                         async with session.get(url_str, timeout=120) as r:
                             if r.status == 200:
-                                with open(target_dest, "wb") as f: f.write(await r.read())
-                            else: raise Exception(f"HTTP {r.status}")
+                                with open(target_dest, "wb") as f:
+                                    f.write(await r.read())
+                            else:
+                                raise Exception(f"HTTP {r.status}")
                     except Exception:
                         await asyncio.get_event_loop().run_in_executor(None, urllib.request.urlretrieve, url_str, target_dest)
 
@@ -459,7 +480,8 @@ class LTXEngine:
                 await asyncio.gather(*tasks)
 
         out_dir = "/workspace/ComfyUI/output"
-        if os.path.exists(out_dir): shutil.rmtree(out_dir)
+        if os.path.exists(out_dir):
+            shutil.rmtree(out_dir)
         os.makedirs(out_dir)
 
         ram_task = asyncio.create_task(self._ram_squeezer())
@@ -475,21 +497,27 @@ class LTXEngine:
 
                 start_time = time.time()
                 while True:
-                    if self.process.poll() is not None: raise HTTPException(status_code=500, detail="Backend failed.")
+                    if self.process.poll() is not None:
+                        raise HTTPException(status_code=500, detail="Backend failed.")
                     async with session.get("http://127.0.0.1:8188/history") as hist_resp:
                         if hist_resp.status == 200:
                             history = await hist_resp.json()
-                            if prompt_id in history: break
-                    if time.time() - start_time > 2400: raise HTTPException(status_code=540, detail="Timeout.")
+                            if prompt_id in history:
+                                break
+                    if time.time() - start_time > 2400:
+                        raise HTTPException(status_code=540, detail="Timeout.")
                     await asyncio.sleep(5)
 
                 videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
-                if not videos: raise HTTPException(status_code=500, detail="Output file missing.")
+                if not videos:
+                    raise HTTPException(status_code=500, detail="Output file missing.")
+                
                 videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
                 
                 try:
                     await session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True})
-                except Exception: pass
+                except Exception:
+                    pass
 
                 with open(os.path.join(out_dir, videos[0]), "rb") as f:
                     return Response(content=f.read(), media_type="video/mp4")
