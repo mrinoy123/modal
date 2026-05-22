@@ -170,7 +170,6 @@ def bake_private_workflow_into_image():
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
 
-
 final_image = (
     build_image.pip_install(
         "torch==2.5.1",
@@ -209,9 +208,9 @@ final_image = (
 )
 
 
-
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
+
 
 @app.cls(
     gpu="L4", 
@@ -223,7 +222,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
     })],
     memory=8192, 
-    scaledown_window=5,  # Zero-waste billing optimization: scales down 5 seconds after request finishes
+    scaledown_window=5,  # Zero-waste billing optimization
     timeout=3600
 )
 class LTXEngine:
@@ -319,3 +318,211 @@ class LTXEngine:
             except Exception:
                 time.sleep(2)
         os._exit(1)
+
+    @modal.fastapi_endpoint(method="POST")
+    async def generate(self, body: dict, x_api_key: str = Header(None)):
+        # Optional: Security validation if required
+        # if x_api_key != "YOUR_SECRET_KEY":
+        #     raise HTTPException(status_code=401, detail="Unauthorized")
+
+        import aiohttp
+        import json
+        import os
+        import uuid
+        import shutil
+
+        image_url = body.get("image_url")
+        workflow_str = body.get("workflow")
+        filename_prefix = body.get("filename", "output_video")
+
+        if not workflow_str:
+            raise HTTPException(status_code=400, detail="Missing 'workflow' in request body")
+
+        # Parse stringified workflow payload from n8n
+        if isinstance(workflow_str, str):
+            try:
+                wf_data = json.loads(workflow_str)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid JSON format in workflow parameter: {e}")
+        else:
+            wf_data = workflow_str
+
+        # 1. Clean dynamic guide directory to prevent overlapping resources
+        dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
+        if os.path.exists(dynamic_guides_dir):
+            shutil.rmtree(dynamic_guides_dir)
+        os.makedirs(dynamic_guides_dir, exist_ok=True)
+
+        # 2. Download dynamic guide image if provided in payload
+        if image_url:
+            print(f"📥 Downloading dynamic guide image: {image_url}")
+            ext = os.path.splitext(image_url.split("?")[0])[1] or ".png"
+            target_image_path = os.path.join(dynamic_guides_dir, f"guide_image{ext}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url) as resp:
+                    if resp.status == 200:
+                        with open(target_image_path, "wb") as f:
+                            f.write(await resp.read())
+                        print(f"✅ Guide image downloaded successfully: {target_image_path}")
+                    else:
+                        raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
+
+        # 3. Dynamic Fuzzy Weight Linker (Inject weight names by tracing topology at runtime)
+        unet_nodes = []
+        lora_nodes = []
+        for node_id, node in wf_data.items():
+            if not isinstance(node, dict): continue
+            cls = node.get("class_type", "")
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                unet_nodes.append(node_id)
+            elif cls == "LoraLoader":
+                lora_nodes.append(node_id)
+
+        assignments = {}
+        if unet_nodes and len(lora_nodes) >= 2:
+            unet_id = unet_nodes[0]
+            first_lora, second_lora = None, None
+            
+            # Identify first LoRA connected directly to UNET
+            for l_id in lora_nodes:
+                model_input = wf_data[l_id].get("inputs", {}).get("model")
+                if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
+                    first_lora = l_id
+                    break
+            
+            # Identify second LoRA chained from the first
+            if first_lora:
+                for l_id in lora_nodes:
+                    if l_id == first_lora: continue
+                    model_input = wf_data[l_id].get("inputs", {}).get("model")
+                    if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(first_lora):
+                        second_lora = l_id
+                        break
+                        
+            if first_lora and second_lora:
+                print(f"🎯 Dynamic Tracing: UNET -> Node {first_lora} (384) -> Node {second_lora} (Detailer)")
+                assignments[first_lora] = TARGET_DISTILLED_LORA
+                assignments[second_lora] = TARGET_DETAILER_LORA
+        
+        # Apply semantic backfalls if path tracing is incomplete
+        for l_id in lora_nodes:
+            if l_id not in assignments:
+                node = wf_data[l_id]
+                lora_name = str(node.get("inputs", {}).get("lora_name", "")).lower()
+                if "detail" in lora_name or "ic-lora" in lora_name or l_id == "229":
+                    assignments[l_id] = TARGET_DETAILER_LORA
+                else:
+                    assignments[l_id] = TARGET_DISTILLED_LORA
+
+        # Inject final matched target filenames into the operational execution dict
+        for node_id, node in wf_data.items():
+            if not isinstance(node, dict) or "inputs" not in node:
+                continue
+                
+            cls = node.get("class_type", "")
+            inputs = node["inputs"]
+            
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                inputs["unet_name"] = TARGET_UNET
+                inputs["ckpt_name"] = TARGET_UNET
+                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                    node["widgets_values"][0] = TARGET_UNET
+            elif cls == "LTXAVTextEncoderLoader":
+                inputs["text_encoder"] = TARGET_GEMMA
+                inputs["ckpt_name"] = TARGET_CONNECTOR
+            elif cls in ["VAELoaderKJ", "VAELoader"]:
+                inputs["vae_name"] = TARGET_VIDEO_VAE
+                inputs["ckpt_name"] = TARGET_VIDEO_VAE
+            elif cls == "LTXVAudioVAELoader":
+                inputs["ckpt_name"] = TARGET_AUDIO_VAE
+                inputs["vae_name"] = TARGET_AUDIO_VAE
+            elif cls == "LoraLoader":
+                resolved = assignments.get(node_id, TARGET_DISTILLED_LORA)
+                inputs["lora_name"] = resolved
+                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                    node["widgets_values"][0] = resolved
+            elif cls == "DenoMultiImageLoader":
+                inputs["image_paths"] = "input/dynamic_guides"
+
+        # 4. Trigger local ComfyUI API Execution
+        print("⚡ Dispatching processed workflow to ComfyUI local endpoint...")
+        comfy_url = "http://127.0.0.1:8188/prompt"
+        payload = {"prompt": wf_data}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(comfy_url, json=payload) as resp:
+                if resp.status != 200:
+                    err_txt = await resp.text()
+                    print(f"❌ ComfyUI local queue rejected: {err_txt}")
+                    raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_txt}")
+                
+                res_json = await resp.json()
+                prompt_id = res_json.get("prompt_id")
+                print(f"🎉 Job queued successfully. Prompt ID: {prompt_id}")
+
+            # 5. Poll local History endpoint for generation complete
+            history_url = f"http://127.0.0.1:8188/history/{prompt_id}"
+            print("⏳ Polling local ComfyUI history for rendering outputs...")
+            
+            while True:
+                async with session.get(history_url) as resp:
+                    if resp.status == 200:
+                        hist_data = await resp.json()
+                        if prompt_id in hist_data:
+                            print("✅ Local generation task completed.")
+                            break
+                await asyncio.sleep(2)
+
+            # 6. Locate final compiled video file on disk
+            outputs = hist_data[prompt_id].get("outputs", {})
+            output_file_path = None
+            for node_id, node_output in outputs.items():
+                if "gifs" in node_output:
+                    for gif in node_output["gifs"]:
+                        filename = gif.get("filename")
+                        output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
+                        break
+                elif "images" in node_output:
+                    for img in node_output["images"]:
+                        filename = img.get("filename")
+                        output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
+                        break
+            
+            # Fallback path checking if history nested keys are absent
+            if not output_file_path or not os.path.exists(output_file_path):
+                output_dir = "/workspace/ComfyUI/output"
+                files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if filename_prefix in f]
+                if files:
+                    output_file_path = max(files, key=os.path.getmtime)
+                else:
+                    raise HTTPException(status_code=500, detail="Output video file not found in output directory")
+
+            # 7. Upload final video to Cloudflare R2 and generate temporary secure URL
+            r2_output_key = f"rendered-videos/{uuid.uuid4()}_{os.path.basename(output_file_path)}"
+            print(f"📤 Uploading final rendering to Cloudflare R2 path: {r2_output_key}")
+            
+            try:
+                self.s3.upload_file(
+                    output_file_path, 
+                    "video-asset-files-storage-workflow", 
+                    r2_output_key,
+                    ExtraArgs={"ContentType": "video/mp4"}
+                )
+                
+                # Generate signed URL valid for 24 hours
+                signed_url = self.s3.generate_presigned_url(
+                    'get_object',
+                    Params={
+                        'Bucket': "video-asset-files-storage-workflow",
+                        'Key': r2_output_key
+                    },
+                    ExpiresIn=86400
+                )
+                
+                print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
+                return {"status": "success", "video_url": signed_url}
+                
+            except Exception as e:
+                print(f"❌ Failed to transfer output asset to Cloudflare R2: {e}")
+                raise HTTPException(status_code=500, detail=f"R2 asset storage exception: {e}")
