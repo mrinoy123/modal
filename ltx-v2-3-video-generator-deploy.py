@@ -176,7 +176,6 @@ def bake_private_workflow_into_image():
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
-# ⚡ FIXED: Runtime monkey-patch to bypass the LTXBaseModel ImportError on ComfyUI 0.10.x backend
 def patch_ltx_video_imports():
     import os
     init_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
@@ -211,7 +210,6 @@ def patch_ltx_video_imports():
             f.write(patch_code + content)
         print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
 
-# ⚡ FIXED: Global fallback patch directly applied to the core ComfyUI model file to handle potential load-order conflicts
 def patch_comfy_lightricks_model():
     import os
     model_path = "/workspace/ComfyUI/comfy/ldm/lightricks/model.py"
@@ -265,7 +263,6 @@ globals()["apply_rotary_emb"] = apply_rotary_emb
                 f.write(content + fallback_code)
             print("✅ Successfully patched comfy/ldm/lightricks/model.py!")
 
-# ⚡ FIXED: Specific patch for kornia pad import deprecation/movement in pyramid_blending.py
 def patch_ltx_kornia_pad():
     import os
     pyramid_blending_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/pyramid_blending.py"
@@ -288,11 +285,9 @@ def patch_ltx_kornia_pad():
                 if ")" in line:
                     in_pyramid_import = False
                 
-                # Check for whole-word 'pad' inside the import block
                 import re
                 if re.search(r'\bpad\b', line):
                     patched = True
-                    # Strip 'pad' from the kornia import list line safely
                     line = re.sub(r'\bpad\b\s*,?', '', line)
                     if line.strip() == "," or not line.strip():
                         continue
@@ -300,7 +295,6 @@ def patch_ltx_kornia_pad():
             new_lines.append(line)
             
         if patched:
-            # Safely append PyTorch's native functional pad at the top of the file
             new_lines.insert(0, "from torch.nn.functional import pad\n")
             with open(pyramid_blending_path, "w") as f:
                 f.writelines(new_lines)
@@ -323,7 +317,6 @@ final_image = (
         "numpy==1.26.4", "diffusers", "accelerate", "transformers", 
         "comfyui-workflow-templates", "peft"
     )
-    # The '# cache_bust' strings below ensure Modal invalidates any outdated container layers
     .run_commands(
         "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_v3",
         "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_v3"
@@ -345,7 +338,6 @@ final_image = (
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_v3",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_v3"
     )
-    # Force pinning stable kornia to bypass the breaking kornia sub-import deprecations
     .run_commands(
         "pip install kornia==0.6.12 # cache_bust=2026_05_23_v3"
     )
@@ -364,7 +356,8 @@ final_image = (
 
 app = modal.App("ltx-2-3-v20-api")
 
-weights_volume_23 = modal.Volume.from_name("ltx-video-weights-23", create_if_missing=True)
+# FIXED: Corrected the target volume name to match your real Modal Volume ("LTX-2.3-Model-Weights")
+weights_volume_23 = modal.Volume.from_name("LTX-2.3-Model-Weights", create_if_missing=True)
 weights_volume_19 = modal.Volume.from_name("ltx-20-19b-weights", create_if_missing=True)
 
 @app.cls(
@@ -424,6 +417,7 @@ class LTXEngine:
             "taeltx2_3.safetensors": ["vae"]
         }
 
+        # FIXED: Walks the correct volume mounts recursively to locate files and links them dynamically
         for mount_point in ["/mnt/weights_23", "/mnt/weights_19"]:
             if os.path.exists(mount_point):
                 for root_dir, _, files in os.walk(mount_point):
@@ -432,11 +426,15 @@ class LTXEngine:
                             src_path = os.path.join(root_dir, filename)
                             for target_dir in exact_mapping[filename]:
                                 dest = os.path.join(base_models_dir, target_dir, filename)
+                                os.makedirs(os.path.dirname(dest), exist_ok=True)
                                 if not os.path.exists(dest):
                                     try:
                                         os.symlink(src_path, dest)
+                                        print(f"🔗 Linked: {filename} -> models/{target_dir}")
                                     except FileExistsError:
                                         pass
+                                    except Exception as e:
+                                        print(f"⚠️ Failed linking {filename}: {e}")
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -491,6 +489,8 @@ class LTXEngine:
         import os
         import uuid
         import shutil
+        import torch
+        import gc
         from urllib.parse import urlparse
 
         if x_api_key != os.environ.get("API_KEY"):
@@ -618,12 +618,13 @@ class LTXEngine:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
+            # FIXED: 'cuda' is not supported in working_device for LTXVSpatioTemporalTiledVAEDecode, falling back to 'auto'
             elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode"]:
                 inputs["tile_size"] = 512
                 inputs["overlap"] = 64
                 inputs["temporal_tile_length"] = 8
                 inputs["temporal_overlap"] = 4
-                inputs["working_device"] = "cuda"
+                inputs["working_device"] = "auto"
 
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
@@ -703,6 +704,14 @@ class LTXEngine:
                     },
                     ExpiresIn=86400
                 )
+                
+                # Active VRAM and Garbage collection sweep
+                gc.collect()
+                torch.cuda.empty_cache()
+                try:
+                    ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
                 
                 print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
                 return {"status": "success", "video_url": signed_url}
