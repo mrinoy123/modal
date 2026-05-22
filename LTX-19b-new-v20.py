@@ -209,7 +209,6 @@ final_image = (
 )
 
 
-
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -323,7 +322,7 @@ class LTXEngine:
         os._exit(1)
 
 
-@modal.web_endpoint(method="POST")
+    @modal.web_endpoint(method="POST")
     async def generate(self, body: dict, x_api_key: str = Header(None)):
         import aiohttp
         import json
@@ -544,6 +543,3 @@ class LTXEngine:
             except Exception as e:
                 print(f"❌ Failed to transfer output asset to Cloudflare R2: {e}")
                 raise HTTPException(status_code=500, detail=f"R2 asset storage exception: {e}")
-
-
-    
