@@ -14,8 +14,14 @@ from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
 # ==========================================
-# PART 1: Infrastructure Configuration & Base Dependencies
+# PART 1: Infrastructure Configuration & Base Image
 # ==========================================
+
+# Cloudflare R2 explicit provisioning configurations
+R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
+R2_ACCESS_KEY_ID = "3c33425ba6e5abbd3e63afab14dc8866"
+R2_SECRET_ACCESS_KEY = "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8"
+R2_ENDPOINT_URL = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
@@ -25,6 +31,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
+# Bind authentication tokens directly to environment to eliminate build-time KeyError issues
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -32,7 +39,10 @@ build_image = base_image.env({
     "TORCH_CUDA_ARCH_LIST": "8.9", 
     "MAX_JOBS": "1",
     "CC": "gcc",
-    "CXX": "g++"
+    "CXX": "g++",
+    "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
+    "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
+    "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
 }).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
@@ -52,7 +62,7 @@ TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
 TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
-# PART 2: Secure Build-Time Appliance Baker
+# PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -84,8 +94,55 @@ def bake_private_workflow_into_image():
         if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
             wf_data = wf_data["workflow"]
 
-        print("🏗️ Build Phase: Executing Hardcoded Model Injection Mapping...")
+        print("🏗️ Build Phase: Executing Topological Graph Tracing for Multi-LoRA Injections...")
         
+        unet_nodes = []
+        lora_nodes = []
+        for node_id, node in wf_data.items():
+            if not isinstance(node, dict): continue
+            cls = node.get("class_type", "")
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                unet_nodes.append(node_id)
+            elif cls == "LoraLoader":
+                lora_nodes.append(node_id)
+
+        assignments = {}
+        if unet_nodes and len(lora_nodes) >= 2:
+            unet_id = unet_nodes[0]
+            first_lora, second_lora = None, None
+            
+            # Trace the direct wire flowing straight from UNETLoader out to the first LoraLoader node
+            for l_id in lora_nodes:
+                model_input = wf_data[l_id].get("inputs", {}).get("model")
+                if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
+                    first_lora = l_id
+                    break
+            
+            # Trace the wire flowing out of the first LoraLoader directly into the second LoraLoader node
+            if first_lora:
+                for l_id in lora_nodes:
+                    if l_id == first_lora: continue
+                    model_input = wf_data[l_id].get("inputs", {}).get("model")
+                    if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(first_lora):
+                        second_lora = l_id
+                        break
+                        
+            if first_lora and second_lora:
+                print(f"🎯 Traced Connection Pathway: UNET -> Node {first_lora} (384 LoRA) -> Node {second_lora} (Detailer)")
+                assignments[first_lora] = TARGET_DISTILLED_LORA
+                assignments[second_lora] = TARGET_DETAILER_LORA
+        
+        # Absolute structural safety fallback via semantic text markers if chaining layout varies
+        for l_id in lora_nodes:
+            if l_id not in assignments:
+                node = wf_data[l_id]
+                lora_name = str(node.get("inputs", {}).get("lora_name", "")).lower()
+                if "detail" in lora_name or "ic-lora" in lora_name or l_id == "229":
+                    assignments[l_id] = TARGET_DETAILER_LORA
+                else:
+                    assignments[l_id] = TARGET_DISTILLED_LORA
+
+        # Inject accurate asset configurations mapping directly to storage volumes
         for node_id, node in wf_data.items():
             if not isinstance(node, dict) or "inputs" not in node:
                 continue
@@ -108,13 +165,7 @@ def bake_private_workflow_into_image():
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
             elif cls == "LoraLoader":
-                current_lora = str(inputs.get("lora_name", "")).lower()
-                
-                if node_id == "229" or "detail" in current_lora or "ic-lora" in current_lora:
-                    resolved = TARGET_DETAILER_LORA
-                else:
-                    resolved = TARGET_DISTILLED_LORA
-                    
+                resolved = assignments.get(node_id, TARGET_DISTILLED_LORA)
                 inputs["lora_name"] = resolved
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                     node["widgets_values"][0] = resolved
@@ -128,6 +179,10 @@ def bake_private_workflow_into_image():
         print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
+
+# ==========================================
+# PART 3: Advanced Optimization Patches & Custom Node Installation
+# ==========================================
 
 final_image = (
     build_image.pip_install(
@@ -163,11 +218,11 @@ final_image = (
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
         "sed -i 's/guider.raw_conds/guider.inner_set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
     )
-    .run_function(bake_private_workflow_into_image, secrets=[modal.Secret.from_name("video-generator-workflow")])
+    .run_function(bake_private_workflow_into_image)
 )
 
 # ==========================================
-# PART 3: Reclamation Loops & Storage Linker
+# PART 4: Production Class Definition & Resource Reclamation Loops
 # ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -177,10 +232,14 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     gpu="L4", 
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
-    secrets=[modal.Secret.from_name("video-generator-workflow")], 
+    env_vars={
+        "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
+        "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
+        "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
+    },
     memory=8192, 
-    scaledown_window=60,
-    timeout=3600 
+    scaledown_window=5,  # Zero-waste billing optimization: scales down 5 seconds after request finishes
+    timeout=3600
 )
 class LTXEngine:
     def _log_reader(self):
@@ -236,9 +295,9 @@ class LTXEngine:
 
         self.s3 = boto3.client(
             service_name='s3', 
-            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", 
-            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], 
-            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], 
+            endpoint_url=R2_ENDPOINT_URL, 
+            aws_access_key_id=R2_ACCESS_KEY_ID, 
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY, 
             region_name="auto"
         )
 
@@ -277,7 +336,7 @@ class LTXEngine:
         os._exit(1)
 
 # ==========================================
-# PART 4: Hybrid Gateway Interceptor & Runtime Execution
+# PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -325,6 +384,45 @@ class LTXEngine:
             workflow = workflow["workflow"]
 
         def fuzzy_linker(wf_data):
+            unet_nodes = []
+            lora_nodes = []
+            for node_id, node in wf_data.items():
+                if not isinstance(node, dict): continue
+                cls = node.get("class_type", "")
+                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+                    unet_nodes.append(node_id)
+                elif cls == "LoraLoader":
+                    lora_nodes.append(node_id)
+
+            assignments = {}
+            if unet_nodes and len(lora_nodes) >= 2:
+                unet_id = unet_nodes[0]
+                first_lora, second_lora = None, None
+                for l_id in lora_nodes:
+                    model_input = wf_data[l_id].get("inputs", {}).get("model")
+                    if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
+                        first_lora = l_id
+                        break
+                if first_lora:
+                    for l_id in lora_nodes:
+                        if l_id == first_lora: continue
+                        model_input = wf_data[l_id].get("inputs", {}).get("model")
+                        if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(first_lora):
+                            second_lora = l_id
+                            break
+                if first_lora and second_lora:
+                    assignments[first_lora] = TARGET_DISTILLED_LORA
+                    assignments[second_lora] = TARGET_DETAILER_LORA
+
+            for l_id in lora_nodes:
+                if l_id not in assignments:
+                    node = wf_data[l_id]
+                    lora_name = str(node.get("inputs", {}).get("lora_name", "")).lower()
+                    if "detail" in lora_name or "ic-lora" in lora_name or l_id == "229":
+                        assignments[l_id] = TARGET_DETAILER_LORA
+                    else:
+                        assignments[l_id] = TARGET_DISTILLED_LORA
+
             for node_id, node in wf_data.items():
                 if not isinstance(node, dict) or "inputs" not in node:
                     continue
@@ -346,13 +444,7 @@ class LTXEngine:
                     inputs["ckpt_name"] = TARGET_AUDIO_VAE
                     inputs["vae_name"] = TARGET_AUDIO_VAE
                 elif cls == "LoraLoader":
-                    current_lora = str(inputs.get("lora_name", "")).lower()
-                    
-                    if node_id == "229" or "detail" in current_lora or "ic-lora" in current_lora:
-                        resolved = TARGET_DETAILER_LORA
-                    else:
-                        resolved = TARGET_DISTILLED_LORA
-                        
+                    resolved = assignments.get(node_id, TARGET_DISTILLED_LORA)
                     inputs["lora_name"] = resolved
                     if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                         node["widgets_values"][0] = resolved
@@ -483,14 +575,13 @@ class LTXEngine:
                                 history = await hist_resp.json()
                                 if prompt_id in history:
                                     break
-                    except Exception as e:
+                    except Exception:
                         pass
                         
                     if time.time() - start_time > 2400:
                         raise HTTPException(status_code=540, detail="Timeout.")
                     await asyncio.sleep(5)
 
-            # Check inside ComfyUI's native output directory since VHS_VideoCombine routes there automatically
             native_out_dir = "/workspace/ComfyUI/output"
             videos = [v for v in os.listdir(native_out_dir) if v.startswith(unique_filename_prefix) and v.endswith((".mp4", ".mkv", ".webm"))]
             
