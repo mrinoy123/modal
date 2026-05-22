@@ -56,7 +56,6 @@ TARGET_GEMMA = "gemma_3_12B_it_fp8_scaled.safetensors"
 TARGET_CONNECTOR = "ltx-2.3_text_projection_bf16.safetensors"
 TARGET_VIDEO_VAE = "LTX23_video_vae_bf16.safetensors"
 TARGET_AUDIO_VAE = "LTX23_audio_vae_bf16.safetensors"
-TARGET_TAE = "taeltx2_3.safetensors"
 
 TARGET_DISTILLED_LORA = "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors"
 TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
@@ -370,7 +369,7 @@ weights_volume_19 = modal.Volume.from_name("ltx-20-19b-weights", create_if_missi
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
         "API_KEY": "secure-video-n8n-workflow-2026"
     })],
-    memory=8192,  # RESTORED: Capped to 8GB system memory to minimize execution credits cost
+    memory=8192,  # Configured to 8GB system memory
     scaledown_window=5,  
     timeout=3600
 )
@@ -394,7 +393,7 @@ class LTXEngine:
                 pass
             await asyncio.sleep(2)
 
-    # NEW: Runtime Mock to limit ComfyUI memory to 6GB and prevent host RAM mapping caching
+    # UPDATED: We inject a background thread directly into 'main.py' to monkeypatch 'raw_conds' on guiders and limit system RAM
     def patch_comfyui_main_ram(self):
         main_path = "/workspace/ComfyUI/main.py"
         if os.path.exists(main_path):
@@ -414,11 +413,65 @@ def mock_virtual_memory():
     return MockVM()
 psutil.virtual_memory = mock_virtual_memory
 print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
+
+# --- Guider raw_conds backward-compatibility patch ---
+try:
+    import threading
+    import time
+    def background_patcher():
+        try:
+            patched = False
+            while not patched:
+                import sys
+                if "comfy.samplers" in sys.modules or "comfy.guiders" in sys.modules:
+                    import comfy.samplers
+                    import comfy.guiders
+                    
+                    modules_to_patch = []
+                    if "comfy.samplers" in sys.modules:
+                        modules_to_patch.append(sys.modules["comfy.samplers"])
+                    if "comfy.guiders" in sys.modules:
+                        modules_to_patch.append(sys.modules["comfy.guiders"])
+                        
+                    patched_classes = set()
+                    for module in modules_to_patch:
+                        for name in dir(module):
+                            obj = getattr(module, name)
+                            if isinstance(obj, type) and hasattr(obj, "set_conds"):
+                                if obj in patched_classes:
+                                    continue
+                                orig_set_conds = obj.set_conds
+                                if getattr(orig_set_conds, "__name__", "") == "patched_set_conds":
+                                    continue
+                                    
+                                def make_patched_set_conds(original_method):
+                                    def patched_set_conds(self, *args, **kwargs):
+                                        pos = args[0] if len(args) >= 1 else None
+                                        neg = args[1] if len(args) >= 2 else None
+                                        if "positive" in kwargs:
+                                            pos = kwargs["positive"]
+                                        if "negative" in kwargs:
+                                            neg = kwargs["negative"]
+                                        self.raw_conds = (pos, neg)
+                                        return original_method(self, *args, **kwargs)
+                                    return patched_set_conds
+                                    
+                                obj.set_conds = make_patched_set_conds(orig_set_conds)
+                                patched_classes.add(obj)
+                                print(f"🔧 [Background Patched] preserved raw_conds on class {obj.__name__} in module {module.__name__}.")
+                    patched = True
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"⚠️ Warning: background patcher failed: {e}")
+            
+    threading.Thread(target=background_patcher, daemon=True).start()
+except Exception as e:
+    print(f"⚠️ Warning: failed starting background patcher thread: {e}")
 """
             if "mock_virtual_memory" not in content:
                 with open(main_path, "w") as f:
                     f.write(mock_code + "\n" + content)
-                print("✅ Successfully injected virtual system RAM limits into ComfyUI's main.py!")
+                print("✅ Successfully injected virtual RAM and raw_conds patches into ComfyUI's main.py!")
 
     @modal.enter()
     def start_comfy(self):
@@ -430,15 +483,15 @@ print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streamin
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
+        # FIXED: Restricted linking targets to only the strict loader node specifications you requested
         exact_mapping = {
-            "gemma_3_12B_it_fp8_scaled.safetensors": ["text_encoders", "text_encoder"],
+            "gemma_3_12B_it_fp8_scaled.safetensors": ["text_encoders"],
             "ltx-2.3_text_projection_bf16.safetensors": ["checkpoints"],
-            "ltx-2.3-22b-dev-fp8.safetensors": ["unet", "diffusion_models"],
+            "ltx-2.3-22b-dev-fp8.safetensors": ["unet"],
             "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors": ["loras"],
             "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
-            "LTX23_audio_vae_bf16.safetensors": ["checkpoints"],
-            "LTX23_video_vae_bf16.safetensors": ["vae"],
-            "taeltx2_3.safetensors": ["vae"]
+            "LTX23_audio_vae_bf16.safetensors": ["vae"],
+            "LTX23_video_vae_bf16.safetensors": ["vae"]
         }
 
         for mount_point in ["/mnt/weights_23", "/mnt/weights_19"]:
@@ -482,11 +535,12 @@ print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streamin
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # UPGRADED: Added --lowvram flag to force ComfyUI to aggressively unload layers from memory
+        # OPTIMIZED: Added '--disable-pin-memory' to prevent locking system memory, saving RAM & removing container lag!
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc", "--lowvram"       
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc", "--lowvram",
+            "--disable-pin-memory"       
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
