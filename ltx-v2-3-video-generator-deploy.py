@@ -15,6 +15,7 @@ from typing import Optional
 
 # ==========================================
 # PART 1: Infrastructure Configuration & Base Image
+# Purpose: Defines the core operating system, environment variables, system-level dependencies, and the base python libraries needed for video processing and AI model inference.
 # ==========================================
 
 R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
@@ -62,6 +63,7 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
+# Purpose: Pre-downloads the master workflow from Cloudflare R2 during container build time, traces the node connections to assign the correct LoRAs, and seals the preconfigured JSON directly into the image disk for faster boot times.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -174,6 +176,11 @@ def bake_private_workflow_into_image():
         print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
+
+# ==========================================
+# PART 3: Advanced Optimization Patches & Custom Node Installation
+# Purpose: Installs ComfyUI and all required custom repositories. Injects precise Python monkey patches to correct bugs inside 'ComfyUI-LTXVideo' core files (like `precompute_freqs_cis` and `kornia.pad`) so the nodes register without validation failure on startup.
+# ==========================================
 
 def patch_ltx_video_imports():
     import os
@@ -299,10 +306,6 @@ def patch_ltx_kornia_pad():
                 f.writelines(new_lines)
             print("✅ Successfully patched pyramid_blending.py!")
 
-# ==========================================
-# PART 3: Advanced Optimization Patches & Custom Node Installation
-# ==========================================
-
 final_image = (
     build_image.pip_install(
         "torch==2.5.1",
@@ -349,6 +352,7 @@ final_image = (
 
 # ==========================================
 # PART 4: Production Class Definition & Resource Reclamation Loops
+# Purpose: Manages the Modal lifecycle, attaches the dual storage volumes for LTX-2.3 and 19b LoRA weights, symlinks models into expected ComfyUI directories to prevent validation failures, and initiates background garbage collection to maintain stable memory pressure.
 # ==========================================
 
 app = modal.App("ltx-2-3-v20-api")
@@ -482,14 +486,14 @@ except Exception as e:
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # FIXED: Restricted linking targets to only the strict loader node specifications you requested
+        # ⚡ FIXED: Added "checkpoints" to the audio VAE path arrays to prevent Node 228/232 validation failure
         exact_mapping = {
             "gemma_3_12B_it_fp8_scaled.safetensors": ["text_encoders"],
             "ltx-2.3_text_projection_bf16.safetensors": ["checkpoints"],
             "ltx-2.3-22b-dev-fp8.safetensors": ["unet"],
             "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors": ["loras"],
             "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
-            "LTX23_audio_vae_bf16.safetensors": ["vae"],
+            "LTX23_audio_vae_bf16.safetensors": ["checkpoints", "vae"],
             "LTX23_video_vae_bf16.safetensors": ["vae"]
         }
 
@@ -534,12 +538,11 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # FIXED: Changed '--disable-pin-memory' to the correct flag name '--disable-pinned-memory'
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc", "--lowvram",
-            "--disable-pinned-memory"       
+            "--disable-pinned-memory"        
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -563,6 +566,7 @@ except Exception as e:
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
+# Purpose: Intercepts POST requests, modifies the JSON payload dynamically to insert the generated image URLs and workflow parameters. Adjusts decoder constraints to prevent VRAM crashes while keeping parameter injections safely isolated by node class.
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -701,7 +705,10 @@ except Exception as e:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
-            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode"]:
+            # ⚡ FIXED: Isolated LTXVSpatioTemporalTiledVAEDecode parameter injection to prevent overwriting JSON keys that trigger output validation failures
+            elif cls == "LTXVSpatioTemporalTiledVAEDecode":
+                inputs["working_device"] = "auto"
+            elif cls in ["VAEDecodeTiled", "VAEDecode"]:
                 inputs["tile_size"] = 512
                 inputs["overlap"] = 64
                 inputs["temporal_tile_length"] = 8
