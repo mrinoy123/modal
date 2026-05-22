@@ -369,7 +369,7 @@ weights_volume_19 = modal.Volume.from_name("ltx-20-19b-weights", create_if_missi
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
         "API_KEY": "secure-video-n8n-workflow-2026"
     })],
-    memory=8192,  # Configured to 8GB system memory
+    memory=8192,  
     scaledown_window=5,  
     timeout=3600
 )
@@ -393,7 +393,6 @@ class LTXEngine:
                 pass
             await asyncio.sleep(2)
 
-    # UPDATED: We inject a background thread directly into 'main.py' to monkeypatch 'raw_conds' on guiders and limit system RAM
     def patch_comfyui_main_ram(self):
         main_path = "/workspace/ComfyUI/main.py"
         if os.path.exists(main_path):
@@ -535,12 +534,12 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # OPTIMIZED: Added '--disable-pin-memory' to prevent locking system memory, saving RAM & removing container lag!
+        # FIXED: Changed '--disable-pin-memory' to the correct flag name '--disable-pinned-memory'
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc", "--lowvram",
-            "--disable-pin-memory"       
+            "--disable-pinned-memory"       
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
