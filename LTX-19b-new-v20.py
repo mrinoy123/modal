@@ -27,7 +27,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Bind credentials and paths directly to the build environment
+# Bind authentication tokens directly to environment to eliminate build-time KeyError issues
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -223,7 +223,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
     })],
     memory=8192, 
-    scaledown_window=5,  # Zero-waste scale-to-zero window
+    scaledown_window=5,  # Zero-waste scale down
     timeout=3600
 )
 class LTXEngine:
@@ -328,6 +328,7 @@ class LTXEngine:
         import os
         import uuid
         import shutil
+        from urllib.parse import urlparse
 
         image_url = body.get("image_url")
         workflow_str = body.get("workflow")
@@ -357,14 +358,31 @@ class LTXEngine:
             ext = os.path.splitext(image_url.split("?")[0])[1] or ".png"
             target_image_path = os.path.join(dynamic_guides_dir, f"guide_image{ext}")
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as resp:
-                    if resp.status == 200:
-                        with open(target_image_path, "wb") as f:
-                            f.write(await resp.read())
-                        print(f"✅ Guide image downloaded successfully: {target_image_path}")
-                    else:
-                        raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
+            # CHANGED: Securely download from R2 using S3 credentials if URL is from our R2 domain
+            if "r2.dev" in image_url or R2_ACCOUNT_ID in image_url:
+                parsed_url = urlparse(image_url)
+                key = parsed_url.path.lstrip("/")
+                print(f"🔐 Private Bucket Access Detected. Downloading '{key}' securely via R2 S3 Client...")
+                try:
+                    self.s3.download_file(
+                        "video-asset-files-storage-workflow", 
+                        key, 
+                        target_image_path
+                    )
+                    print(f"✅ Securely downloaded private R2 file to {target_image_path}")
+                except Exception as e:
+                    print(f"❌ Secure R2 download failed: {e}")
+                    raise HTTPException(status_code=400, detail=f"S3 R2 download failure: {e}")
+            else:
+                # Public fallback downloader
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(image_url) as resp:
+                        if resp.status == 200:
+                            with open(target_image_path, "wb") as f:
+                                f.write(await resp.read())
+                            print(f"✅ Guide image downloaded successfully (Public URL): {target_image_path}")
+                        else:
+                            raise HTTPException(status_code=400, detail=f"Failed to download guide image from public URL. HTTP {resp.status}")
 
         # 3. Dynamic Fuzzy Weight Linker (Inject weight names by tracing topology at runtime)
         unet_nodes = []
@@ -382,14 +400,14 @@ class LTXEngine:
             unet_id = unet_nodes[0]
             first_lora, second_lora = None, None
             
-            # Identify first LoRA (Node 270) connected directly to UNET (Node 225)
+            # Identify first LoRA connected directly to UNET
             for l_id in lora_nodes:
                 model_input = wf_data[l_id].get("inputs", {}).get("model")
                 if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
                     first_lora = l_id
                     break
             
-            # Identify second LoRA (Node 229) chained from the first
+            # Identify second LoRA chained from the first
             if first_lora:
                 for l_id in lora_nodes:
                     if l_id == first_lora: continue
