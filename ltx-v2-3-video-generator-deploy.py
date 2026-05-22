@@ -176,7 +176,6 @@ def bake_private_workflow_into_image():
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
-
 # ⚡ FIXED: Runtime monkey-patch to bypass the LTXBaseModel ImportError on ComfyUI 0.10.x backend
 def patch_ltx_video_imports():
     import os
@@ -185,7 +184,6 @@ def patch_ltx_video_imports():
         with open(init_path, "r") as f:
             content = f.read()
         
-        # Wrapped patch to intercept and gracefully recover/define the missing attributes at initialization
         patch_code = (
             "import sys\n"
             "import torch\n"
@@ -213,8 +211,7 @@ def patch_ltx_video_imports():
             f.write(patch_code + content)
         print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
 
-
-# ⚡ NEW: Global fallback patch directly applied to the core ComfyUI model file to handle load-order conflicts
+# ⚡ NEW: Global fallback patch directly applied to the core ComfyUI model file to handle potential load-order conflicts
 def patch_comfy_lightricks_model():
     import os
     model_path = "/workspace/ComfyUI/comfy/ldm/lightricks/model.py"
@@ -268,7 +265,6 @@ globals()["apply_rotary_emb"] = apply_rotary_emb
                 f.write(content + fallback_code)
             print("✅ Successfully patched comfy/ldm/lightricks/model.py!")
 
-
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
 # ==========================================
@@ -280,27 +276,31 @@ final_image = (
         "torchaudio==2.5.1",
         index_url="https://download.pytorch.org/whl/cu124"
     )
-    .pip_install("numpy==1.26.4", "diffusers", "accelerate", "transformers", "comfyui-workflow-templates")
+    .pip_install(
+        "numpy==1.26.4", "diffusers", "accelerate", "transformers", 
+        "comfyui-workflow-templates", "peft", "kornia"
+    )
+    # The '# cache_bust' strings below ensure Modal invalidates any outdated container layers
     .run_commands(
-        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-        "pip install -r /workspace/ComfyUI/requirements.txt"
+        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23",
+        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23"
     )
     .run_commands(
-        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
-        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
-        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
-        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
-        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
-        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes",
-        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts",
-        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
-        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
-        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
+        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23",
+        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23",
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23",
+        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23",
+        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23",
+        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23",
+        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23",
+        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23",
+        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23",
+        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor # cache_bust=2026_05_23",
+        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23"
     )
     .run_commands(
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23"
     )
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
