@@ -211,7 +211,7 @@ def patch_ltx_video_imports():
             f.write(patch_code + content)
         print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
 
-# ⚡ NEW: Global fallback patch directly applied to the core ComfyUI model file to handle potential load-order conflicts
+# ⚡ FIXED: Global fallback patch directly applied to the core ComfyUI model file to handle potential load-order conflicts
 def patch_comfy_lightricks_model():
     import os
     model_path = "/workspace/ComfyUI/comfy/ldm/lightricks/model.py"
@@ -265,6 +265,49 @@ globals()["apply_rotary_emb"] = apply_rotary_emb
                 f.write(content + fallback_code)
             print("✅ Successfully patched comfy/ldm/lightricks/model.py!")
 
+# ⚡ FIXED: Specific patch for kornia pad import deprecation/movement in pyramid_blending.py
+def patch_ltx_kornia_pad():
+    import os
+    pyramid_blending_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/pyramid_blending.py"
+    if os.path.exists(pyramid_blending_path):
+        with open(pyramid_blending_path, "r") as f:
+            lines = f.readlines()
+        
+        print("🔧 Patching pyramid_blending.py to resolve kornia pad Import Error...")
+        new_lines = []
+        in_pyramid_import = False
+        patched = False
+        
+        for line in lines:
+            if "from kornia.geometry.transform.pyramid import" in line:
+                in_pyramid_import = True
+                new_lines.append(line)
+                continue
+            
+            if in_pyramid_import:
+                if ")" in line:
+                    in_pyramid_import = False
+                
+                # Check for whole-word 'pad' inside the import block
+                import re
+                if re.search(r'\bpad\b', line):
+                    patched = True
+                    # Strip 'pad' from the kornia import list line safely
+                    line = re.sub(r'\bpad\b\s*,?', '', line)
+                    if line.strip() == "," or not line.strip():
+                        continue
+            
+            new_lines.append(line)
+            
+        if patched:
+            # Safely append PyTorch's native functional pad at the top of the file
+            new_lines.insert(0, "from torch.nn.functional import pad\n")
+            with open(pyramid_blending_path, "w") as f:
+                f.writelines(new_lines)
+            print("✅ Successfully patched pyramid_blending.py!")
+        else:
+            print("ℹ️ pad import was not found or already patched.")
+
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
 # ==========================================
@@ -278,35 +321,40 @@ final_image = (
     )
     .pip_install(
         "numpy==1.26.4", "diffusers", "accelerate", "transformers", 
-        "comfyui-workflow-templates", "peft", "kornia"
+        "comfyui-workflow-templates", "peft"
     )
     # The '# cache_bust' strings below ensure Modal invalidates any outdated container layers
     .run_commands(
-        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23",
-        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23"
+        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_v3",
+        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_v3"
     )
     .run_commands(
-        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23",
-        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23",
-        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23",
-        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23",
-        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23",
-        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23",
-        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23",
-        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23",
-        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor # cache_bust=2026_05_23",
-        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23"
+        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor # cache_bust=2026_05_23_v3",
+        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_v3"
     )
     .run_commands(
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23"
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_v3",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_v3"
+    )
+    # Force pinning stable kornia to bypass the breaking kornia sub-import deprecations
+    .run_commands(
+        "pip install kornia==0.6.12 # cache_bust=2026_05_23_v3"
     )
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
     )
     .run_function(patch_comfy_lightricks_model)
     .run_function(patch_ltx_video_imports)
+    .run_function(patch_ltx_kornia_pad)
     .run_function(bake_private_workflow_into_image)
 )
 
