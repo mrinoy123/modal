@@ -1,3 +1,7 @@
+==========================================
+PART 1: Infrastructure Setup & Base Dependencies
+==========================================
+
 import modal
 import subprocess
 import time
@@ -41,7 +45,101 @@ build_image = base_image.env({
 )
 
 
-# Clone ComfyUI and install required custom nodes (VFI Purged)
+==========================================
+PART 2: The Secure Build-Time Appliance Baker
+==========================================
+
+
+def bake_private_workflow_into_image():
+    """
+    Executes strictly during the 'modal deploy' image assembly layer.
+    Securely accesses the private R2 bucket, downloads the JSON, wires the target
+    model weights permanently to the nodes, and freezes it into the container disk.
+    """
+    import boto3
+    import json
+    import os
+
+    print("🏗️ Build Phase: Securely fetching master workflow from private Cloudflare R2...")
+    
+    # Authenticate using the temporary build-time secrets
+    s3 = boto3.client(
+        service_name='s3', 
+        endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", 
+        aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], 
+        aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], 
+        region_name="auto"
+    )
+
+    # Download the private blueprint
+    raw_path = "/tmp/raw_workflow.json"
+    s3.download_file(
+        "video-asset-files-storage-workflow", 
+        "Comfyui-workflows-json/new-workflow-modified-vastly-change(api)new.json", 
+        raw_path
+    )
+
+    with open(raw_path, "r") as f:
+        wf_data = json.load(f)
+
+    if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
+        wf_data = wf_data["workflow"]
+
+    print("🏗️ Build Phase: Executing Hardcoded Model Injection Mapping...")
+    
+    TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
+    TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
+    TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
+    TARGET_VIDEO_VAE = "ltx-2-19b-dev_video_vae.safetensors"
+    TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
+    TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
+    TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
+
+    for node_id, node in wf_data.items():
+        if not isinstance(node, dict) or "inputs" not in node:
+            continue
+            
+        cls = node.get("class_type", "")
+        inputs = node["inputs"]
+        
+        if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
+            inputs["unet_name"] = TARGET_UNET
+            inputs["ckpt_name"] = TARGET_UNET
+            if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                node["widgets_values"][0] = TARGET_UNET
+        elif cls == "LTXAVTextEncoderLoader":
+            inputs["text_encoder"] = TARGET_GEMMA
+            inputs["ckpt_name"] = TARGET_CONNECTOR
+        elif cls in ["VAELoaderKJ", "VAELoader"]:
+            inputs["vae_name"] = TARGET_VIDEO_VAE
+            inputs["ckpt_name"] = TARGET_VIDEO_VAE
+        elif cls == "LTXVAudioVAELoader":
+            inputs["ckpt_name"] = TARGET_AUDIO_VAE
+            inputs["vae_name"] = TARGET_AUDIO_VAE
+        elif cls == "LoraLoader":
+            current_lora = str(inputs.get("lora_name", "")).lower()
+            resolved = TARGET_DISTILLED_LORA
+            if "detail" in current_lora or "ic-lora" in current_lora:
+                resolved = TARGET_DETAILER_LORA
+            inputs["lora_name"] = resolved
+            if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                node["widgets_values"][0] = resolved
+        elif cls == "DenoMultiImageLoader":
+            inputs["image_paths"] = "input/dynamic_guides"
+
+    os.makedirs("/workspace", exist_ok=True)
+    with open("/workspace/prebaked_workflow.json", "w") as f:
+        json.dump(wf_data, f, indent=2)
+        
+    print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
+
+
+
+==========================================
+PART 3: ComfyUI Installation & Private Pipeline Injection
+==========================================
+
+
 final_image = (
     build_image.pip_install(
         "torch==2.5.1",
@@ -79,17 +177,19 @@ final_image = (
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
     )
     
-    # 4. Apply critical patches (Fixing the Guider Attribute/Method mismatch)
+    # 4. Apply critical patches
     .run_commands(
-        # 🔥 PATCH 1: Fix FizzNodes NoneType crash
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
-        
-        # 🔥 PATCH 2: FIXED (raw_conds -> inner_set_conds tuple)
         "sed -i 's/guider.raw_conds/guider.inner_set_conds/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
     )
+
+    # 5. Execute Private R2 Ingestion (Passes the secrets securely into the build environment)
+    .run_function(bake_private_workflow_into_image, secrets=[modal.Secret.from_name("video-generator-workflow")])
 )
 
-
+==========================================
+PART 4: The Serverless Runtime & Dynamic Scene Processor
+==========================================
 
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -113,8 +213,7 @@ class LTXEngine:
         print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
             try:
-                with open('/proc/sys/vm/drop_caches', 'w') as f:
-                    f.write('1\n')
+                with open('/proc/sys/vm/drop_caches', 'w') as f: f.write('1\n')
             except Exception:
                 try: ctypes.CDLL("libc.so.6").malloc_trim(0)
                 except Exception: pass
@@ -127,10 +226,8 @@ class LTXEngine:
         base_models_dir = "/workspace/ComfyUI/models"
         
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
-        for d in dirs:
-            os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
+        for d in dirs: os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # Explicit target-specific file mapper
         exact_mapping = {
             "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
             "ltx-2-19b-embeddings_connector_dev_bf16.safetensors": ["checkpoints"],
@@ -145,16 +242,11 @@ class LTXEngine:
                 for filename in files:
                     if filename in exact_mapping:
                         src_path = os.path.join(root_dir, filename)
-                        target_dirs = exact_mapping[filename]
-                        for target_dir in target_dirs:
+                        for target_dir in exact_mapping[filename]:
                             dest = os.path.join(base_models_dir, target_dir, filename)
                             if not os.path.exists(dest):
-                                try: 
-                                    os.symlink(src_path, dest)
-                                    print(f"🔗 Linked target weight: {filename} -> models/{target_dir}")
+                                try: os.symlink(src_path, dest)
                                 except FileExistsError: pass
-                    else:
-                        print(f"🛑 Skipping unused weight file: {filename}")
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -176,7 +268,6 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Stream model files dynamically with memory mapping and instant unloading
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -188,16 +279,13 @@ class LTXEngine:
 
         start_time = time.time()
         while time.time() - start_time < 300:
-            if self.process.poll() is not None:
-                print("❌ Startup Crash!")
-                os._exit(1)
+            if self.process.poll() is not None: os._exit(1)
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
                     if response.status == 200:
                         print("⚡ LTX-2 API ONLINE!")
                         return
-            except Exception:
-                time.sleep(2)
+            except Exception: time.sleep(2)
         os._exit(1)
 
     @modal.fastapi_endpoint(method="POST")
@@ -206,104 +294,64 @@ class LTXEngine:
             raise HTTPException(status_code=403, detail="Unauthorized")
         
         body = await request.json()
-        
         if isinstance(body, dict):
             if "json" in body: body = body["json"]
             elif "body" in body: body = body["body"]
 
-        image_url = body.get("image_url") if isinstance(body, dict) else None
-        workflow = body.get("workflow") if isinstance(body, dict) else body
-        requested_length = body.get("length") if isinstance(body, dict) else None
+        # 1. READ LIGHTWEIGHT PARAMS FROM N8N
+        image_url = body.get("image_url")
+        requested_length = body.get("length", 73)
+        width = body.get("width", 384)
+        height = body.get("height", 480)
+        prompt_timeline = body.get("prompts", {})
+        negative_prompt = body.get("negative", "worst quality, blurry")
+        filename_prefix = body.get("filename", "output_scene")
 
-        if isinstance(workflow, str):
-            try: workflow = json.loads(workflow)
-            except Exception: pass
+        # 2. LOAD PREBAKED GRAPH FROM DISK
+        with open("/workspace/prebaked_workflow.json", "r") as f:
+            workflow = json.load(f)
 
-        if isinstance(workflow, dict) and "workflow" in workflow:
-            if not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
-                workflow = workflow["workflow"]
+        # 3. DYNAMICALLY APPLY N8N CONFIGURATIONS TO THE BAKED NODES
+        try:
+            tgt_len = int(requested_length)
+            if (tgt_len - 1) % 8 != 0:
+                tgt_len = ((tgt_len - 1) // 8) * 8 + 1
+                if tgt_len < 9: tgt_len = 9
 
-        if isinstance(workflow, dict):
-            if "nodes" in workflow and "last_node_id" in workflow:
-                raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
+            schedule_lines = []
+            for frame, p_text in prompt_timeline.items():
+                escaped = str(p_text).replace("\\", "\\\\").replace('"', '\\"')
+                schedule_lines.append(f'"{frame}": "{escaped}"')
+            schedule_string = ",\n".join(schedule_lines)
 
-        # =========================================================================
-        # 🔗 FUZZYLINKER: STRICTOR NODAL SPECIFIC FILE FORCING
-        # =========================================================================
-        target_unet = "ltx-2-19b-distilled-fp8.safetensors"
-        target_gemma = "gemma-3-12b-it-FP8.safetensors"
-        target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
-        target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
-        target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
-        target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
-
-        def fuzzy_linker(wf_data):
-            for node_id, node in wf_data.items():
-                if not isinstance(node, dict) or "inputs" not in node:
-                    continue
-                
+            for node_id, node in workflow.items():
                 cls = node.get("class_type", "")
-                inputs = node["inputs"]
+                inputs = node.get("inputs", {})
                 
-                # 1. UNET & Checkpoint Forcing
-                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
-                    inputs["unet_name"] = target_unet
-                    inputs["ckpt_name"] = target_unet
-                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = target_unet
+                if "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
+                    inputs["length"] = tgt_len
+                    inputs["width"] = int(width)
+                    inputs["height"] = int(height)
+                elif "LTXVEmptyLatentAudio" in cls:
+                    inputs["frames_number"] = tgt_len
+                    inputs["frame_rate"] = 12
+                elif "BatchPromptSchedule" in cls:
+                    inputs["text"] = schedule_string
+                    inputs["max_frames"] = tgt_len
+                elif "CLIPTextEncode" in cls and "quality" in str(inputs.get("text", "")).lower():
+                    inputs["text"] = negative_prompt
+                elif cls == "DenoLTXSequencer" and image_url:
+                    urls_list = [u.strip() for u in image_url.split(",")] if "," in str(image_url) else [str(image_url).strip()]
+                    inputs["num_images"] = len(urls_list)
+                elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode"]:
+                    inputs["tile_size"] = 512
+                    inputs["overlap"] = 64
+                    inputs["temporal_size"] = 64
+                    inputs["temporal_overlap"] = 8
+                elif cls == "VHS_VideoCombine":
+                    inputs["frame_rate"] = 24
+                    if "filename_prefix" in inputs: inputs["filename_prefix"] = filename_prefix
 
-                # 2. Text Encoder (Gemma) Forcing
-                elif cls == "LTXAVTextEncoderLoader":
-                    inputs["text_encoder"] = target_gemma
-                    inputs["ckpt_name"] = target_connector
-
-                # 3. Video VAE Forcing (VAELoaderKJ Node)
-                elif cls in ["VAELoaderKJ", "VAELoader"]:
-                    inputs["vae_name"] = target_video_vae
-                    inputs["ckpt_name"] = target_video_vae
-
-                # 4. Audio VAE Forcing (LTXVAudioVAELoader Node)
-                elif cls == "LTXVAudioVAELoader":
-                    inputs["ckpt_name"] = target_audio_vae
-                    inputs["vae_name"] = target_audio_vae
-
-                # 5. LoRA Loader (Loads strictly the Detailer Lora)
-                elif cls == "LoraLoader":
-                    inputs["lora_name"] = target_detailer_lora
-                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = target_detailer_lora
-
-                # 6. Guide Image Input
-                elif cls == "DenoMultiImageLoader":
-                    inputs["image_paths"] = "input/dynamic_guides"
-
-            return wf_data
-
-        if isinstance(workflow, dict):
-            workflow = fuzzy_linker(workflow)
-
-            # Global Sequence & Frame Matching
-            if requested_length is not None:
-                try:
-                    tgt_len = int(requested_length)
-                    if (tgt_len - 1) % 8 != 0:
-                        tgt_len = ((tgt_len - 1) // 8) * 8 + 1
-                        if tgt_len < 9: tgt_len = 9
-                    
-                    for node_id, node in workflow.items():
-                        if not isinstance(node, dict) or "inputs" not in node: continue
-                        cls = node.get("class_type", "")
-                        if "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls: 
-                            node["inputs"]["length"] = tgt_len
-                        if "LTXVEmptyLatentAudio" in cls: 
-                            node["inputs"]["frames_number"] = tgt_len
-                            node["inputs"]["frame_rate"] = 12
-                        if "BatchPromptSchedule" in cls: 
-                            node["inputs"]["max_frames"] = tgt_len
-                except Exception as e:
-                    print(f"⚠️ Dynamic framing error: {e}")
-
-            # Sage Attention Patch Optimizer
             sage_node_id = next((k for k, v in workflow.items() if v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
             if sage_node_id:
                 sage_input = workflow[sage_node_id]["inputs"].get("model")
@@ -315,28 +363,24 @@ class LTXEngine:
                                     node_data["inputs"][k] = sage_input
                 del workflow[sage_node_id]
 
-        # =========================================================================
+        except Exception as e:
+            print(f"⚠️ Dynamic parameter binding notice: {e}")
 
+        # 4. DOWNLOAD GUIDING ASSETS
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
-        if os.path.exists(dynamic_guides_dir):
-            shutil.rmtree(dynamic_guides_dir)
+        if os.path.exists(dynamic_guides_dir): shutil.rmtree(dynamic_guides_dir)
         os.makedirs(dynamic_guides_dir, exist_ok=True)
 
         urls_to_download = []
         if image_url:
-            if isinstance(image_url, list):
-                urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
+            if isinstance(image_url, list): urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
             elif isinstance(image_url, str) and image_url.strip():
-                if "," in image_url:
-                    urls_to_download = [u.strip() for u in image_url.split(",") if u.strip()]
-                else:
-                    urls_to_download = [image_url.strip()]
+                urls_to_download = [u.strip() for u in image_url.split(",")] if "," in image_url else [image_url.strip()]
 
         if not urls_to_download:
             from PIL import Image
             img = Image.new('RGB', (1024, 1024), color='black')
             img.save(os.path.join(dynamic_guides_dir, "guide_0.png"))
-            print("Creating black canvas fallback guide.")
         else:
             async def download_one(session, url_str, target_dest):
                 from urllib.parse import urlparse
@@ -345,40 +389,19 @@ class LTXEngine:
                 
                 if is_r2_storage:
                     file_key = parsed.path.lstrip('/')
-                    while "//" in file_key:
-                        file_key = file_key.replace("//", "/")
-                    print(f"📥 Fetching R2 file: {file_key}")
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        self.s3.download_file, 
-                        "video-asset-files-storage-workflow", 
-                        file_key, 
-                        target_dest
-                    )
+                    while "//" in file_key: file_key = file_key.replace("//", "/")
+                    await asyncio.get_event_loop().run_in_executor(None, self.s3.download_file, "video-asset-files-storage-workflow", file_key, target_dest)
                 else:
-                    print(f"📥 Downloading HTTP file: {url_str}")
                     try:
                         async with session.get(url_str, timeout=120) as r:
                             if r.status == 200:
-                                f_content = await r.read()
-                                with open(target_dest, "wb") as f:
-                                    f.write(f_content)
-                            else:
-                                raise Exception(f"HTTP code {r.status}")
-                    except Exception as err:
-                        print(f"HTTP direct download failed, falling back to urllib: {err}")
-                        await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            urllib.request.urlretrieve,
-                            url_str,
-                            target_dest
-                        )
+                                with open(target_dest, "wb") as f: f.write(await r.read())
+                            else: raise Exception(f"HTTP {r.status}")
+                    except Exception:
+                        await asyncio.get_event_loop().run_in_executor(None, urllib.request.urlretrieve, url_str, target_dest)
 
             async with aiohttp.ClientSession() as session:
-                tasks = []
-                for idx, url in enumerate(urls_to_download):
-                    dest = os.path.join(dynamic_guides_dir, f"guide_{idx}.png")
-                    tasks.append(download_one(session, url, dest))
+                tasks = [download_one(session, url, os.path.join(dynamic_guides_dir, f"guide_{idx}.png")) for idx, url in enumerate(urls_to_download)]
                 await asyncio.gather(*tasks)
 
         out_dir = "/workspace/ComfyUI/output"
@@ -387,43 +410,35 @@ class LTXEngine:
 
         ram_task = asyncio.create_task(self._ram_squeezer())
 
+        # 5. EXECUTE GENERATION PIPELINE
         try:
             async with aiohttp.ClientSession() as session:
-                print("🎨 Running Pipeline...")
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                     res_json = await resp.json()
                     if "error" in res_json or "prompt_id" not in res_json:
-                        error_msg = res_json.get("error", res_json)
-                        raise HTTPException(status_code=400, detail=f"Invalid JSON: {error_msg}")
+                        raise HTTPException(status_code=400, detail=f"Invalid Execution Pattern: {res_json.get('error', res_json)}")
                     prompt_id = res_json['prompt_id']
 
                 start_time = time.time()
                 while True:
-                    if self.process.poll() is not None:
-                        raise HTTPException(status_code=500, detail="Backend server execution failure.")
+                    if self.process.poll() is not None: raise HTTPException(status_code=500, detail="Backend failed.")
                     async with session.get("http://127.0.0.1:8188/history") as hist_resp:
                         if hist_resp.status == 200:
                             history = await hist_resp.json()
-                            if prompt_id in history:
-                                break
-                    if time.time() - start_time > 2400:
-                        raise HTTPException(status_code=540, detail="Execution timeout reached.")
+                            if prompt_id in history: break
+                    if time.time() - start_time > 2400: raise HTTPException(status_code=540, detail="Timeout.")
                     await asyncio.sleep(5)
 
                 videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
-                if not videos:
-                    raise HTTPException(status_code=500, detail="Output generation target missing.")
-                    
+                if not videos: raise HTTPException(status_code=500, detail="Output file missing.")
                 videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
                 
-                print("🧹 Generation Complete. Purging VRAM & Unloading Models...")
                 try:
                     await session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True})
-                    await session.post("http://127.0.0.1:8188/api/free", json={"unload_models": True, "free_memory": True})
-                except Exception as e:
-                    print(f"VRAM Purge Notice: {e}")
+                except Exception: pass
 
                 with open(os.path.join(out_dir, videos[0]), "rb") as f:
                     return Response(content=f.read(), media_type="video/mp4")
         finally:
             ram_task.cancel()
+    
