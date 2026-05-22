@@ -210,15 +210,18 @@ final_image = (
         "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts",
         "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
         "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
-        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"  # ⚡ ADDED: The Frequency-Domain Guidance Node
+        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
     )
     .run_commands(
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
         "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
     )
     .run_commands(
-        "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py",
-        "sed -i 's/guider.raw_conds/guider.inner_set_conds()/g' /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+        "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
+    )
+    # ⚡ FIXED: Replacing the blanket 'sed' command with an intelligent python patch
+    .run_commands(
+        "python -c \"import re; p='/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; c=open(p).read(); c=re.sub(r'(\\bguider\\.raw_conds\\b)(?!\\s*=)', 'guider.inner_set_conds()', c); open(p,'w').write(c)\""
     )
     .run_function(bake_private_workflow_into_image)
 )
