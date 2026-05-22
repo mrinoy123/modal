@@ -299,8 +299,6 @@ def patch_ltx_kornia_pad():
             with open(pyramid_blending_path, "w") as f:
                 f.writelines(new_lines)
             print("✅ Successfully patched pyramid_blending.py!")
-        else:
-            print("ℹ️ pad import was not found or already patched.")
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
@@ -356,7 +354,6 @@ final_image = (
 
 app = modal.App("ltx-2-3-v20-api")
 
-# FIXED: Corrected the target volume name to match your real Modal Volume ("LTX-2.3-Model-Weights")
 weights_volume_23 = modal.Volume.from_name("LTX-2.3-Model-Weights", create_if_missing=True)
 weights_volume_19 = modal.Volume.from_name("ltx-20-19b-weights", create_if_missing=True)
 
@@ -373,7 +370,7 @@ weights_volume_19 = modal.Volume.from_name("ltx-20-19b-weights", create_if_missi
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
         "API_KEY": "secure-video-n8n-workflow-2026"
     })],
-    memory=8192, 
+    memory=8192,  # RESTORED: Capped to 8GB system memory to minimize execution credits cost
     scaledown_window=5,  
     timeout=3600
 )
@@ -390,11 +387,38 @@ class LTXEngine:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
                     f.write('1\n')
             except Exception:
-                try:
-                    ctypes.CDLL("libc.so.6").malloc_trim(0)
-                except Exception:
-                    pass
+                pass
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
             await asyncio.sleep(2)
+
+    # NEW: Runtime Mock to limit ComfyUI memory to 6GB and prevent host RAM mapping caching
+    def patch_comfyui_main_ram(self):
+        main_path = "/workspace/ComfyUI/main.py"
+        if os.path.exists(main_path):
+            with open(main_path, "r") as f:
+                content = f.read()
+            
+            mock_code = """
+import psutil
+def mock_virtual_memory():
+    class MockVM:
+        def __init__(self):
+            self.total = 6 * 1024 * 1024 * 1024  # Force limit to 6 GB
+            self.available = 4 * 1024 * 1024 * 1024  # Force limit to 4 GB
+            self.percent = 33.3
+            self.used = 2 * 1024 * 1024 * 1024
+            self.free = 4 * 1024 * 1024 * 1024
+    return MockVM()
+psutil.virtual_memory = mock_virtual_memory
+print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
+"""
+            if "mock_virtual_memory" not in content:
+                with open(main_path, "w") as f:
+                    f.write(mock_code + "\n" + content)
+                print("✅ Successfully injected virtual system RAM limits into ComfyUI's main.py!")
 
     @modal.enter()
     def start_comfy(self):
@@ -417,7 +441,6 @@ class LTXEngine:
             "taeltx2_3.safetensors": ["vae"]
         }
 
-        # FIXED: Walks the correct volume mounts recursively to locate files and links them dynamically
         for mount_point in ["/mnt/weights_23", "/mnt/weights_19"]:
             if os.path.exists(mount_point):
                 for root_dir, _, files in os.walk(mount_point):
@@ -435,6 +458,9 @@ class LTXEngine:
                                         pass
                                     except Exception as e:
                                         print(f"⚠️ Failed linking {filename}: {e}")
+
+        # Inject system memory limits before starting server
+        self.patch_comfyui_main_ram()
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -456,14 +482,18 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # UPGRADED: Added --lowvram flag to force ComfyUI to aggressively unload layers from memory
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"        
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc", "--lowvram"       
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
+
+        # Start background watchdog RAM collector to keep host memory clean
+        asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
 
         start_time = time.time()
         while time.time() - start_time < 300:
@@ -618,7 +648,6 @@ class LTXEngine:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
-            # FIXED: 'cuda' is not supported in working_device for LTXVSpatioTemporalTiledVAEDecode, falling back to 'auto'
             elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode"]:
                 inputs["tile_size"] = 512
                 inputs["overlap"] = 64
@@ -705,7 +734,7 @@ class LTXEngine:
                     ExpiresIn=86400
                 )
                 
-                # Active VRAM and Garbage collection sweep
+                # Active VRAM and Garbage collection sweeps to prepare for consecutive low-memory requests
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
