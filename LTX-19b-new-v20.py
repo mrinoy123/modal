@@ -27,7 +27,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Bind authentication tokens directly to environment to eliminate build-time KeyError issues
+# Bind credentials and paths directly to the build environment
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -49,7 +49,8 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
+# Weights target configurations using Dev FP8 base with distilled LoRAs
+TARGET_UNET = "ltx-2-19b-dev-fp8.safetensors"
 TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
 TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
 TARGET_VIDEO_VAE = "ltx-2-19b-dev_video_vae.safetensors"
@@ -222,7 +223,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
     })],
     memory=8192, 
-    scaledown_window=5,  # Zero-waste billing optimization
+    scaledown_window=5,  # Zero-waste scale-to-zero window
     timeout=3600
 )
 class LTXEngine:
@@ -257,6 +258,7 @@ class LTXEngine:
         exact_mapping = {
             "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
             "ltx-2-19b-embeddings_connector_dev_bf16.safetensors": ["checkpoints"],
+            "ltx-2-19b-dev-fp8.safetensors": ["unet", "diffusion_models"],
             "ltx-2-19b-distilled-fp8.safetensors": ["unet", "diffusion_models"],
             "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
             "ltx-2-19b-distilled-lora-384.safetensors": ["loras"],
@@ -321,10 +323,6 @@ class LTXEngine:
 
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, body: dict, x_api_key: str = Header(None)):
-        # Optional: Security validation if required
-        # if x_api_key != "YOUR_SECRET_KEY":
-        #     raise HTTPException(status_code=401, detail="Unauthorized")
-
         import aiohttp
         import json
         import os
@@ -384,14 +382,14 @@ class LTXEngine:
             unet_id = unet_nodes[0]
             first_lora, second_lora = None, None
             
-            # Identify first LoRA connected directly to UNET
+            # Identify first LoRA (Node 270) connected directly to UNET (Node 225)
             for l_id in lora_nodes:
                 model_input = wf_data[l_id].get("inputs", {}).get("model")
                 if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
                     first_lora = l_id
                     break
             
-            # Identify second LoRA chained from the first
+            # Identify second LoRA (Node 229) chained from the first
             if first_lora:
                 for l_id in lora_nodes:
                     if l_id == first_lora: continue
