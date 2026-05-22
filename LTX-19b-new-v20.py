@@ -13,10 +13,6 @@ import uuid
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# ==========================================
-# PART 1: Infrastructure Configuration & Base Image
-# ==========================================
-
 # Cloudflare R2 explicit provisioning configurations
 R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
 R2_ACCESS_KEY_ID = "3c33425ba6e5abbd3e63afab14dc8866"
@@ -61,9 +57,6 @@ TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
 TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
 TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
-# ==========================================
-# PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# ==========================================
 
 def bake_private_workflow_into_image():
     import boto3
@@ -111,14 +104,12 @@ def bake_private_workflow_into_image():
             unet_id = unet_nodes[0]
             first_lora, second_lora = None, None
             
-            # Trace the direct wire flowing straight from UNETLoader out to the first LoraLoader node
             for l_id in lora_nodes:
                 model_input = wf_data[l_id].get("inputs", {}).get("model")
                 if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
                     first_lora = l_id
                     break
             
-            # Trace the wire flowing out of the first LoraLoader directly into the second LoraLoader node
             if first_lora:
                 for l_id in lora_nodes:
                     if l_id == first_lora: continue
@@ -132,7 +123,6 @@ def bake_private_workflow_into_image():
                 assignments[first_lora] = TARGET_DISTILLED_LORA
                 assignments[second_lora] = TARGET_DETAILER_LORA
         
-        # Absolute structural safety fallback via semantic text markers if chaining layout varies
         for l_id in lora_nodes:
             if l_id not in assignments:
                 node = wf_data[l_id]
@@ -142,7 +132,6 @@ def bake_private_workflow_into_image():
                 else:
                     assignments[l_id] = TARGET_DISTILLED_LORA
 
-        # Inject accurate asset configurations mapping directly to storage volumes
         for node_id, node in wf_data.items():
             if not isinstance(node, dict) or "inputs" not in node:
                 continue
@@ -180,9 +169,7 @@ def bake_private_workflow_into_image():
     except Exception as e:
         print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
 
-# ==========================================
-# PART 3: Advanced Optimization Patches & Custom Node Installation
-# ==========================================
+
 
 final_image = (
     build_image.pip_install(
@@ -221,9 +208,7 @@ final_image = (
     .run_function(bake_private_workflow_into_image)
 )
 
-# ==========================================
-# PART 4: Production Class Definition & Resource Reclamation Loops
-# ==========================================
+
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -232,11 +217,11 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     gpu="L4", 
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
-    env_vars={
+    secrets=[modal.Secret.from_dict({
         "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
         "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
-    },
+    })],
     memory=8192, 
     scaledown_window=5,  # Zero-waste billing optimization: scales down 5 seconds after request finishes
     timeout=3600
@@ -334,278 +319,3 @@ class LTXEngine:
             except Exception:
                 time.sleep(2)
         os._exit(1)
-
-# ==========================================
-# PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
-# ==========================================
-
-    @modal.fastapi_endpoint(method="POST")
-    async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
-        if x_api_key != os.environ.get("API_KEY"): 
-            raise HTTPException(status_code=403, detail="Unauthorized")
-        
-        body = await request.json()
-        if isinstance(body, dict):
-            if "json" in body:
-                body = body["json"]
-            elif "body" in body:
-                body = body["body"]
-
-        image_url = body.get("image_url")
-        requested_length = body.get("length", 73)
-        width = body.get("width", 384)
-        height = body.get("height", 480)
-        prompt_timeline = body.get("prompts", {})
-        negative_prompt = body.get("negative", "worst quality, blurry")
-        filename_prefix = body.get("filename", "output_scene")
-        inbound_wf = body.get("workflow")
-        
-        request_id = str(uuid.uuid4())
-        unique_filename_prefix = f"{filename_prefix}_{request_id}"
-
-        workflow = None
-        if inbound_wf:
-            if isinstance(inbound_wf, str):
-                try:
-                    workflow = json.loads(inbound_wf)
-                except Exception:
-                    pass
-            elif isinstance(inbound_wf, dict):
-                workflow = inbound_wf
-
-        if not workflow or not isinstance(workflow, dict):
-            print("💡 Appliance Fallback: Processing script via internal prebaked template layout...")
-            with open("/workspace/prebaked_workflow.json", "r") as f:
-                workflow = json.load(f)
-        else:
-            print("⚡ Dynamic Ingress Override: Processing live mutated template directly from n8n network...")
-
-        if "workflow" in workflow and not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
-            workflow = workflow["workflow"]
-
-        def fuzzy_linker(wf_data):
-            unet_nodes = []
-            lora_nodes = []
-            for node_id, node in wf_data.items():
-                if not isinstance(node, dict): continue
-                cls = node.get("class_type", "")
-                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
-                    unet_nodes.append(node_id)
-                elif cls == "LoraLoader":
-                    lora_nodes.append(node_id)
-
-            assignments = {}
-            if unet_nodes and len(lora_nodes) >= 2:
-                unet_id = unet_nodes[0]
-                first_lora, second_lora = None, None
-                for l_id in lora_nodes:
-                    model_input = wf_data[l_id].get("inputs", {}).get("model")
-                    if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
-                        first_lora = l_id
-                        break
-                if first_lora:
-                    for l_id in lora_nodes:
-                        if l_id == first_lora: continue
-                        model_input = wf_data[l_id].get("inputs", {}).get("model")
-                        if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(first_lora):
-                            second_lora = l_id
-                            break
-                if first_lora and second_lora:
-                    assignments[first_lora] = TARGET_DISTILLED_LORA
-                    assignments[second_lora] = TARGET_DETAILER_LORA
-
-            for l_id in lora_nodes:
-                if l_id not in assignments:
-                    node = wf_data[l_id]
-                    lora_name = str(node.get("inputs", {}).get("lora_name", "")).lower()
-                    if "detail" in lora_name or "ic-lora" in lora_name or l_id == "229":
-                        assignments[l_id] = TARGET_DETAILER_LORA
-                    else:
-                        assignments[l_id] = TARGET_DISTILLED_LORA
-
-            for node_id, node in wf_data.items():
-                if not isinstance(node, dict) or "inputs" not in node:
-                    continue
-                cls = node.get("class_type", "")
-                inputs = node["inputs"]
-                
-                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple"]:
-                    inputs["unet_name"] = TARGET_UNET
-                    inputs["ckpt_name"] = TARGET_UNET
-                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = TARGET_UNET
-                elif cls == "LTXAVTextEncoderLoader":
-                    inputs["text_encoder"] = TARGET_GEMMA
-                    inputs["ckpt_name"] = TARGET_CONNECTOR
-                elif cls in ["VAELoaderKJ", "VAELoader"]:
-                    inputs["vae_name"] = TARGET_VIDEO_VAE
-                    inputs["ckpt_name"] = TARGET_VIDEO_VAE
-                elif cls == "LTXVAudioVAELoader":
-                    inputs["ckpt_name"] = TARGET_AUDIO_VAE
-                    inputs["vae_name"] = TARGET_AUDIO_VAE
-                elif cls == "LoraLoader":
-                    resolved = assignments.get(node_id, TARGET_DISTILLED_LORA)
-                    inputs["lora_name"] = resolved
-                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = resolved
-                elif cls == "DenoMultiImageLoader":
-                    inputs["image_paths"] = f"input/dynamic_guides_{request_id}"
-            return wf_data
-
-        workflow = fuzzy_linker(workflow)
-
-        try:
-            tgt_len = int(requested_length)
-            if (tgt_len - 1) % 8 != 0:
-                tgt_len = ((tgt_len - 1) // 8) * 8 + 1
-                if tgt_len < 9:
-                    tgt_len = 9
-
-            schedule_lines = []
-            for frame, p_text in prompt_timeline.items():
-                escaped = str(p_text).replace("\\", "\\\\").replace('"', '\\"')
-                schedule_lines.append(f'"{frame}": "{escaped}"')
-            schedule_string = ",\n".join(schedule_lines)
-
-            for node_id, node in workflow.items():
-                cls = node.get("class_type", "")
-                inputs = node.get("inputs", {})
-                
-                if "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
-                    inputs["length"] = tgt_len
-                    inputs["width"] = int(width)
-                    inputs["height"] = int(height)
-                elif "LTXVEmptyLatentAudio" in cls:
-                    inputs["frames_number"] = tgt_len
-                    inputs["frame_rate"] = 12
-                elif "BatchPromptSchedule" in cls:
-                    inputs["text"] = schedule_string
-                    inputs["max_frames"] = tgt_len
-                elif "CLIPTextEncode" in cls and "quality" in str(inputs.get("text", "")).lower():
-                    inputs["text"] = negative_prompt
-                elif cls == "DenoLTXSequencer" and image_url:
-                    urls_list = [u.strip() for u in image_url.split(",")] if "," in str(image_url) else [str(image_url).strip()]
-                    inputs["num_images"] = len(urls_list)
-                elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode"]:
-                    inputs["tile_size"] = 256 
-                    inputs["overlap"] = 64
-                    inputs["temporal_size"] = 64
-                    inputs["temporal_overlap"] = 8
-                elif cls == "VHS_VideoCombine":
-                    inputs["frame_rate"] = 24
-                    inputs["filename_prefix"] = unique_filename_prefix
-
-            sage_node_id = next((k for k, v in workflow.items() if v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
-            if sage_node_id:
-                sage_input = workflow[sage_node_id]["inputs"].get("model")
-                if sage_input:
-                    for node_id, node_data in workflow.items():
-                        if isinstance(node_data, dict) and "inputs" in node_data:
-                            for k, v in node_data["inputs"].items():
-                                if isinstance(v, list) and len(v) > 0 and v[0] == sage_node_id:
-                                    node_data["inputs"][k] = sage_input
-                del workflow[sage_node_id]
-
-        except Exception as e:
-            print(f"⚠️ Dynamic parameter binding notice: {e}")
-
-        dynamic_guides_dir = f"/workspace/ComfyUI/input/dynamic_guides_{request_id}"
-        os.makedirs(dynamic_guides_dir, exist_ok=True)
-
-        urls_to_download = []
-        if image_url:
-            if isinstance(image_url, list):
-                urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
-            elif isinstance(image_url, str) and image_url.strip():
-                urls_to_download = [u.strip() for u in image_url.split(",")] if "," in image_url else [image_url.strip()]
-
-        if not urls_to_download:
-            from PIL import Image
-            img = Image.new('RGB', (1024, 1024), color='black')
-            img.save(os.path.join(dynamic_guides_dir, "guide_0.png"))
-        else:
-            async def download_one(session, url_str, target_dest):
-                from urllib.parse import urlparse
-                parsed = urlparse(url_str)
-                is_r2_storage = ("r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme)
-                
-                if is_r2_storage:
-                    file_key = parsed.path.lstrip('/')
-                    while "//" in file_key:
-                        file_key = file_key.replace("//", "/")
-                    await asyncio.to_thread(self.s3.download_file, "video-asset-files-storage-workflow", file_key, target_dest)
-                else:
-                    try:
-                        async with session.get(url_str, timeout=120) as r:
-                            if r.status == 200:
-                                with open(target_dest, "wb") as f:
-                                    f.write(await r.read())
-                            else:
-                                raise Exception(f"HTTP {r.status}")
-                    except Exception:
-                        await asyncio.to_thread(urllib.request.urlretrieve, url_str, target_dest)
-
-            async with aiohttp.ClientSession() as session:
-                tasks = [download_one(session, url, os.path.join(dynamic_guides_dir, f"guide_{idx}.png")) for idx, url in enumerate(urls_to_download)]
-                await asyncio.gather(*tasks)
-
-        out_dir = f"/workspace/ComfyUI/output_{request_id}"
-        os.makedirs(out_dir, exist_ok=True)
-
-        ram_task = asyncio.create_task(self._ram_squeezer())
-
-        try:
-            req_timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=req_timeout) as session:
-                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
-                    res_json = await resp.json()
-                    if "error" in res_json or "prompt_id" not in res_json:
-                        raise HTTPException(status_code=400, detail=f"Invalid Execution Pattern: {res_json.get('error', res_json)}")
-                    prompt_id = res_json['prompt_id']
-
-            start_time = time.time()
-            async with aiohttp.ClientSession() as poll_session:
-                while True:
-                    if self.process.poll() is not None:
-                        raise HTTPException(status_code=500, detail="Backend failed.")
-                    
-                    try:
-                        async with poll_session.get("http://127.0.0.1:8188/history") as hist_resp:
-                            if hist_resp.status == 200:
-                                history = await hist_resp.json()
-                                if prompt_id in history:
-                                    break
-                    except Exception:
-                        pass
-                        
-                    if time.time() - start_time > 2400:
-                        raise HTTPException(status_code=540, detail="Timeout.")
-                    await asyncio.sleep(5)
-
-            native_out_dir = "/workspace/ComfyUI/output"
-            videos = [v for v in os.listdir(native_out_dir) if v.startswith(unique_filename_prefix) and v.endswith((".mp4", ".mkv", ".webm"))]
-            
-            if not videos:
-                raise HTTPException(status_code=500, detail="Output file missing.")
-            
-            videos.sort(key=lambda x: os.path.getmtime(os.path.join(native_out_dir, x)), reverse=True)
-            target_video_path = os.path.join(native_out_dir, videos[0])
-            
-            try:
-                async with aiohttp.ClientSession() as session:
-                    await session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True})
-            except Exception:
-                pass
-
-            with open(target_video_path, "rb") as f:
-                video_data = f.read()
-                
-            return Response(content=video_data, media_type="video/mp4")
-            
-        finally:
-            ram_task.cancel()
-            shutil.rmtree(dynamic_guides_dir, ignore_errors=True)
-            shutil.rmtree(out_dir, ignore_errors=True)
-            
-            if 'target_video_path' in locals() and os.path.exists(target_video_path):
-                os.remove(target_video_path)
