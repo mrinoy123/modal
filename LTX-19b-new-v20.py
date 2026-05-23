@@ -344,7 +344,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
         "API_KEY": "secure-video-n8n-workflow-2026"
     })],
-    memory=8192,  
+    memory=32768,  # ⚡ EXPANDED TO 32GB: Resolves CPU memory thrashing on Gemma weight casting
     scaledown_window=5,  
     timeout=3600
 )
@@ -401,11 +401,11 @@ sys.meta_path.insert(0, UtilsPackageRedirector())
 def mock_virtual_memory():
     class MockVM:
         def __init__(self):
-            self.total = 6 * 1024 * 1024 * 1024  
-            self.available = 4 * 1024 * 1024 * 1024  
-            self.percent = 33.3
-            self.used = 2 * 1024 * 1024 * 1024
-            self.free = 4 * 1024 * 1024 * 1024
+            self.total = 32 * 1024 * 1024 * 1024  
+            self.available = 24 * 1024 * 1024 * 1024  
+            self.percent = 25.0
+            self.used = 8 * 1024 * 1024 * 1024
+            self.free = 24 * 1024 * 1024 * 1024
     return MockVM()
 psutil.virtual_memory = mock_virtual_memory
 
@@ -483,7 +483,7 @@ except Exception: pass
         }
 
         if os.path.exists("/mnt/weights"):
-            # Ensure persistent volume subdirectories are ready to cache Triton & Inductor compiles
+            # Ensure persistent volume subdirectories exist to cache Triton & Inductor compiles
             os.makedirs("/mnt/weights/.triton_cache", exist_ok=True)
             os.makedirs("/mnt/weights/.inductor_cache", exist_ok=True)
             for root_dir, _, files in os.walk("/mnt/weights"):
