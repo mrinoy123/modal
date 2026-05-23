@@ -17,9 +17,9 @@ from typing import Optional
 # Purpose: Defines the core operating system, environment variables, system-level dependencies, and the base python libraries needed for video processing and AI model inference.
 # ==========================================
 
-# Setup optimized development container image with required compilation tooling
+# Setup optimized development container image (Aligned to CUDA 12.4.1 to match PyTorch cu124 compilation)
 base_image = modal.Image.from_registry(
-    "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
+    "nvidia/cuda:12.4.1-devel-ubuntu24.04", 
     add_python="3.12"
 ).apt_install(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
@@ -51,7 +51,7 @@ build_image = base_image.env({
 # ==========================================
 
 # Clone ComfyUI and install required custom nodes (VFI Purged)
-custom_nodes_image = build_image.run_commands(
+final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
@@ -73,13 +73,9 @@ custom_nodes_image = build_image.run_commands(
     # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     # Re-enforce kornia and numpy limits to prevent array mismatches
-    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
-)
-
-# SageAttention source compilation (Placed post-Sledgehammer to compile against the correct PyTorch binary)
-final_image = custom_nodes_image.run_commands(
-    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
-    "cd /workspace/SageAttention && pip install --no-build-isolation ."
+    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
+    # ⚡ Install SageAttention via the native default GitHub installation as requested
+    "pip install git+https://github.com/thu-ml/SageAttention.git"
 )
 
 
