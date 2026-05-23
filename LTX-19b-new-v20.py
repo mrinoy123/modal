@@ -344,7 +344,7 @@ def patch_comfyui_model_management_all():
         with open(mm_path, "r") as f:
             content = f.read()
         
-        # 1. Inject the Upgraded Category-Aware Sequential Model Purger Patch at the start of load_models_gpu
+        # 1. Inject Upgraded Category-Aware Sequential Model Purger (Scoped-Safe to avoid UnboundLocalError)
         if "### SEQUENTIAL MODEL PURGER PATCH ###" not in content:
             print("🔧 Injecting upgraded category-aware sequential model-purging patch into comfy/model_management.py...")
             target_str = "def load_models_gpu("
@@ -379,12 +379,15 @@ def patch_comfyui_model_management_all():
                 unload_all_models()
             except Exception as e:
                 pass
-            import gc
-            import torch
+            import sys
+            _gc = sys.modules.get("gc") or __import__("gc")
+            _torch = sys.modules.get("torch")
+            if _gc is not None:
+                _gc.collect()
+            if _torch is not None:
+                _torch.cuda.empty_cache()
+                _torch.cuda.ipc_collect()
             import ctypes
-            gc.collect()
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
             try:
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
             except Exception:
