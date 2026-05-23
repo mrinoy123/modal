@@ -585,6 +585,7 @@ except Exception as e:
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
+        env_vars["PYTHONUNBUFFERED"] = "1"  # ⚡ Force unbuffered stdout streaming for real-time logs
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["OMP_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
@@ -594,7 +595,7 @@ except Exception as e:
         
         # ⚡ --lowvram REMOVED here to engage Normal VRAM, but --mmap-torch-files stays for direct disk streaming
         self.process = subprocess.Popen([
-            "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
+            "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  # ⚡ Added -u flag for unbuffered output
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
             "--disable-pinned-memory"        
