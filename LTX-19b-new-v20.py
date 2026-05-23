@@ -297,12 +297,6 @@ class LTXEngine:
                             if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                                 if len(node_data["widgets_values"]) > 0:
                                     node_data["widgets_values"][0] = resolved_lora
-                                    
-                    # ⚡ CRITICAL TENSO SAFEGUARD: Force bypass on sequencer for single-image guides to prevent size 1 tensor mismatch
-                    if class_type == "DenoLTXSequencer":
-                        num_images = node_data["inputs"].get("num_images", 0)
-                        if num_images <= 1:
-                            node_data["inputs"]["bypass"] = True
 
                     sanitized_workflow[str(node_id)] = node_data
             
