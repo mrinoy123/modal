@@ -464,6 +464,32 @@ def mock_virtual_memory():
 psutil.virtual_memory = mock_virtual_memory
 print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
 
+# --- Resilient UNETLoader Memory-Purging patch ---
+try:
+    import nodes
+    import gc
+    import torch
+    import ctypes
+    _orig_load_unet = nodes.UNETLoader.load_unet
+    def patched_load_unet(self, *args, **kwargs):
+        print("🛡️ [Memory Purger] Intercepted UNETLoader. Purging Text Encoder from VRAM before allocating UNet...")
+        try:
+            import comfy.model_management
+            comfy.model_management.unload_all_models()
+        except Exception as e:
+            print(f"⚠️ Failed to unload models: {e}")
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        return _orig_load_unet(self, *args, **kwargs)
+    nodes.UNETLoader.load_unet = patched_load_unet
+    print("✅ Successfully patched UNETLoader to execute memory-purging sequentially!")
+except Exception as e:
+    print(f"⚠️ Failed to patch UNETLoader memory purger: {e}")
+
 # --- Guider raw_conds resilient background-compatibility patch ---
 try:
     import threading
