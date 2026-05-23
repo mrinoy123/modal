@@ -14,6 +14,7 @@ from typing import Optional
 
 # ==========================================
 # PART 1: Infrastructure Configuration & Base Image
+# Purpose: Defines the core operating system, environment variables, system-level dependencies, and the base python libraries needed for video processing and AI model inference.
 # ==========================================
 
 # Setup optimized development container image with required compilation tooling
@@ -41,6 +42,11 @@ build_image = base_image.env({
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
 )
 
+# ==========================================
+# PART 2: Advanced Optimization Patches & Custom Node Installation
+# Purpose: Compiles high-performance kernels (SageAttention) and injects critical code modifications to custom nodes during the image baking process.
+# ==========================================
+
 # ⚡ SageAttention source compilation matching your working config
 compiled_image = build_image.run_commands(
     "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
@@ -63,8 +69,15 @@ final_image = compiled_image.run_commands(
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
+    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\"",
+    # ⚡ THE CLUE PATCH: Robust fallback for guider.raw_conds to bypass the Tensor IndexError 
+    "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (getattr(guider, \\'original_conds\\', {}).get(\\'positive\\'), getattr(guider, \\'original_conds\\', {}).get(\\'negative\\'))'); open(filepath, 'w').write(code)\""
 )
+
+# ==========================================
+# PART 3: Production Class Definition & Engine Initialization
+# Purpose: Defines the Modal application resources, handles the pre-execution model symlinking, and launches the ComfyUI subprocess.
+# ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -117,75 +130,6 @@ class LTXEngine:
                             try: os.symlink(src_path, dest)
                             except FileExistsError: pass
 
-        # 🩹 STABLE LTXV PATCH: Write CFGGuider and convert_cond patches as an independent Custom Node.
-        # This records 'self.raw_conds' dynamically and wraps PyTorch Tensors properly to prevent the IndexError.
-        try:
-            patch_dir = "/workspace/ComfyUI/custom_nodes/ComfyUI-CFGGuiderPatch"
-            os.makedirs(patch_dir, exist_ok=True)
-            init_filepath = os.path.join(patch_dir, "__init__.py")
-            
-            patch_code = """# ComfyUI-CFGGuiderPatch/__init__.py
-import comfy.samplers
-import comfy.sampler_helpers
-import torch
-
-print("🩹 [CFGGuiderPatch] Applying raw_conds patch to CFGGuider...")
-try:
-    orig_set_conds = comfy.samplers.CFGGuider.set_conds
-    def patched_set_conds(self, positive, negative):
-        self.raw_conds = (positive, negative)
-        return orig_set_conds(self, positive, negative)
-    comfy.samplers.CFGGuider.set_conds = patched_set_conds
-    print("🩹 [CFGGuiderPatch] CFGGuider patch applied successfully!")
-except Exception as e:
-    print(f"⚠️ [CFGGuiderPatch] Failed to patch CFGGuider: {e}")
-
-print("🩹 [CFGGuiderPatch] Applying convert_cond tensor indexing monkey-patch...")
-try:
-    def patched_convert_cond(cond):
-        if cond is None:
-            return None
-        c = []
-        for x in cond:
-            if isinstance(x, torch.Tensor):
-                c.append([x, {}])
-            elif isinstance(x, (list, tuple)):
-                p = x[0]
-                t = x[1].copy() if len(x) > 1 and isinstance(x[1], dict) else {}
-                c.append([p, t])
-            else:
-                c.append([x, {}])
-        return c
-    comfy.sampler_helpers.convert_cond = patched_convert_cond
-    print("🩹 [CFGGuiderPatch] convert_cond patch applied successfully!")
-except Exception as e:
-    print(f"⚠️ [CFGGuiderPatch] Failed to patch convert_cond: {e}")
-
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
-"""
-            with open(init_filepath, "w") as f:
-                f.write(patch_code)
-            print("✅ CFGGuider and convert_cond startup custom node successfully injected!")
-        except Exception as patch_err:
-            print(f"⚠️ Error injecting patches: {patch_err}")
-
-        # Ensure looping_sampler.py is pristine or cleanly restored to avoid double patch conflicts
-        try:
-            filepath = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
-            if os.path.exists(filepath):
-                content = open(filepath, "r").read()
-                broken_str = "positive, negative = getattr(guider, 'raw_conds', (guider.conds.get('positive'), guider.conds.get('negative')) if hasattr(guider, 'conds') else (None, None))"
-                clean_str = "positive, negative = guider.raw_conds"
-                if broken_str in content:
-                    print("🩹 Reverting legacy looping_sampler.py dirty patch to standard pristine format...")
-                    content = content.replace(broken_str, clean_str)
-                    with open(filepath, "w") as f:
-                        f.write(content)
-                    print("✅ Looping Sampler code cleanly restored to native.")
-        except Exception as restore_err:
-            print(f"⚠️ Warning during file restore: {restore_err}")
-
         self.s3 = boto3.client(
             service_name='s3', 
             endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", 
@@ -228,6 +172,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
             except Exception:
                 time.sleep(2)
         os._exit(1)
+
+# ==========================================
+# PART 4: Hybrid Endpoint Handler & Execution Process
+# Purpose: Exposes a FastAPI endpoint to process incoming requests, handle dynamic JSON injection, download assets, and render output.
+# ==========================================
 
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
