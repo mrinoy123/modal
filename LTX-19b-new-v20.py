@@ -50,7 +50,8 @@ build_image = base_image.env({
     "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
     "decord", "imageio", "scikit-image", "numba", "einops", 
     "transformers", "diffusers", "accelerate", "bitsandbytes",
-    "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil"
+    "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil", 
+    "sageattention"  # ⚡ Added native sageattention dependency to prevent node execution conflicts
 )
 
 TARGET_UNET = "ltx-2-19b-dev-fp8.safetensors"
@@ -789,16 +790,11 @@ except Exception: pass
                 if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
                 if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
 
+        # ⚡ SAGE ATTENTION PATCH PRESERVATION
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
-            sage_input = wf_data[sage_node_id]["inputs"].get("model")
-            if sage_input:
-                for node_id, node_data in wf_data.items():
-                    if isinstance(node_data, dict) and "inputs" in node_data:
-                        for k, v in node_data["inputs"].items():
-                            if isinstance(v, list) and len(v) > 0 and str(v[0]) == str(sage_node_id):
-                                node_data["inputs"][k] = sage_input
-            del wf_data[sage_node_id]
+            print(f"🧠 Native Memory Optimization Active: Preserving Sage Attention Patch (Node {sage_node_id}) for enhanced VRAM efficiency and speed.")
+            # Note: Explicitly NOT bypassing or deleting this node anymore. It will execute natively via the pipeline.
 
         print("⚡ Dispatching NVMe Stream-Optimized LTX-19B workflow to local endpoint...")
         comfy_url = "http://127.0.0.1:8188/prompt"
