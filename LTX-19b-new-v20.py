@@ -117,9 +117,8 @@ class LTXEngine:
                             try: os.symlink(src_path, dest)
                             except FileExistsError: pass
 
-        # 🩹 STABLE LTXV PATCH: Write CFGGuider patch as an independent Custom Node.
-        # This records 'self.raw_conds' dynamically as raw, unconverted PyTorch structures,
-        # completely bypassing the IndexError mismatch when looping sampler executes.
+        # 🩹 STABLE LTXV PATCH: Write CFGGuider and convert_cond patches as an independent Custom Node.
+        # This records 'self.raw_conds' dynamically and wraps PyTorch Tensors properly to prevent the IndexError.
         try:
             patch_dir = "/workspace/ComfyUI/custom_nodes/ComfyUI-CFGGuiderPatch"
             os.makedirs(patch_dir, exist_ok=True)
@@ -127,9 +126,10 @@ class LTXEngine:
             
             patch_code = """# ComfyUI-CFGGuiderPatch/__init__.py
 import comfy.samplers
+import comfy.sampler_helpers
+import torch
 
 print("🩹 [CFGGuiderPatch] Applying raw_conds patch to CFGGuider...")
-
 try:
     orig_set_conds = comfy.samplers.CFGGuider.set_conds
     def patched_set_conds(self, positive, negative):
@@ -140,14 +140,35 @@ try:
 except Exception as e:
     print(f"⚠️ [CFGGuiderPatch] Failed to patch CFGGuider: {e}")
 
+print("🩹 [CFGGuiderPatch] Applying convert_cond tensor indexing monkey-patch...")
+try:
+    def patched_convert_cond(cond):
+        if cond is None:
+            return None
+        c = []
+        for x in cond:
+            if isinstance(x, torch.Tensor):
+                c.append([x, {}])
+            elif isinstance(x, (list, tuple)):
+                p = x[0]
+                t = x[1].copy() if len(x) > 1 and isinstance(x[1], dict) else {}
+                c.append([p, t])
+            else:
+                c.append([x, {}])
+        return c
+    comfy.sampler_helpers.convert_cond = patched_convert_cond
+    print("🩹 [CFGGuiderPatch] convert_cond patch applied successfully!")
+except Exception as e:
+    print(f"⚠️ [CFGGuiderPatch] Failed to patch convert_cond: {e}")
+
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 """
             with open(init_filepath, "w") as f:
                 f.write(patch_code)
-            print("✅ CFGGuider startup custom node successfully injected!")
+            print("✅ CFGGuider and convert_cond startup custom node successfully injected!")
         except Exception as patch_err:
-            print(f"⚠️ Error injecting CFGGuider patch: {patch_err}")
+            print(f"⚠️ Error injecting patches: {patch_err}")
 
         # Ensure looping_sampler.py is pristine or cleanly restored to avoid double patch conflicts
         try:
