@@ -71,13 +71,14 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
-    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
-).run_commands(
-    # ⚡ KORNIA DOWNGRADE: Overrides newer conflicting versions to fix Spatial Padding issues in older nodes
-    "pip install kornia==0.6.12",
+    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;",
+    # ⚡ RESTORED: Numpy/Torch version lock
+    "pip uninstall -y torch torchvision torchaudio numpy",
+    "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
+    "pip install --no-cache-dir numpy==1.26.4 kornia==0.6.12",
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\"",
-    # ⚡ THE CLUE PATCH: Robust fallback for guider.raw_conds to bypass the Tensor IndexError 
-    "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (getattr(guider, \\'original_conds\\', {}).get(\\'positive\\'), getattr(guider, \\'original_conds\\', {}).get(\\'negative\\'))'); open(filepath, 'w').write(code)\""
+    # ⚡ THE DEFINITIVE PATCH: Bulletproofing ComfyUI's core tensor conversion
+    "python3 -c \"filepath = '/workspace/ComfyUI/comfy/sampler_helpers.py'; code = open(filepath).read(); code = code.replace('def convert_cond(cond):', 'def convert_cond(cond):\\n    import torch\\n    if isinstance(cond, torch.Tensor): return [[cond, {}]]'); code = code.replace('for x in cond:', 'for x in cond:\\n        if isinstance(x, torch.Tensor):\\n            c.append([x, {}])\\n            continue'); code = code.replace('t = x[1].copy()', 't = x[1].copy() if len(x) > 1 and isinstance(x[1], dict) else {}'); code = code.replace('p = x[0]', 'p = x[0] if isinstance(x, (list, tuple)) else x'); open(filepath, 'w').write(code)\""
 )
 
 # ==========================================
