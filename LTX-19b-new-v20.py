@@ -192,7 +192,7 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Applies necessary backwards-compatibility patches and establishes the tuple-safe VRAM reserve rule.
+# Purpose: Applies necessary backwards-compatibility patches and establishes the 500 MB VRAM reserve rule.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -309,22 +309,35 @@ def patch_ltx_kornia_pad():
                 f.writelines(new_lines)
             print("✅ Successfully patched pyramid_blending.py!")
 
+def patch_flux_layers():
+    import os
+    layers_path = "/workspace/ComfyUI/comfy/ldm/flux/layers.py"
+    if os.path.exists(layers_path):
+        with open(layers_path, "a") as f:
+            f.write("\n# --- LTX-Video Compatibility Fallback (apply_rotary_emb) ---\n")
+            f.write("def apply_rotary_emb(x, freqs_cis):\n")
+            f.write("    if x.shape[1] == 0: return x\n")
+            f.write("    t_ = x.reshape(*x.shape[:-1], -1, 1, 2)\n")
+            f.write("    t_out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]\n")
+            f.write("    return t_out.reshape(*x.shape).type_as(x)\n")
+        print("✅ Patched comfy/ldm/flux/layers.py to inject missing apply_rotary_emb function!")
+
 def patch_comfyui_model_management():
     import os
     mm_path = "/workspace/ComfyUI/comfy/model_management.py"
     if os.path.exists(mm_path):
         with open(mm_path, "a") as f:
-            f.write("\n# --- 2.0 GB VRAM Reservation Patch (Tuple-Safe) ---\n")
+            f.write("\n# --- 500 MB VRAM Reservation Patch (Tuple-Safe) ---\n")
             f.write("import sys\n")
             f.write("_orig_get_free_memory = get_free_memory\n")
             f.write("def get_free_memory(dev=None, torch_free_too=False):\n")
             f.write("    res = _orig_get_free_memory(dev, torch_free_too)\n")
-            f.write("    reserve_bytes = 2 * 1024 * 1024 * 1024  # Force strict 2.0 GB Reserve for NVMe mapping safety\n")
+            f.write("    reserve_bytes = 500 * 1024 * 1024  # Force strict 500 MB Reserve\n")
             f.write("    if isinstance(res, tuple):\n")
             f.write("        free_mem, torch_free = res\n")
             f.write("        return (max(0, free_mem - reserve_bytes), torch_free)\n")
             f.write("    return max(0, res - reserve_bytes)\n")
-        print("✅ Successfully injected 2.0 GB Tuple-Safe VRAM Reservation into ComfyUI allocator!")
+        print("✅ Successfully injected 500 MB Tuple-Safe VRAM Reservation into ComfyUI allocator!")
 
 final_image = (
     build_image.pip_install(
@@ -368,6 +381,7 @@ final_image = (
     .run_function(patch_comfy_lightricks_model)
     .run_function(patch_ltx_video_imports)
     .run_function(patch_ltx_kornia_pad)
+    .run_function(patch_flux_layers)
     .run_function(patch_comfyui_model_management)
     .run_function(bake_private_workflow_into_image)
 )
@@ -727,7 +741,7 @@ except Exception as e:
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
             
-            # ⚡ Fixed Hardware Decoding Rules to prevent working_device validator crashes
+            # ⚡ Hardware Decoding Rules
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
