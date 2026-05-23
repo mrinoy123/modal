@@ -50,7 +50,7 @@ build_image = base_image.env({
     "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
     "decord", "imageio", "scikit-image", "numba", "einops", 
     "transformers", "diffusers", "accelerate", "bitsandbytes",
-    "lark", "openpyxl"  # Pre-installed dependencies to prevent runtime blocking
+    "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil"  # Added database requirements and utility dependencies
 )
 
 TARGET_UNET = "ltx-2-19b-dev-fp8.safetensors"
@@ -64,7 +64,6 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# Purpose: Pre-downloads the master workflow, injects clean model pathways, and seals it into the appliance image.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -193,7 +192,6 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Applies necessary backwards-compatibility patches and establishes the 500 MB VRAM reserve rule.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -380,7 +378,6 @@ final_image = (
         "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_19b_v5",
         "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_19b_v5",
         "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor # cache_bust=2026_05_23_19b_v5",
         "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_19b_v5"
     )
     .run_commands(
@@ -403,7 +400,6 @@ final_image = (
 
 # ==========================================
 # PART 4: Production Class Definition & Resource Reclamation Loops
-# Purpose: Manages the Modal lifecycle, handles normal VRAM mapping directly from NVMe, and prevents System leaks.
 # ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -449,14 +445,47 @@ class LTXEngine:
             with open(main_path, "r") as f:
                 content = f.read()
             
+            # --- Active Import Interception & Sequential Load Hook Injector ---
             mock_code = """
 import sys
+import os
 import psutil
+import importlib.abc
+import importlib.machinery
+
+# --- Import Redirection Hook to Resolve Module vs Package Conflict (ComfyUI vs comfy/utils.py) ---
+class UtilsPackageRedirector(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "utils" or fullname.startswith("utils."):
+            comfyui_path = "/workspace/ComfyUI"
+            original_path = list(sys.path)
+            try:
+                # Force dynamic routing away from the file 'comfy/utils.py' back to package directory 'utils/'
+                sys.path = [p for p in sys.path if not (p.endswith("comfy") or "comfy/" in p or "comfy\\\\" in p or p.endswith("comfy-cli") or "comfy-cli" in p)]
+                if comfyui_path not in sys.path:
+                    sys.path.insert(0, comfyui_path)
+                
+                for finder in sys.meta_path:
+                    if finder is self:
+                        continue
+                    try:
+                        spec = finder.find_spec(fullname, path, target)
+                        if spec is not None:
+                            return spec
+                    except Exception:
+                        pass
+            finally:
+                sys.path = original_path
+        return None
+
+sys.meta_path.insert(0, UtilsPackageRedirector())
+print("🛡️ [Import Guard] Registered 'utils' Package Redirector import hook successfully.")
+
 def mock_virtual_memory():
     class MockVM:
         def __init__(self):
-            self.total = 6 * 1024 * 1024 * 1024  # Force limit to 6 GB
-            self.available = 4 * 1024 * 1024 * 1024  # Force limit to 4 GB
+            self.total = 6 * 1024 * 1024 * 1024  # Force limit system RAM to 6 GB
+            self.available = 4 * 1024 * 1024 * 1024  # Force limit system RAM to 4 GB
             self.percent = 33.3
             self.used = 2 * 1024 * 1024 * 1024
             self.free = 4 * 1024 * 1024 * 1024
@@ -464,31 +493,47 @@ def mock_virtual_memory():
 psutil.virtual_memory = mock_virtual_memory
 print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
 
-# --- Resilient UNETLoader Memory-Purging patch ---
+# --- Sequential GPU Model Offloading Patch (Ensures models are completely purged sequentially) ---
 try:
-    import nodes
-    import gc
-    import torch
-    import ctypes
-    _orig_load_unet = nodes.UNETLoader.load_unet
-    def patched_load_unet(self, *args, **kwargs):
-        print("🛡️ [Memory Purger] Intercepted UNETLoader. Purging Text Encoder from VRAM before allocating UNet...")
-        try:
-            import comfy.model_management
-            comfy.model_management.unload_all_models()
-        except Exception as e:
-            print(f"⚠️ Failed to unload models: {e}")
-        gc.collect()
-        torch.cuda.empty_cache()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
-        return _orig_load_unet(self, *args, **kwargs)
-    nodes.UNETLoader.load_unet = patched_load_unet
-    print("✅ Successfully patched UNETLoader to execute memory-purging sequentially!")
+    import threading
+    import time
+    def delayed_memory_purger_patch():
+        patched = False
+        while not patched:
+            try:
+                import sys
+                if "comfy.model_management" in sys.modules:
+                    import comfy.model_management
+                    import gc
+                    import torch
+                    import ctypes
+                    
+                    _orig_load_models_gpu = comfy.model_management.load_models_gpu
+                    def patched_load_models_gpu(models, *args, **kwargs):
+                        print(f"🛡️ [Memory Purger] Intercepted load_models_gpu for {[type(m.model).__name__ for m in models]}. Purging prior models before loading next model...")
+                        try:
+                            comfy.model_management.unload_all_models()
+                        except Exception as e:
+                            pass
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                        try:
+                            ctypes.CDLL("libc.so.6").malloc_trim(0)
+                        except Exception:
+                            pass
+                        return _orig_load_models_gpu(models, *args, **kwargs)
+                    
+                    comfy.model_management.load_models_gpu = patched_load_models_gpu
+                    print("✅ Successfully patched load_models_gpu to sequentially purge models dynamically!")
+                    patched = True
+            except Exception:
+                pass
+            time.sleep(0.1)
+            
+    threading.Thread(target=delayed_memory_purger_patch, daemon=True).start()
 except Exception as e:
-    print(f"⚠️ Failed to patch UNETLoader memory purger: {e}")
+    print(f"⚠️ Failed to register delayed memory purger: {e}")
 
 # --- Guider raw_conds resilient background-compatibility patch ---
 try:
@@ -611,7 +656,7 @@ except Exception as e:
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
-        env_vars["PYTHONUNBUFFERED"] = "1"  # ⚡ Force unbuffered stdout streaming for real-time logs
+        env_vars["PYTHONUNBUFFERED"] = "1"  
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["OMP_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
@@ -619,9 +664,8 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # ⚡ --lowvram REMOVED here to engage Normal VRAM, but --mmap-torch-files stays for direct disk streaming
         self.process = subprocess.Popen([
-            "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  # ⚡ Added -u flag for unbuffered output
+            "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
             "--disable-pinned-memory"        
@@ -632,7 +676,6 @@ except Exception as e:
 
         asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
 
-        # ⚡ Safe node registry poll loop: Blocks until node schema loads cleanly
         start_time = time.time()
         node_registration_verified = False
         while time.time() - start_time < 300:
@@ -657,7 +700,6 @@ except Exception as e:
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
-# Purpose: Intercepts requests, forces dynamic decoding and parameters to run optimally on the L4.
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -916,7 +958,7 @@ except Exception as e:
                     ExpiresIn=86400
                 )
                 
-                # Active VRAM and Garbage collection sweeps to prepare for consecutive normal-VRAM requests
+                # Active VRAM and garbage collection sweeps to prepare for consecutive requests
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
@@ -924,6 +966,22 @@ except Exception as e:
                 except Exception:
                     pass
                 
+                # 🛡️ POST /free endpoint trigger: Purges ComfyUI VRAM entirely once work is done
+                try:
+                    free_url = "http://127.0.0.1:8188/free"
+                    free_payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+                    free_req = urllib.request.Request(
+                        free_url, 
+                        data=free_payload, 
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(free_req, timeout=5) as free_resp:
+                        if free_resp.status == 200:
+                            print("🛡️ [Memory Purger] Local ComfyUI VRAM cache purged successfully.")
+                except Exception as e:
+                    print(f"⚠️ Failed to call local /free endpoint: {e}")
+
                 print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
                 return {"status": "success", "video_url": signed_url}
                 
