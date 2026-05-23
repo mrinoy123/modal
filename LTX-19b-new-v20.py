@@ -45,68 +45,53 @@ build_image = base_image.env({
 
 # ==========================================
 # PART 2: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Compiles high-performance kernels, handles Git rollbacks to stable pre-March states, downgrades Kornia, and injects critical code modifications.
+# Purpose: Compiles high-performance kernels, handles Git rollbacks to stable pre-March states, downgrades Kornia, and synchronously injects critical code modifications safely.
 # ==========================================
 
-def patch_comfy_raw_conds():
-    """
-    HOTFIX: Restores the missing 'raw_conds' attribute to ComfyUI's samplers and guiders.
-    This resolves the AttributeError caused when using newer LTXVideo nodes with older ComfyUI rollbacks.
-    """
+def apply_synchronous_core_patches():
     import os
-    main_path = "/workspace/ComfyUI/main.py"
-    if not os.path.exists(main_path): return
-    
-    with open(main_path, "r") as f:
-        content = f.read()
+    import re
+
+    print("🔧 Commencing Synchronous Core Patching for pre-March ComfyUI compatibility...")
+
+    # 1. Patch LTXVideo's looping_sampler to gracefully handle missing raw_conds
+    sampler_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+    if os.path.exists(sampler_path):
+        with open(sampler_path, "r") as f:
+            content = f.read()
         
-    patch_code = """
-# --- HOTFIX: RESTORE RAW_CONDS FOR OLDER COMFYUI VERSIONS ---
-try:
-    import threading
-    import time
-    def background_patcher():
-        try:
-            patched = False
-            while not patched:
-                import sys
-                modules_to_patch = []
-                if "comfy.samplers" in sys.modules: modules_to_patch.append(sys.modules["comfy.samplers"])
-                if "comfy.guiders" in sys.modules: modules_to_patch.append(sys.modules["comfy.guiders"])
-                
-                if not modules_to_patch:
-                    time.sleep(0.1)
-                    continue
+        # Fallback cleanly extracts positive/negative from the old 'conds' dictionary if raw_conds is missing
+        fallback_code = "positive, negative = getattr(guider, 'raw_conds', (getattr(guider, 'conds', {}).get('positive', []), getattr(guider, 'conds', {}).get('negative', [])))"
+        
+        # Replace the breaking line
+        new_content = content.replace("positive, negative = guider.raw_conds", fallback_code)
+        
+        if new_content != content:
+            with open(sampler_path, "w") as f:
+                f.write(new_content)
+            print("✅ Synchronous Patch: Applied robust raw_conds fallback to looping_sampler.py")
+
+    # 2. Patch ComfyUI Core (samplers.py / guiders.py) to save raw_conds natively
+    comfy_dir = "/workspace/ComfyUI/comfy"
+    if os.path.exists(comfy_dir):
+        for root, _, files in os.walk(comfy_dir):
+            for file in files:
+                if file.endswith(".py"):
+                    filepath = os.path.join(root, file)
+                    with open(filepath, "r") as f:
+                        original_content = f.read()
                     
-                patched_classes = set()
-                for module in modules_to_patch:
-                    for name in dir(module):
-                        obj = getattr(module, name)
-                        if isinstance(obj, type) and hasattr(obj, "set_conds"):
-                            if obj in patched_classes: continue
-                            orig_set_conds = obj.set_conds
-                            if getattr(orig_set_conds, "__name__", "") == "patched_set_conds": continue
-                            def make_patched_set_conds(original_method):
-                                def patched_set_conds(self, *args, **kwargs):
-                                    pos = args[0] if len(args) >= 1 else None
-                                    neg = args[1] if len(args) >= 2 else None
-                                    if "positive" in kwargs: pos = kwargs["positive"]
-                                    if "negative" in kwargs: neg = kwargs["negative"]
-                                    self.raw_conds = (pos, neg)
-                                    return original_method(self, *args, **kwargs)
-                                return patched_set_conds
-                            obj.set_conds = make_patched_set_conds(orig_set_conds)
-                            patched_classes.add(obj)
-                patched = True
-                time.sleep(0.1)
-        except Exception: pass
-    threading.Thread(target=background_patcher, daemon=True).start()
-except Exception: pass
-"""
-    if "background_patcher" not in content:
-        with open(main_path, "w") as f:
-            f.write(patch_code + "\n" + content)
-        print("✅ Successfully injected backward-compatible raw_conds patch into main.py!")
+                    # Regex to find: def set_conds(self, positive, negative): and hard-inject self.raw_conds
+                    patched_content = re.sub(
+                        r'(def set_conds\s*\(\s*self\s*,\s*positive\s*,\s*negative\s*\)\s*:)',
+                        r'\1\n        self.raw_conds = (positive, negative)',
+                        original_content
+                    )
+                    
+                    if patched_content != original_content:
+                        with open(filepath, "w") as f:
+                            f.write(patched_content)
+                        print(f"✅ Synchronous Patch: Hard-injected raw_conds definition into {file}")
 
 # ⚡ SageAttention source compilation matching your working config
 compiled_image = build_image.run_commands(
@@ -140,7 +125,9 @@ final_image = compiled_image.run_commands(
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\"",
     # ⚡ THE DEFINITIVE PATCH: Bulletproofing ComfyUI's core tensor conversion
     "python3 -c \"filepath = '/workspace/ComfyUI/comfy/sampler_helpers.py'; code = open(filepath).read(); code = code.replace('def convert_cond(cond):', 'def convert_cond(cond):\\n    import torch\\n    if isinstance(cond, torch.Tensor): return [[cond, {}]]'); code = code.replace('for x in cond:', 'for x in cond:\\n        if isinstance(x, torch.Tensor):\\n            c.append([x, {}])\\n            continue'); code = code.replace('t = x[1].copy()', 't = x[1].copy() if len(x) > 1 and isinstance(x[1], dict) else {}'); code = code.replace('p = x[0]', 'p = x[0] if isinstance(x, (list, tuple)) else x'); open(filepath, 'w').write(code)\""
-).run_function(patch_comfy_raw_conds) # ⚡ EXECUTING THE NEW COND FIX
+).run_function(apply_synchronous_core_patches) # ⚡ EXECUTING THE DETERMINISTIC HARD-DISK PATCH
+
+
 
 
 
