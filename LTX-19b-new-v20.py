@@ -113,6 +113,7 @@ def bake_private_workflow_into_image():
             elif cls == "LTXAVTextEncoderLoader":
                 inputs["text_encoder"] = TARGET_GEMMA
                 inputs["ckpt_name"] = TARGET_CONNECTOR
+                inputs["device"] = "default"  # ⚡ Default GPU routing is safe now that float8 is removed
             elif cls in ["VAELoaderKJ", "VAELoader"]:
                 inputs["vae_name"] = TARGET_VIDEO_VAE
                 inputs["ckpt_name"] = TARGET_VIDEO_VAE
@@ -344,7 +345,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
         "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
         "API_KEY": "secure-video-n8n-workflow-2026"
     })],
-    memory=32768,  # ⚡ EXPANDED TO 32GB: Resolves CPU memory thrashing on Gemma weight casting
+    memory=32768,  # ⚡ KEEP AT 32GB: Required to buffer model swapping in system RAM
     scaledown_window=5,  
     timeout=3600
 )
@@ -483,7 +484,6 @@ except Exception: pass
         }
 
         if os.path.exists("/mnt/weights"):
-            # Ensure persistent volume subdirectories exist to cache Triton & Inductor compiles
             os.makedirs("/mnt/weights/.triton_cache", exist_ok=True)
             os.makedirs("/mnt/weights/.inductor_cache", exist_ok=True)
             for root_dir, _, files in os.walk("/mnt/weights"):
@@ -527,11 +527,11 @@ except Exception: pass
         env_vars["TRITON_CACHE_DIR"] = "/mnt/weights/.triton_cache"
         env_vars["TORCHINDUCTOR_CACHE_DIR"] = "/mnt/weights/.inductor_cache"
         
-        # ⚡ NORMAL VRAM EXECUTION (Disabling Smart Memory to handle segment loading safely)
+        # ⚡ NORMAL VRAM EXECUTION (Removed float8 text encoder flag to prevent rms_norm hangs)
         self.process = subprocess.Popen([
             "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
+            "--bf16-vae", "--disable-xformers",
             "--disable-pinned-memory", "--disable-smart-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
@@ -687,6 +687,7 @@ except Exception: pass
                 elif cls == "LTXAVTextEncoderLoader":
                     inputs["text_encoder"] = TARGET_GEMMA
                     inputs["ckpt_name"] = TARGET_CONNECTOR
+                    inputs["device"] = "default"  # ⚡ Runs the prompt encoding instantly on GPU
                 elif cls in ["VAELoaderKJ", "VAELoader"]:
                     inputs["vae_name"] = TARGET_VIDEO_VAE
                     inputs["ckpt_name"] = TARGET_VIDEO_VAE
