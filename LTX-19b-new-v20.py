@@ -50,7 +50,7 @@ build_image = base_image.env({
     "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
     "decord", "imageio", "scikit-image", "numba", "einops", 
     "transformers", "diffusers", "accelerate", "bitsandbytes",
-    "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil"  # Added database requirements and utility dependencies
+    "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil"
 )
 
 TARGET_UNET = "ltx-2-19b-dev-fp8.safetensors"
@@ -64,6 +64,7 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
+# Purpose: Pre-downloads the master workflow, injects clean model pathways, and seals it into the appliance image.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -192,6 +193,7 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
+# Purpose: Applies necessary backwards-compatibility patches and establishes the 500 MB VRAM reserve rule.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -335,22 +337,85 @@ def patch_flux_layers():
                     f.write("\ntry:\n    if '__all__' in globals():\n        if 'apply_rotary_emb' not in __all__:\n            __all__.append('apply_rotary_emb')\nexcept Exception: pass\n")
         print("✅ Patched comfy/ldm/flux/layers.py with robust apply_rotary_emb fallback!")
 
-def patch_comfyui_model_management():
+def patch_comfyui_model_management_all():
     import os
     mm_path = "/workspace/ComfyUI/comfy/model_management.py"
     if os.path.exists(mm_path):
-        with open(mm_path, "a") as f:
-            f.write("\n# --- 500 MB VRAM Reservation Patch (Tuple-Safe) ---\n")
-            f.write("import sys\n")
-            f.write("_orig_get_free_memory = get_free_memory\n")
-            f.write("def get_free_memory(dev=None, torch_free_too=False):\n")
-            f.write("    res = _orig_get_free_memory(dev, torch_free_too)\n")
-            f.write("    reserve_bytes = 500 * 1024 * 1024  # Force strict 500 MB Reserve\n")
-            f.write("    if isinstance(res, tuple):\n")
-            f.write("        free_mem, torch_free = res\n")
-            f.write("        return (max(0, free_mem - reserve_bytes), torch_free)\n")
-            f.write("    return max(0, res - reserve_bytes)\n")
-        print("✅ Successfully injected 500 MB Tuple-Safe VRAM Reservation into ComfyUI allocator!")
+        with open(mm_path, "r") as f:
+            content = f.read()
+        
+        # 1. Inject the Upgraded Category-Aware Sequential Model Purger Patch at the start of load_models_gpu
+        if "### SEQUENTIAL MODEL PURGER PATCH ###" not in content:
+            print("🔧 Injecting upgraded category-aware sequential model-purging patch into comfy/model_management.py...")
+            target_str = "def load_models_gpu("
+            idx = content.find(target_str)
+            if idx != -1:
+                colon_idx = content.find("):", idx)
+                if colon_idx != -1:
+                    insert_pos = content.find("\n", colon_idx) + 1
+                    patch_code = """    ### SEQUENTIAL MODEL PURGER PATCH ###
+    try:
+        req_classes = set()
+        for m in models:
+            if hasattr(m, "model") and m.model is not None:
+                req_classes.add(type(m.model).__name__)
+            elif hasattr(m, "model_type"):
+                req_classes.add(str(m.model_type))
+        
+        curr_classes = set()
+        for lm in current_loaded_models:
+            if lm.model is not None and hasattr(lm.model, "model") and lm.model.model is not None:
+                curr_classes.add(type(lm.model.model).__name__)
+                
+        has_conflict = False
+        if req_classes and curr_classes:
+            # Switch triggers only if the loaded category is NOT a subset of the requested category
+            if not curr_classes.issubset(req_classes):
+                has_conflict = True
+                
+        if has_conflict:
+            print(f"🛡️ [Memory Purger] Class switch detected: currently loaded {curr_classes} -> requesting {req_classes}. Unloading previous models from VRAM...")
+            try:
+                unload_all_models()
+            except Exception as e:
+                pass
+            import gc
+            import torch
+            import ctypes
+            gc.collect()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
+        else:
+            print(f"🛡️ [Memory Purger] Reuse path validated: currently loaded {curr_classes} -> requesting {req_classes}. Retaining resident weights.")
+    except Exception as e:
+        print(f"⚠️ Memory Purger Patch Error: {e}")
+    #######################################
+"""
+                    content = content[:insert_pos] + patch_code + content[insert_pos:]
+        
+        # 2. Append the 500 MB VRAM Reservation Patch to the end of the file
+        if "500 MB VRAM Reservation Patch" not in content:
+            print("🔧 Appending 500 MB VRAM Reservation Patch...")
+            reservation_code = """
+# --- 500 MB VRAM Reservation Patch (Tuple-Safe) ---
+_orig_get_free_memory = get_free_memory
+def get_free_memory(dev=None, torch_free_too=False):
+    res = _orig_get_free_memory(dev, torch_free_too)
+    reserve_bytes = 500 * 1024 * 1024  # Force strict 500 MB Reserve
+    if isinstance(res, tuple):
+        free_mem, torch_free = res
+        return (max(0, free_mem - reserve_bytes), torch_free)
+    return max(0, res - reserve_bytes)
+"""
+            content += reservation_code
+
+        with open(mm_path, "w") as f:
+            f.write(content)
+        print("✅ Successfully patched comfy/model_management.py!")
 
 final_image = (
     build_image.pip_install(
@@ -394,7 +459,7 @@ final_image = (
     .run_function(patch_ltx_video_imports)
     .run_function(patch_ltx_kornia_pad)
     .run_function(patch_flux_layers)
-    .run_function(patch_comfyui_model_management)
+    .run_function(patch_comfyui_model_management_all)
     .run_function(bake_private_workflow_into_image)
 )
 
@@ -445,9 +510,7 @@ class LTXEngine:
             with open(main_path, "r") as f:
                 content = f.read()
             
-            # --- Active Import Interception & Sequential Load Hook Injector ---
-            mock_code = """
-import sys
+            mock_code = """import sys
 import os
 import psutil
 import importlib.abc
@@ -492,48 +555,6 @@ def mock_virtual_memory():
     return MockVM()
 psutil.virtual_memory = mock_virtual_memory
 print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
-
-# --- Sequential GPU Model Offloading Patch (Ensures models are completely purged sequentially) ---
-try:
-    import threading
-    import time
-    def delayed_memory_purger_patch():
-        patched = False
-        while not patched:
-            try:
-                import sys
-                if "comfy.model_management" in sys.modules:
-                    import comfy.model_management
-                    import gc
-                    import torch
-                    import ctypes
-                    
-                    _orig_load_models_gpu = comfy.model_management.load_models_gpu
-                    def patched_load_models_gpu(models, *args, **kwargs):
-                        print(f"🛡️ [Memory Purger] Intercepted load_models_gpu for {[type(m.model).__name__ for m in models]}. Purging prior models before loading next model...")
-                        try:
-                            comfy.model_management.unload_all_models()
-                        except Exception as e:
-                            pass
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                        torch.cuda.ipc_collect()
-                        try:
-                            ctypes.CDLL("libc.so.6").malloc_trim(0)
-                        except Exception:
-                            pass
-                        return _orig_load_models_gpu(models, *args, **kwargs)
-                    
-                    comfy.model_management.load_models_gpu = patched_load_models_gpu
-                    print("✅ Successfully patched load_models_gpu to sequentially purge models dynamically!")
-                    patched = True
-            except Exception:
-                pass
-            time.sleep(0.1)
-            
-    threading.Thread(target=delayed_memory_purger_patch, daemon=True).start()
-except Exception as e:
-    print(f"⚠️ Failed to register delayed memory purger: {e}")
 
 # --- Guider raw_conds resilient background-compatibility patch ---
 try:
@@ -656,7 +677,7 @@ except Exception as e:
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
-        env_vars["PYTHONUNBUFFERED"] = "1"  
+        env_vars["PYTHONUNBUFFERED"] = "1"  # Force unbuffered stdout streaming for real-time logs
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["OMP_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
@@ -676,6 +697,7 @@ except Exception as e:
 
         asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
 
+        # Safe node registry poll loop: Blocks until node schema loads cleanly
         start_time = time.time()
         node_registration_verified = False
         while time.time() - start_time < 300:
@@ -737,27 +759,35 @@ except Exception as e:
             shutil.rmtree(dynamic_guides_dir)
         os.makedirs(dynamic_guides_dir, exist_ok=True)
         
-        target_image_path = ""
+        has_images = False
         if image_url:
-            print(f"📥 Downloading dynamic guide image: {image_url}")
-            ext = os.path.splitext(image_url.split("?")[0])[1] or ".png"
-            target_image_path = os.path.join(dynamic_guides_dir, f"guide_image{ext}")
-            
-            if "r2.dev" in image_url or R2_ACCOUNT_ID in image_url:
-                parsed_url = urlparse(image_url)
-                key = parsed_url.path.lstrip("/")
-                try:
-                    self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
-                except Exception as e:
-                    raise HTTPException(status_code=400, detail=f"S3 R2 download failure: {e}")
-            else:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(image_url) as resp:
-                        if resp.status == 200:
-                            with open(target_image_path, "wb") as f:
-                                f.write(await resp.read())
-                        else:
-                            raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
+            # Supports single image as well as comma-separated image sequences
+            urls = [u.strip() for u in image_url.split(",") if u.strip()]
+            for idx, url in enumerate(urls):
+                print(f"📥 Downloading dynamic guide image {idx}: {url}")
+                ext = os.path.splitext(url.split("?")[0])[1] or ".png"
+                target_image_path = os.path.join(dynamic_guides_dir, f"guide_image_{idx}{ext}")
+                
+                if "r2.dev" in url or R2_ACCOUNT_ID in url:
+                    parsed_url = urlparse(url)
+                    key = parsed_url.path.lstrip("/")
+                    try:
+                        self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
+                        has_images = True
+                    except Exception as e:
+                        raise HTTPException(status_code=400, detail=f"S3 R2 download failure for {url}: {e}")
+                else:
+                    try:
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(url) as resp:
+                                if resp.status == 200:
+                                    with open(target_image_path, "wb") as f:
+                                        f.write(await resp.read())
+                                    has_images = True
+                                else:
+                                    raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
+                    except Exception as e:
+                        raise HTTPException(status_code=400, detail=f"Download failure for {url}: {e}")
 
         unet_nodes = []
         lora_nodes = []
@@ -840,14 +870,14 @@ except Exception as e:
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                     node["widgets_values"][0] = resolved
             elif cls == "DenoMultiImageLoader":
-                if target_image_path:
-                    inputs["image_paths"] = target_image_path
+                if has_images:
+                    inputs["image_paths"] = dynamic_guides_dir
             elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
             
-            # ⚡ Hardware Decoding Rules
+            # Hardware Decoding Rules
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
@@ -958,7 +988,7 @@ except Exception as e:
                     ExpiresIn=86400
                 )
                 
-                # Active VRAM and garbage collection sweeps to prepare for consecutive requests
+                # Active VRAM and Garbage collection sweeps to prepare for consecutive requests
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
@@ -966,7 +996,7 @@ except Exception as e:
                 except Exception:
                     pass
                 
-                # 🛡️ POST /free endpoint trigger: Purges ComfyUI VRAM entirely once work is done
+                # Clean up local ComfyUI VRAM cache entirely before exiting
                 try:
                     free_url = "http://127.0.0.1:8188/free"
                     free_payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
@@ -978,9 +1008,9 @@ except Exception as e:
                     )
                     with urllib.request.urlopen(free_req, timeout=5) as free_resp:
                         if free_resp.status == 200:
-                            print("🛡️ [Memory Purger] Local ComfyUI VRAM cache purged successfully.")
+                            print("🛡️ [Memory Purger] Local VRAM cleared and returned to 0 resident model state.")
                 except Exception as e:
-                    print(f"⚠️ Failed to call local /free endpoint: {e}")
+                    print(f"⚠️ Warning: post-process local VRAM cleanup sweep skipped: {e}")
 
                 print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
                 return {"status": "success", "video_url": signed_url}
