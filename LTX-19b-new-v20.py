@@ -48,7 +48,7 @@ build_image = base_image.env({
 # Purpose: Clean compilation of required nodes without destructive core rollbacks.
 # ==========================================
 
-# ⚡ SageAttention source compilation matching your working config
+# SageAttention source compilation matching your working config
 compiled_image = build_image.run_commands(
     "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
@@ -69,7 +69,6 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;",
-    # ⚡ RESTORED: Numpy/Torch version lock
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4 kornia==0.6.12",
@@ -141,10 +140,11 @@ class LTXEngine:
             region_name="auto"
         )
 
-        # ⚡ EQUIP NATIVE CFGGUIDER WITH THE raw_conds ATTRIBUTE
+        # Monkeypatch comfy.samplers.CFGGuider to support raw_conds attribute AND
+        # inject the aggressive post-node memory purger/VRAM squeezer directly into ComfyUI
         init_file_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
         if os.path.exists(init_file_path):
-            print("🔗 Injecting CFGGuider raw_conds monkeypatch into ComfyUI-LTXVideo initialization...")
+            print("🔗 Injecting CFGGuider and aggressive VRAM Squeezer patches into ComfyUI-LTXVideo...")
             patch_code = """
 # Monkeypatch comfy.samplers.CFGGuider to support raw_conds
 try:
@@ -157,6 +157,68 @@ try:
     print("Successfully monkeypatched comfy.samplers.CFGGuider to support raw_conds attribute!")
 except Exception as e:
     print("Failed to monkeypatch comfy.samplers.CFGGuider:", e)
+
+# Aggressive memory management patch (Offload/GC after each node)
+try:
+    import execution
+    import comfy.model_management
+    import gc
+    import torch
+    import asyncio
+
+    # Patch execution.get_output_data (cleans VRAM after each individual node executes)
+    if hasattr(execution, 'get_output_data'):
+        _orig_get_output_data = execution.get_output_data
+        async def _patched_get_output_data(*args, **kwargs):
+            result = await _orig_get_output_data(*args, **kwargs)
+            try:
+                print("🧹 Post-node aggressive VRAM Squeezer & GC active...")
+                comfy.model_management.unload_all_models()
+                comfy.model_management.soft_empty_cache()
+                gc.collect()
+                torch.cuda.empty_cache()
+                print("✨ VRAM purged successfully after node execution.")
+            except Exception as e:
+                print("⚠️ VRAM Squeezer post-node error:", e)
+            return result
+        execution.get_output_data = _patched_get_output_data
+        print("Successfully monkeypatched execution.get_output_data!")
+
+    # Patch execution.execute (cleans VRAM after the final workflow generation)
+    if hasattr(execution, 'execute'):
+        _orig_execute = execution.execute
+        if asyncio.iscoroutinefunction(_orig_execute):
+            async def _patched_execute(*args, **kwargs):
+                result = await _orig_execute(*args, **kwargs)
+                try:
+                    print("🧹 Post-execution aggressive VRAM Squeezer & GC active...")
+                    comfy.model_management.unload_all_models()
+                    comfy.model_management.soft_empty_cache()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    print("✨ VRAM purged successfully after prompt execution.")
+                except Exception as e:
+                    print("⚠️ VRAM Squeezer post-execution error:", e)
+                return result
+            execution.execute = _patched_execute
+        else:
+            def _patched_execute(*args, **kwargs):
+                result = _orig_execute(*args, **kwargs)
+                try:
+                    print("🧹 Post-execution aggressive VRAM Squeezer & GC active...")
+                    comfy.model_management.unload_all_models()
+                    comfy.model_management.soft_empty_cache()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    print("✨ VRAM purged successfully after prompt execution.")
+                except Exception as e:
+                    print("⚠️ VRAM Squeezer post-execution error:", e)
+                return result
+            execution.execute = _patched_execute
+        print("Successfully monkeypatched execution.execute!")
+
+except Exception as e:
+    print("Failed to apply aggressive memory management patch:", e)
 """
             with open(init_file_path, "a") as f:
                 f.write(patch_code)
@@ -173,10 +235,12 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # Started ComfyUI with normalvram and disabled smart memory management
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"        
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
+            "--normalvram", "--disable-smart-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -302,10 +366,10 @@ except Exception as e:
                     tasks.append(download_one(session, url, dest))
                 await asyncio.gather(*tasks)
 
-        # ⚡ COLLECT ABSOLUTE PATHS OF GENERATED IMAGES FOR THE MULTI-IMAGE LOADER
+        # Collect absolute paths of downloaded guide images for DenoMultiImageLoader
         downloaded_paths = []
         if urls_to_download:
-            for idx in range(len(urls_to_download)):
+            for idx, url in enumerate(urls_to_download):
                 downloaded_paths.append(os.path.join(dynamic_guides_dir, f"guide_{idx}.png"))
         else:
             downloaded_paths.append(os.path.join(dynamic_guides_dir, "guide_0.png"))
@@ -335,7 +399,7 @@ except Exception as e:
                 if isinstance(node_data, dict) and "class_type" in node_data:
                     class_type = node_data.get("class_type")
 
-                    # 🧹 Safe Purge: Skip unused text compilation nodes
+                    # Safe Purge: Skip unused text compilation nodes
                     if class_type in ["MultiStringPrompts", "JoinStringMulti"]:
                         continue
 
@@ -367,7 +431,6 @@ except Exception as e:
                         if "vae_name" in node_data["inputs"]:
                             node_data["inputs"]["vae_name"] = target_audio_vae
 
-                    # ⚡ RESOLVE IMAGE PATHS TO EXPLICIT NEWLINE-SEPARATED FILE LIST
                     if class_type in ["DenoMultiImageLoader", "MultiImageLoader"]:
                         node_data["inputs"]["image_paths"] = image_paths_str
 
