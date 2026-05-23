@@ -64,7 +64,7 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# Purpose: Pre-downloads the master workflow, injects model pathways, and seals it into the appliance image.
+# Purpose: Pre-downloads the master workflow, analyzes node pathways, and standardizes standard Normal VRAM models into the prebaked appliance.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -190,7 +190,7 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Applies necessary backwards-compatibility patches.
+# Purpose: Applies necessary backwards-compatibility patches to core libraries.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -379,8 +379,8 @@ final_image = (
 )
 
 # ==========================================
-# PART 4: Production Class Definition & Resource Reclamation Loops
-# Purpose: Manages the Modal lifecycle, enforces "Normal VRAM", and injects the hardcoded Step-By-Step VRAM purger.
+# PART 4: Production Class Definition & Engine Initialization
+# Purpose: Manages the Modal lifecycle, intercepts startup flags for Normal VRAM handling.
 # ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -511,55 +511,11 @@ try:
         except Exception: pass
     threading.Thread(target=background_patcher, daemon=True).start()
 except Exception: pass
-
-# --- STEP-BY-STEP VRAM & RAM PURGER HOOK ---
-# Directly hooks ComfyUI's execution loop to strictly wipe memory between every node completion.
-try:
-    import threading
-    import time
-    def execution_hook_patcher():
-        patched = False
-        while not patched:
-            try:
-                import sys
-                if "execution" in sys.modules:
-                    import execution
-                    if hasattr(execution, "map_node_over_list"):
-                        orig_map_node = execution.map_node_over_list
-                        if getattr(orig_map_node, "__name__", "") != "purging_map_node_over_list":
-                            def purging_map_node_over_list(*args, **kwargs):
-                                # 1. Let the single Node fully execute
-                                res = orig_map_node(*args, **kwargs)
-                                
-                                # 2. Force absolute VRAM and RAM purge step
-                                import gc, torch, ctypes
-                                import comfy.model_management
-                                print("🛡️ [Step-by-Step Purger] Node completed. Forcing hard VRAM/RAM sweep...")
-                                
-                                # Shift all VRAM off the GPU cache
-                                comfy.model_management.unload_all_models()
-                                torch.cuda.empty_cache()
-                                torch.cuda.ipc_collect()
-                                
-                                # Terminate lingering CPU allocations
-                                gc.collect()
-                                try: ctypes.CDLL("libc.so.6").malloc_trim(0)
-                                except: pass
-                                
-                                print("🛡️ [Step-by-Step Purger] Clean slate achieved. Proceeding to next step.")
-                                return res
-                            execution.map_node_over_list = purging_map_node_over_list
-                            print("✅ [Step-by-Step Purger] Successfully hooked directly into ComfyUI Execution Loop!")
-                            patched = True
-            except Exception: pass
-            time.sleep(0.5)
-    threading.Thread(target=execution_hook_patcher, daemon=True).start()
-except Exception: pass
 """
             if "mock_virtual_memory" not in content:
                 with open(main_path, "w") as f:
                     f.write(mock_code + "\n" + content)
-                print("✅ Successfully injected virtual RAM and raw_conds patches into ComfyUI's main.py!")
+                print("✅ Successfully injected virtual RAM and raw_conds patches into ComfyUI's main.py! (Node purger fully disabled for stable execution)")
 
     @modal.enter()
     def start_comfy(self):
@@ -607,7 +563,7 @@ except Exception: pass
             region_name="auto"
         )
 
-        print("🚀 Launching Clean Normal-VRAM Engine (With Step-By-Step Purger)...")
+        print("🚀 Launching Clean Native Normal-VRAM Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
@@ -620,7 +576,7 @@ except Exception: pass
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # ⚡ NORMAL VRAM EXECUTION: No --lowvram parameter included.
+        # ⚡ NORMAL VRAM EXECUTION: Relying on native LRU swapping.
         self.process = subprocess.Popen([
             "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -656,8 +612,8 @@ except Exception: pass
             print("⚡ LTX-19B API ONLINE (Fallback Mode)!")
 
 # ==========================================
-# PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
-# Purpose: Passes pure standard node configurations (No dependencies routing needed).
+# PART 5: Hybrid Endpoint Handler & Execution Process
+# Purpose: Handles incoming data, configures node settings, and performs post-generation VRAM cleanup.
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -912,6 +868,7 @@ except Exception: pass
                     ExpiresIn=86400
                 )
                 
+                # Free memory immediately AFTER the complete generation pipeline safely finishes 
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
@@ -930,7 +887,7 @@ except Exception: pass
                     )
                     with urllib.request.urlopen(free_req, timeout=5) as free_resp:
                         if free_resp.status == 200:
-                            print("🛡️ [Memory Purger] Local VRAM cleared and returned to 0 resident model state.")
+                            print("🛡️ [Memory Purger] Local VRAM cleared and returned to 0 resident model state for the next API request.")
                 except Exception as e:
                     print(f"⚠️ Warning: post-process local VRAM cleanup sweep skipped: {e}")
 
