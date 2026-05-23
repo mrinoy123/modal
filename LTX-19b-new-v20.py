@@ -129,7 +129,6 @@ def bake_private_workflow_into_image():
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = ""  
             
-            # ⚡ FIXED: Reverted back to "auto" to pass validation
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
@@ -484,6 +483,9 @@ except Exception: pass
         }
 
         if os.path.exists("/mnt/weights"):
+            # Ensure persistent volume subdirectories are ready to cache Triton & Inductor compiles
+            os.makedirs("/mnt/weights/.triton_cache", exist_ok=True)
+            os.makedirs("/mnt/weights/.inductor_cache", exist_ok=True)
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
                     if filename in exact_mapping:
@@ -521,12 +523,16 @@ except Exception: pass
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # ⚡ NORMAL VRAM EXECUTION
+        # ⚡ SAGEATTENTION NO-COMPILING CACHE INTEGRATION
+        env_vars["TRITON_CACHE_DIR"] = "/mnt/weights/.triton_cache"
+        env_vars["TORCHINDUCTOR_CACHE_DIR"] = "/mnt/weights/.inductor_cache"
+        
+        # ⚡ NORMAL VRAM EXECUTION (Disabling Smart Memory to handle segment loading safely)
         self.process = subprocess.Popen([
             "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
-            "--disable-pinned-memory"
+            "--disable-pinned-memory", "--disable-smart-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -556,6 +562,36 @@ except Exception: pass
             time.sleep(15)
             print("⚡ LTX-19B API ONLINE (Fallback Mode)!")
 
+    def purge_memory(self):
+        """Hardcoded strict memory sweep to unload resident models and free system/VRAM buffers."""
+        import gc
+        import torch
+        import ctypes
+        import urllib.request
+        import json
+
+        print("🧹 [Memory Purger] Initiating strict step-wise VRAM & system memory purge...")
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+        try:
+            free_url = "http://127.0.0.1:8188/free"
+            free_payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+            free_req = urllib.request.Request(
+                free_url, 
+                data=free_payload, 
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(free_req, timeout=5) as free_resp:
+                if free_resp.status == 200:
+                    print("🛡️ [Memory Purger] Local VRAM cleared and returned to clean resident model state.")
+        except Exception as e:
+            print(f"⚠️ [Memory Purger] Local VRAM cleanup sweep skipped: {e}")
+
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Execution Process
 # ==========================================
@@ -574,220 +610,204 @@ except Exception: pass
         if x_api_key != os.environ.get("API_KEY"):
             raise HTTPException(status_code=403, detail="Unauthorized")
 
-        image_url = body.get("image_url")
-        workflow_str = body.get("workflow")
-        requested_length = body.get("length", 65)
-        filename_prefix = body.get("filename", "output_video")
+        try:
+            image_url = body.get("image_url")
+            workflow_str = body.get("workflow")
+            requested_length = body.get("length", 65)
+            filename_prefix = body.get("filename", "output_video")
 
-        if not workflow_str:
-            raise HTTPException(status_code=400, detail="Missing 'workflow' in request body")
+            if not workflow_str:
+                raise HTTPException(status_code=400, detail="Missing 'workflow' in request body")
 
-        if isinstance(workflow_str, str):
-            try:
-                wf_data = json.loads(workflow_str)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Invalid JSON format: {e}")
-        else:
-            wf_data = workflow_str
-
-        dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
-        if os.path.exists(dynamic_guides_dir):
-            shutil.rmtree(dynamic_guides_dir)
-        os.makedirs(dynamic_guides_dir, exist_ok=True)
-        
-        has_images = False
-        downloaded_paths = []
-        if image_url:
-            urls = [u.strip() for u in image_url.split(",") if u.strip()]
-            for idx, url in enumerate(urls):
-                ext = os.path.splitext(url.split("?")[0])[1] or ".png"
-                target_image_path = os.path.join(dynamic_guides_dir, f"guide_image_{idx}{ext}")
-                
-                if "r2.dev" in url or R2_ACCOUNT_ID in url:
-                    parsed_url = urlparse(url)
-                    key = parsed_url.path.lstrip("/")
-                    try:
-                        self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
-                        downloaded_paths.append(target_image_path)
-                        has_images = True
-                    except Exception as e:
-                        raise HTTPException(status_code=400, detail=f"S3 R2 download failure for {url}: {e}")
-                else:
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(url) as resp:
-                                if resp.status == 200:
-                                    with open(target_image_path, "wb") as f:
-                                        f.write(await resp.read())
-                                    downloaded_paths.append(target_image_path)
-                                    has_images = True
-                                else:
-                                    raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
-                    except Exception as e:
-                        raise HTTPException(status_code=400, detail=f"Download failure for {url}: {e}")
-
-        tgt_len = int(requested_length)
-        if (tgt_len - 1) % 16 != 0:
-            tgt_len = ((tgt_len - 1) // 16) * 16 + 1
-            if tgt_len < 17:
-                tgt_len = 17
-
-        for node_id, node in wf_data.items():
-            if not isinstance(node, dict) or "inputs" not in node:
-                continue
-                
-            cls = node.get("class_type", "")
-            inputs = node["inputs"]
-            
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
-                node["class_type"] = "UNETLoader"
-                inputs["unet_name"] = TARGET_UNET
-                if "weight_dtype" not in inputs:
-                    inputs["weight_dtype"] = "default"
-                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    node["widgets_values"][0] = TARGET_UNET
-
-            elif cls == "LTXAVTextEncoderLoader":
-                inputs["text_encoder"] = TARGET_GEMMA
-                inputs["ckpt_name"] = TARGET_CONNECTOR
-            elif cls in ["VAELoaderKJ", "VAELoader"]:
-                inputs["vae_name"] = TARGET_VIDEO_VAE
-                inputs["ckpt_name"] = TARGET_VIDEO_VAE
-            elif cls in ["LTXVAudioVAELoader", "LowVRAMAudioVAELoader"]:
-                node["class_type"] = "LTXVAudioVAELoader"
-                inputs["ckpt_name"] = TARGET_AUDIO_VAE
-                inputs["vae_name"] = TARGET_AUDIO_VAE
-                
-            elif cls == "LoraLoader":
-                inputs["lora_name"] = TARGET_DETAILER_LORA
-                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    node["widgets_values"][0] = TARGET_DETAILER_LORA
-                    
-            elif cls == "DenoMultiImageLoader":
-                if has_images:
-                    inputs["image_paths"] = "\n".join(downloaded_paths)
-            elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
-                inputs["length"] = tgt_len
-            elif "LTXVEmptyLatentAudio" in cls:
-                inputs["frames_number"] = tgt_len
-            
-            # ⚡ FIXED: Working device is correctly reverted to "auto"
-            elif cls == "LTXVSpatioTemporalTiledVAEDecode":
-                inputs["working_device"] = "auto" 
-                inputs["working_dtype"] = "float16"
-                if "tile_size" in inputs: inputs["tile_size"] = 512
-                if "overlap" in inputs: inputs["overlap"] = 64
-                if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
-                if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
-                if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
-                if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
-            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
-                inputs["working_device"] = "cuda"
-                inputs["working_dtype"] = "float16"
-                if "tile_size" in inputs: inputs["tile_size"] = 512
-                if "overlap" in inputs: inputs["overlap"] = 64
-                if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
-                if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
-                if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
-                if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
-
-        sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
-        if sage_node_id:
-            print(f"🧠 Native Memory Optimization Active: Preserving Sage Attention Patch (Node {sage_node_id}) for enhanced VRAM efficiency and speed.")
-
-        print("⚡ Dispatching NVMe Stream-Optimized LTX-19B workflow to local endpoint...")
-        comfy_url = "http://127.0.0.1:8188/prompt"
-        payload = {"prompt": wf_data}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(comfy_url, json=payload) as resp:
-                if resp.status != 200:
-                    err_txt = await resp.text()
-                    raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_txt}")
-                
-                res_json = await resp.json()
-                prompt_id = res_json.get("prompt_id")
-                print(f"🎉 Job queued successfully. Prompt ID: {prompt_id}")
-
-            history_url = f"http://127.0.0.1:8188/history/{prompt_id}"
-            print("⏳ Polling local ComfyUI history for rendering outputs...")
-            
-            while True:
-                async with session.get(history_url) as resp:
-                    if resp.status == 200:
-                        hist_data = await resp.json()
-                        if prompt_id in hist_data:
-                            print("✅ Local generation task completed.")
-                            break
-                await asyncio.sleep(2)
-
-            outputs = hist_data[prompt_id].get("outputs", {})
-            output_file_path = None
-            for node_id, node_output in outputs.items():
-                if "gifs" in node_output:
-                    for gif in node_output["gifs"]:
-                        filename = gif.get("filename")
-                        output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
-                        break
-                elif "images" in node_output:
-                    for img in node_output["images"]:
-                        filename = img.get("filename")
-                        output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
-                        break
-            
-            if not output_file_path or not os.path.exists(output_file_path):
-                output_dir = "/workspace/ComfyUI/output"
-                files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if filename_prefix in f]
-                if files:
-                    output_file_path = max(files, key=os.path.getmtime)
-                else:
-                    raise HTTPException(status_code=500, detail="Output video file not found in output directory")
-
-            r2_output_key = f"rendered-videos/{uuid.uuid4()}_{os.path.basename(output_file_path)}"
-            print(f"📤 Uploading final rendering to Cloudflare R2 path: {r2_output_key}")
-            
-            try:
-                self.s3.upload_file(
-                    output_file_path, 
-                    "video-asset-files-storage-workflow", 
-                    r2_output_key,
-                    ExtraArgs={"ContentType": "video/mp4"}
-                )
-                
-                signed_url = self.s3.generate_presigned_url(
-                    'get_object',
-                    Params={
-                        'Bucket': "video-asset-files-storage-workflow",
-                        'Key': r2_output_key
-                    },
-                    ExpiresIn=86400
-                )
-                
-                gc.collect()
-                torch.cuda.empty_cache()
+            if isinstance(workflow_str, str):
                 try:
-                    ctypes.CDLL("libc.so.6").malloc_trim(0)
-                except Exception:
-                    pass
-                
-                try:
-                    free_url = "http://127.0.0.1:8188/free"
-                    free_payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
-                    free_req = urllib.request.Request(
-                        free_url, 
-                        data=free_payload, 
-                        headers={"Content-Type": "application/json"},
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(free_req, timeout=5) as free_resp:
-                        if free_resp.status == 200:
-                            print("🛡️ [Memory Purger] Local VRAM cleared and returned to 0 resident model state for the next API request.")
+                    wf_data = json.loads(workflow_str)
                 except Exception as e:
-                    print(f"⚠️ Warning: post-process local VRAM cleanup sweep skipped: {e}")
+                    raise HTTPException(status_code=400, detail=f"Invalid JSON format: {e}")
+            else:
+                wf_data = workflow_str
 
-                print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
-                return {"status": "success", "video_url": signed_url}
+            dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
+            if os.path.exists(dynamic_guides_dir):
+                shutil.rmtree(dynamic_guides_dir)
+            os.makedirs(dynamic_guides_dir, exist_ok=True)
+            
+            has_images = False
+            downloaded_paths = []
+            if image_url:
+                urls = [u.strip() for u in image_url.split(",") if u.strip()]
+                for idx, url in enumerate(urls):
+                    ext = os.path.splitext(url.split("?")[0])[1] or ".png"
+                    target_image_path = os.path.join(dynamic_guides_dir, f"guide_image_{idx}{ext}")
+                    
+                    if "r2.dev" in url or R2_ACCOUNT_ID in url:
+                        parsed_url = urlparse(url)
+                        key = parsed_url.path.lstrip("/")
+                        try:
+                            self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
+                            downloaded_paths.append(target_image_path)
+                            has_images = True
+                        except Exception as e:
+                            raise HTTPException(status_code=400, detail=f"S3 R2 download failure for {url}: {e}")
+                    else:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(url) as resp:
+                                    if resp.status == 200:
+                                        with open(target_image_path, "wb") as f:
+                                            f.write(await resp.read())
+                                        downloaded_paths.append(target_image_path)
+                                        has_images = True
+                                    else:
+                                        raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
+                        except Exception as e:
+                            raise HTTPException(status_code=400, detail=f"Download failure for {url}: {e}")
+
+            tgt_len = int(requested_length)
+            if (tgt_len - 1) % 16 != 0:
+                tgt_len = ((tgt_len - 1) // 16) * 16 + 1
+                if tgt_len < 17:
+                    tgt_len = 17
+
+            for node_id, node in wf_data.items():
+                if not isinstance(node, dict) or "inputs" not in node:
+                    continue
+                    
+                cls = node.get("class_type", "")
+                inputs = node["inputs"]
                 
-            except Exception as e:
-                print(f"❌ Failed to transfer output asset to Cloudflare R2: {e}")
-                raise HTTPException(status_code=500, detail=f"R2 asset storage exception: {e}")
+                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
+                    node["class_type"] = "UNETLoader"
+                    inputs["unet_name"] = TARGET_UNET
+                    if "weight_dtype" not in inputs:
+                        inputs["weight_dtype"] = "default"
+                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                        node["widgets_values"][0] = TARGET_UNET
+
+                elif cls == "LTXAVTextEncoderLoader":
+                    inputs["text_encoder"] = TARGET_GEMMA
+                    inputs["ckpt_name"] = TARGET_CONNECTOR
+                elif cls in ["VAELoaderKJ", "VAELoader"]:
+                    inputs["vae_name"] = TARGET_VIDEO_VAE
+                    inputs["ckpt_name"] = TARGET_VIDEO_VAE
+                elif cls in ["LTXVAudioVAELoader", "LowVRAMAudioVAELoader"]:
+                    node["class_type"] = "LTXVAudioVAELoader"
+                    inputs["ckpt_name"] = TARGET_AUDIO_VAE
+                    inputs["vae_name"] = TARGET_AUDIO_VAE
+                    
+                elif cls == "LoraLoader":
+                    inputs["lora_name"] = TARGET_DETAILER_LORA
+                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
+                        node["widgets_values"][0] = TARGET_DETAILER_LORA
+                        
+                elif cls == "DenoMultiImageLoader":
+                    if has_images:
+                        inputs["image_paths"] = "\n".join(downloaded_paths)
+                elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
+                    inputs["length"] = tgt_len
+                elif "LTXVEmptyLatentAudio" in cls:
+                    inputs["frames_number"] = tgt_len
+                
+                elif cls == "LTXVSpatioTemporalTiledVAEDecode":
+                    inputs["working_device"] = "auto" 
+                    inputs["working_dtype"] = "float16"
+                    if "tile_size" in inputs: inputs["tile_size"] = 512
+                    if "overlap" in inputs: inputs["overlap"] = 64
+                    if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
+                    if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
+                    if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
+                    if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
+                elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
+                    inputs["working_device"] = "cuda"
+                    inputs["working_dtype"] = "float16"
+                    if "tile_size" in inputs: inputs["tile_size"] = 512
+                    if "overlap" in inputs: inputs["overlap"] = 64
+                    if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
+                    if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
+                    if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
+                    if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
+
+            sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
+            if sage_node_id:
+                print(f"🧠 Native Memory Optimization Active: Preserving Sage Attention Patch (Node {sage_node_id}) for enhanced VRAM efficiency and speed.")
+
+            print("⚡ Dispatching NVMe Stream-Optimized LTX-19B workflow to local endpoint...")
+            comfy_url = "http://127.0.0.1:8188/prompt"
+            payload = {"prompt": wf_data}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(comfy_url, json=payload) as resp:
+                    if resp.status != 200:
+                        err_txt = await resp.text()
+                        raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_txt}")
+                    
+                    res_json = await resp.json()
+                    prompt_id = res_json.get("prompt_id")
+                    print(f"🎉 Job queued successfully. Prompt ID: {prompt_id}")
+
+                history_url = f"http://127.0.0.1:8188/history/{prompt_id}"
+                print("⏳ Polling local ComfyUI history for rendering outputs...")
+                
+                while True:
+                    async with session.get(history_url) as resp:
+                        if resp.status == 200:
+                            hist_data = await resp.json()
+                            if prompt_id in hist_data:
+                                print("✅ Local generation task completed.")
+                                break
+                    await asyncio.sleep(2)
+
+                # 🧹 STEP PURGE 1: Purge VRAM immediately after completion, prior to S3 upload
+                self.purge_memory()
+
+                outputs = hist_data[prompt_id].get("outputs", {})
+                output_file_path = None
+                for node_id, node_output in outputs.items():
+                    if "gifs" in node_output:
+                        for gif in node_output["gifs"]:
+                            filename = gif.get("filename")
+                            output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
+                            break
+                    elif "images" in node_output:
+                        for img in node_output["images"]:
+                            filename = img.get("filename")
+                            output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
+                            break
+                
+                if not output_file_path or not os.path.exists(output_file_path):
+                    output_dir = "/workspace/ComfyUI/output"
+                    files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if filename_prefix in f]
+                    if files:
+                        output_file_path = max(files, key=os.path.getmtime)
+                    else:
+                        raise HTTPException(status_code=500, detail="Output video file not found in output directory")
+
+                r2_output_key = f"rendered-videos/{uuid.uuid4()}_{os.path.basename(output_file_path)}"
+                print(f"📤 Uploading final rendering to Cloudflare R2 path: {r2_output_key}")
+                
+                try:
+                    self.s3.upload_file(
+                        output_file_path, 
+                        "video-asset-files-storage-workflow", 
+                        r2_output_key,
+                        ExtraArgs={"ContentType": "video/mp4"}
+                    )
+                    
+                    signed_url = self.s3.generate_presigned_url(
+                        'get_object',
+                        Params={
+                            'Bucket': "video-asset-files-storage-workflow",
+                            'Key': r2_output_key
+                        },
+                        ExpiresIn=86400
+                    )
+                    
+                    print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
+                    return {"status": "success", "video_url": signed_url}
+                    
+                except Exception as e:
+                    print(f"❌ Failed to transfer output asset to Cloudflare R2: {e}")
+                    raise HTTPException(status_code=500, detail=f"R2 asset storage exception: {e}")
+        finally:
+            # 🧹 STEP PURGE 2: Final sweep inside a fallback block to reset device state
+            self.purge_memory()
