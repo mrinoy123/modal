@@ -64,7 +64,7 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# Purpose: Pre-downloads the master workflow, injects clean model pathways, and seals it into the appliance image.
+# Purpose: Pre-downloads the master workflow, injects model pathways, and seals it into the appliance image.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -96,20 +96,17 @@ def bake_private_workflow_into_image():
         if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
             wf_data = wf_data["workflow"]
 
-        print("🏗️ Build Phase: Executing Topological Graph Tracing for Multi-LoRA Injections...")
+        print("🏗️ Build Phase: Executing Topological Graph Tracing...")
         
         unet_nodes = []
         lora_nodes = []
-        text_loader_id = None
         for node_id, node in wf_data.items():
             if not isinstance(node, dict): continue
             cls = node.get("class_type", "")
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 unet_nodes.append(node_id)
             elif cls == "LoraLoader":
                 lora_nodes.append(node_id)
-            elif cls == "LTXAVTextEncoderLoader":
-                text_loader_id = node_id
 
         assignments = {}
         if unet_nodes and len(lora_nodes) >= 2:
@@ -149,8 +146,8 @@ def bake_private_workflow_into_image():
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            # Injection of standard pathways (No LowVRAM modifiers)
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
+            # Injection of Standard/Normal Pipeline Models
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 node["class_type"] = "UNETLoader"
                 inputs["unet_name"] = TARGET_UNET
                 if "weight_dtype" not in inputs:
@@ -164,7 +161,8 @@ def bake_private_workflow_into_image():
             elif cls in ["VAELoaderKJ", "VAELoader"]:
                 inputs["vae_name"] = TARGET_VIDEO_VAE
                 inputs["ckpt_name"] = TARGET_VIDEO_VAE
-            elif cls == "LTXVAudioVAELoader":
+            elif cls in ["LTXVAudioVAELoader", "LowVRAMAudioVAELoader"]:
+                node["class_type"] = "LTXVAudioVAELoader"
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
             elif cls == "LoraLoader":
@@ -173,9 +171,8 @@ def bake_private_workflow_into_image():
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                     node["widgets_values"][0] = resolved
             elif cls == "DenoMultiImageLoader":
-                inputs["image_paths"] = ""  # Safe default initialization value
+                inputs["image_paths"] = ""  
             
-            # Hardware-Optimized Decoding Rules
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
@@ -193,7 +190,7 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Applies necessary backwards-compatibility patches and establishes the 500 MB VRAM reserve rule.
+# Purpose: Applies necessary backwards-compatibility patches.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -337,89 +334,6 @@ def patch_flux_layers():
                     f.write("\ntry:\n    if '__all__' in globals():\n        if 'apply_rotary_emb' not in __all__:\n            __all__.append('apply_rotary_emb')\nexcept Exception: pass\n")
         print("✅ Patched comfy/ldm/flux/layers.py with robust apply_rotary_emb fallback!")
 
-def patch_comfyui_model_management_all():
-    import os
-    mm_path = "/workspace/ComfyUI/comfy/model_management.py"
-    if os.path.exists(mm_path):
-        with open(mm_path, "r") as f:
-            content = f.read()
-        
-        # 1. Inject Upgraded Category-Aware Sequential Model Purger (Scoped-Safe to avoid name shadow / UnboundLocalError)
-        if "### SEQUENTIAL MODEL PURGER PATCH ###" not in content:
-            print("🔧 Injecting upgraded category-aware sequential model-purging patch into comfy/model_management.py...")
-            target_str = "def load_models_gpu("
-            idx = content.find(target_str)
-            if idx != -1:
-                colon_idx = content.find("):", idx)
-                if colon_idx != -1:
-                    insert_pos = content.find("\n", colon_idx) + 1
-                    patch_code = """    ### SEQUENTIAL MODEL PURGER PATCH ###
-    try:
-        req_classes = set()
-        for m in models:
-            if hasattr(m, "model") and m.model is not None:
-                req_classes.add(type(m.model).__name__)
-            elif hasattr(m, "model_type"):
-                req_classes.add(str(m.model_type))
-        
-        curr_classes = set()
-        for lm in current_loaded_models:
-            if lm.model is not None and hasattr(lm.model, "model") and lm.model.model is not None:
-                curr_classes.add(type(lm.model.model).__name__)
-                
-        has_conflict = False
-        if req_classes and curr_classes:
-            # Switch triggers only if the loaded category is NOT a subset of the requested category
-            if not curr_classes.issubset(req_classes):
-                has_conflict = True
-                
-        if has_conflict:
-            print(f"🛡️ [Memory Purger] Class switch detected: currently loaded {curr_classes} -> requesting {req_classes}. Unloading previous models from VRAM...")
-            try:
-                unload_all_models()
-            except Exception as e:
-                pass
-            import sys
-            _gc = sys.modules.get("gc") or __import__("gc")
-            _torch = sys.modules.get("torch")
-            if _gc is not None:
-                _gc.collect()
-            if _torch is not None:
-                _torch.cuda.empty_cache()
-                _torch.cuda.ipc_collect()
-            import ctypes
-            try:
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
-        else:
-            print(f"🛡️ [Memory Purger] Reuse path validated: currently loaded {curr_classes} -> requesting {req_classes}. Retaining resident weights.")
-    except Exception as e:
-        print(f"⚠️ Memory Purger Patch Error: {e}")
-    #######################################
-"""
-                    content = content[:insert_pos] + patch_code + content[insert_pos:]
-        
-        # 2. Append the 500 MB VRAM Reservation Patch to the end of the file
-        if "500 MB VRAM Reservation Patch" not in content:
-            print("🔧 Appending 500 MB VRAM Reservation Patch...")
-            reservation_code = """
-# --- 500 MB VRAM Reservation Patch (Tuple-Safe) ---
-_orig_get_free_memory = get_free_memory
-def get_free_memory(dev=None, torch_free_too=False):
-    res = _orig_get_free_memory(dev, torch_free_too)
-    reserve_bytes = 500 * 1024 * 1024  # Force strict 500 MB Reserve
-    if isinstance(res, tuple):
-        free_mem, torch_free = res
-        return (max(0, free_mem - reserve_bytes), torch_free)
-    return max(0, res - reserve_bytes)
-"""
-            content += reservation_code
-
-        with open(mm_path, "w") as f:
-            f.write(content)
-        print("✅ Successfully patched comfy/model_management.py!")
-
 final_image = (
     build_image.pip_install(
         "torch==2.5.1",
@@ -431,29 +345,28 @@ final_image = (
         "numpy==1.26.4", "diffusers", "accelerate", "transformers", 
         "comfyui-workflow-templates", "peft"
     )
-    # ⚡ Using unique cache_bust to force a complete clean rebuild, bypassing stale caches
     .run_commands(
-        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_19b_v5",
-        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_19b_v5"
+        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_19b_v7",
+        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_19b_v7"
     )
     .run_commands(
-        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_19b_v5",
-        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_19b_v5"
+        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_19b_v7",
+        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_19b_v7"
     )
     .run_commands(
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_19b_v5",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_19b_v5"
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_19b_v7",
+        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_19b_v7"
     )
     .run_commands(
-        "pip install kornia==0.6.12 # cache_bust=2026_05_23_19b_v5"
+        "pip install kornia==0.6.12 # cache_bust=2026_05_23_19b_v7"
     )
     .run_commands(
         "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
@@ -462,13 +375,12 @@ final_image = (
     .run_function(patch_ltx_video_imports)
     .run_function(patch_ltx_kornia_pad)
     .run_function(patch_flux_layers)
-    .run_function(patch_comfyui_model_management_all)
     .run_function(bake_private_workflow_into_image)
 )
 
 # ==========================================
 # PART 4: Production Class Definition & Resource Reclamation Loops
-# Purpose: Manages the Modal lifecycle, handles normal VRAM mapping directly from NVMe, and prevents System leaks.
+# Purpose: Manages the Modal lifecycle, enforces "Normal VRAM", and injects the hardcoded Step-By-Step VRAM purger.
 # ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -500,12 +412,10 @@ class LTXEngine:
             try:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
                     f.write('1\n')
-            except Exception:
-                pass
+            except Exception: pass
             try:
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
+            except Exception: pass
             await asyncio.sleep(2)
 
     def patch_comfyui_main_ram(self):
@@ -520,47 +430,38 @@ import psutil
 import importlib.abc
 import importlib.machinery
 
-# --- Import Redirection Hook to Resolve Module vs Package Conflict (ComfyUI vs comfy/utils.py) ---
+# --- Import Redirection Hook to Resolve Module vs Package Conflict ---
 class UtilsPackageRedirector(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path, target=None):
         if fullname == "utils" or fullname.startswith("utils."):
             comfyui_path = "/workspace/ComfyUI"
             original_path = list(sys.path)
             try:
-                # Force dynamic routing away from the file 'comfy/utils.py' back to package directory 'utils/'
                 sys.path = [p for p in sys.path if not (p.endswith("comfy") or "comfy/" in p or "comfy\\\\" in p or p.endswith("comfy-cli") or "comfy-cli" in p)]
                 if comfyui_path not in sys.path:
                     sys.path.insert(0, comfyui_path)
-                
                 for finder in sys.meta_path:
-                    if finder is self:
-                        continue
+                    if finder is self: continue
                     try:
                         spec = finder.find_spec(fullname, path, target)
-                        if spec is not None:
-                            return spec
-                    except Exception:
-                        pass
+                        if spec is not None: return spec
+                    except Exception: pass
             finally:
                 sys.path = original_path
         return None
-
 sys.meta_path.insert(0, UtilsPackageRedirector())
-print("🛡️ [Import Guard] Registered 'utils' Package Redirector import hook successfully.")
 
 def mock_virtual_memory():
     class MockVM:
         def __init__(self):
-            self.total = 6 * 1024 * 1024 * 1024  # Force limit system RAM to 6 GB
-            self.available = 4 * 1024 * 1024 * 1024  # Force limit system RAM to 4 GB
+            self.total = 6 * 1024 * 1024 * 1024  
+            self.available = 4 * 1024 * 1024 * 1024  
             self.percent = 33.3
             self.used = 2 * 1024 * 1024 * 1024
             self.free = 4 * 1024 * 1024 * 1024
     return MockVM()
 psutil.virtual_memory = mock_virtual_memory
-print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
 
-# --- Guider raw_conds resilient background-compatibility patch ---
 try:
     import threading
     import time
@@ -570,21 +471,17 @@ try:
             while not patched:
                 import sys
                 modules_to_patch = []
-                
                 if "comfy.samplers" in sys.modules:
                     try:
                         import comfy.samplers
                         modules_to_patch.append(sys.modules["comfy.samplers"])
-                    except Exception:
-                        pass
-                        
+                    except Exception: pass
                 if "comfy.guiders" in sys.modules:
                     try:
                         import comfy.guiders
                         modules_to_patch.append(sys.modules["comfy.guiders"])
-                    except Exception:
-                        pass
-                        
+                    except Exception: pass
+                
                 modules_to_patch = [m for m in modules_to_patch if m is not None]
                 if not modules_to_patch:
                     time.sleep(0.1)
@@ -595,35 +492,69 @@ try:
                     for name in dir(module):
                         obj = getattr(module, name)
                         if isinstance(obj, type) and hasattr(obj, "set_conds"):
-                            if obj in patched_classes:
-                                continue
+                            if obj in patched_classes: continue
                             orig_set_conds = obj.set_conds
-                            if getattr(orig_set_conds, "__name__", "") == "patched_set_conds":
-                                continue
-                                
+                            if getattr(orig_set_conds, "__name__", "") == "patched_set_conds": continue
                             def make_patched_set_conds(original_method):
                                 def patched_set_conds(self, *args, **kwargs):
                                     pos = args[0] if len(args) >= 1 else None
                                     neg = args[1] if len(args) >= 2 else None
-                                    if "positive" in kwargs:
-                                        pos = kwargs["positive"]
-                                    if "negative" in kwargs:
-                                        neg = kwargs["negative"]
+                                    if "positive" in kwargs: pos = kwargs["positive"]
+                                    if "negative" in kwargs: neg = kwargs["negative"]
                                     self.raw_conds = (pos, neg)
                                     return original_method(self, *args, **kwargs)
                                 return patched_set_conds
-                                
                             obj.set_conds = make_patched_set_conds(orig_set_conds)
                             patched_classes.add(obj)
-                            print(f"🔧 [Background Patched] preserved raw_conds on class {obj.__name__} in module {module.__name__}.")
                 patched = True
                 time.sleep(0.1)
-        except Exception as e:
-            print(f"⚠️ Warning: background patcher loop failed: {e}")
-            
+        except Exception: pass
     threading.Thread(target=background_patcher, daemon=True).start()
-except Exception as e:
-    print(f"⚠️ Warning: failed starting background patcher thread: {e}")
+except Exception: pass
+
+# --- STEP-BY-STEP VRAM & RAM PURGER HOOK ---
+# Directly hooks ComfyUI's execution loop to strictly wipe memory between every node completion.
+try:
+    import threading
+    import time
+    def execution_hook_patcher():
+        patched = False
+        while not patched:
+            try:
+                import sys
+                if "execution" in sys.modules:
+                    import execution
+                    if hasattr(execution, "map_node_over_list"):
+                        orig_map_node = execution.map_node_over_list
+                        if getattr(orig_map_node, "__name__", "") != "purging_map_node_over_list":
+                            def purging_map_node_over_list(*args, **kwargs):
+                                # 1. Let the single Node fully execute
+                                res = orig_map_node(*args, **kwargs)
+                                
+                                # 2. Force absolute VRAM and RAM purge step
+                                import gc, torch, ctypes
+                                import comfy.model_management
+                                print("🛡️ [Step-by-Step Purger] Node completed. Forcing hard VRAM/RAM sweep...")
+                                
+                                # Shift all VRAM off the GPU cache
+                                comfy.model_management.unload_all_models()
+                                torch.cuda.empty_cache()
+                                torch.cuda.ipc_collect()
+                                
+                                # Terminate lingering CPU allocations
+                                gc.collect()
+                                try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+                                except: pass
+                                
+                                print("🛡️ [Step-by-Step Purger] Clean slate achieved. Proceeding to next step.")
+                                return res
+                            execution.map_node_over_list = purging_map_node_over_list
+                            print("✅ [Step-by-Step Purger] Successfully hooked directly into ComfyUI Execution Loop!")
+                            patched = True
+            except Exception: pass
+            time.sleep(0.5)
+    threading.Thread(target=execution_hook_patcher, daemon=True).start()
+except Exception: pass
 """
             if "mock_virtual_memory" not in content:
                 with open(main_path, "w") as f:
@@ -676,12 +607,12 @@ except Exception as e:
             region_name="auto"
         )
 
-        print("🚀 Launching Clean LTX-19B Normal VRAM Server Engine...")
+        print("🚀 Launching Clean Normal-VRAM Engine (With Step-By-Step Purger)...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
-        env_vars["PYTHONUNBUFFERED"] = "1"  # Force unbuffered stdout streaming for real-time logs
+        env_vars["PYTHONUNBUFFERED"] = "1" 
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["OMP_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
@@ -689,11 +620,12 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # ⚡ NORMAL VRAM EXECUTION: No --lowvram parameter included.
         self.process = subprocess.Popen([
             "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
-            "--disable-pinned-memory"        
+            "--disable-pinned-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -701,7 +633,6 @@ except Exception as e:
 
         asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
 
-        # Safe node registry poll loop: Blocks until node schema loads cleanly
         start_time = time.time()
         node_registration_verified = False
         while time.time() - start_time < 300:
@@ -726,7 +657,7 @@ except Exception as e:
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
-# Purpose: Intercepts requests, forces dynamic decoding and parameters to run optimally on the L4.
+# Purpose: Passes pure standard node configurations (No dependencies routing needed).
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -767,7 +698,6 @@ except Exception as e:
         has_images = False
         downloaded_paths = []
         if image_url:
-            # Supports single image as well as comma-separated image sequences
             urls = [u.strip() for u in image_url.split(",") if u.strip()]
             for idx, url in enumerate(urls):
                 print(f"📥 Downloading dynamic guide image {idx}: {url}")
@@ -799,16 +729,13 @@ except Exception as e:
 
         unet_nodes = []
         lora_nodes = []
-        text_loader_id = None
         for node_id, node in wf_data.items():
             if not isinstance(node, dict): continue
             cls = node.get("class_type", "")
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 unet_nodes.append(node_id)
             elif cls == "LoraLoader":
                 lora_nodes.append(node_id)
-            elif cls == "LTXAVTextEncoderLoader":
-                text_loader_id = node_id
 
         assignments = {}
         if unet_nodes and len(lora_nodes) >= 2:
@@ -855,7 +782,8 @@ except Exception as e:
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
+            # 🛡️ PURE NORMAL LOADERS (Graph Dependencies removed) 🛡️
+            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 node["class_type"] = "UNETLoader"
                 inputs["unet_name"] = TARGET_UNET
                 if "weight_dtype" not in inputs:
@@ -869,7 +797,8 @@ except Exception as e:
             elif cls in ["VAELoaderKJ", "VAELoader"]:
                 inputs["vae_name"] = TARGET_VIDEO_VAE
                 inputs["ckpt_name"] = TARGET_VIDEO_VAE
-            elif cls == "LTXVAudioVAELoader":
+            elif cls in ["LTXVAudioVAELoader", "LowVRAMAudioVAELoader"]:
+                node["class_type"] = "LTXVAudioVAELoader"
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
             elif cls == "LoraLoader":
@@ -879,44 +808,30 @@ except Exception as e:
                     node["widgets_values"][0] = resolved
             elif cls == "DenoMultiImageLoader":
                 if has_images:
-                    # Provide newline-separated file paths as expected by the multi-loader node
-                    inputs["image_paths"] = "\\n".join(downloaded_paths)
+                    inputs["image_paths"] = "\n".join(downloaded_paths)
             elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
             
-            # Hardware Decoding Rules
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
-                if "tile_size" in inputs:
-                    inputs["tile_size"] = 512
-                if "overlap" in inputs:
-                    inputs["overlap"] = 64
-                if "temporal_tile_length" in inputs:
-                    inputs["temporal_tile_length"] = 8
-                if "temporal_overlap" in inputs:
-                    inputs["temporal_overlap"] = 4
-                if "spatial_tiles" in inputs:
-                    inputs["spatial_tiles"] = 8
-                if "spatial_overlap" in inputs:
-                    inputs["spatial_overlap"] = 4
+                if "tile_size" in inputs: inputs["tile_size"] = 512
+                if "overlap" in inputs: inputs["overlap"] = 64
+                if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
+                if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
+                if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
+                if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
             elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
                 inputs["working_device"] = "cuda"
                 inputs["working_dtype"] = "float16"
-                if "tile_size" in inputs:
-                    inputs["tile_size"] = 512
-                if "overlap" in inputs:
-                    inputs["overlap"] = 64
-                if "temporal_tile_length" in inputs:
-                    inputs["temporal_tile_length"] = 8
-                if "temporal_overlap" in inputs:
-                    inputs["temporal_overlap"] = 4
-                if "spatial_tiles" in inputs:
-                    inputs["spatial_tiles"] = 8
-                if "spatial_overlap" in inputs:
-                    inputs["spatial_overlap"] = 4
+                if "tile_size" in inputs: inputs["tile_size"] = 512
+                if "overlap" in inputs: inputs["overlap"] = 64
+                if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
+                if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
+                if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
+                if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
 
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
@@ -997,7 +912,6 @@ except Exception as e:
                     ExpiresIn=86400
                 )
                 
-                # Active VRAM and Garbage collection sweeps to prepare for consecutive requests
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
@@ -1005,7 +919,6 @@ except Exception as e:
                 except Exception:
                     pass
                 
-                # Clean up local ComfyUI VRAM cache entirely before exiting
                 try:
                     free_url = "http://127.0.0.1:8188/free"
                     free_payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
