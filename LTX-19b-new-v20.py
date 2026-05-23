@@ -44,7 +44,7 @@ build_image = base_image.env({
 
 # ==========================================
 # PART 2: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Compiles high-performance kernels (SageAttention) and injects critical code modifications to custom nodes during the image baking process.
+# Purpose: Compiles high-performance kernels (SageAttention), handles Git rollbacks to stable pre-March states, downgrades Kornia, and injects critical code modifications.
 # ==========================================
 
 # ⚡ SageAttention source compilation matching your working config
@@ -55,12 +55,16 @@ compiled_image = build_image.run_commands(
 
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
+    # ⚡ ROLLBACK 1: Revert ComfyUI Core to pre-March 2026 to restore old cond formatting
+    "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
+    # ⚡ ROLLBACK 2: Revert LTXVideo to match the pre-March ComfyUI API
+    "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
@@ -69,6 +73,8 @@ final_image = compiled_image.run_commands(
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
+    # ⚡ KORNIA DOWNGRADE: Overrides newer conflicting versions to fix Spatial Padding issues in older nodes
+    "pip install kornia==0.6.12",
     "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\"",
     # ⚡ THE CLUE PATCH: Robust fallback for guider.raw_conds to bypass the Tensor IndexError 
     "python3 -c \"filepath = '/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py'; code = open(filepath).read(); code = code.replace('positive, negative = guider.raw_conds', 'positive, negative = getattr(guider, \\'raw_conds\\', None) or (getattr(guider, \\'original_conds\\', {}).get(\\'positive\\'), getattr(guider, \\'original_conds\\', {}).get(\\'negative\\'))'); open(filepath, 'w').write(code)\""
