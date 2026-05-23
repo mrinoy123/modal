@@ -117,23 +117,53 @@ class LTXEngine:
                             try: os.symlink(src_path, dest)
                             except FileExistsError: pass
 
-        # 🩹 Runtime Looping Sampler compatibility patch
-        # This resolves the attribute crash when CFGGuider is used in Phase 1 (separated generation)
+        # 🩹 STABLE LTXV PATCH: Write CFGGuider patch as an independent Custom Node.
+        # This records 'self.raw_conds' dynamically as raw, unconverted PyTorch structures,
+        # completely bypassing the IndexError mismatch when looping sampler executes.
+        try:
+            patch_dir = "/workspace/ComfyUI/custom_nodes/ComfyUI-CFGGuiderPatch"
+            os.makedirs(patch_dir, exist_ok=True)
+            init_filepath = os.path.join(patch_dir, "__init__.py")
+            
+            patch_code = """# ComfyUI-CFGGuiderPatch/__init__.py
+import comfy.samplers
+
+print("🩹 [CFGGuiderPatch] Applying raw_conds patch to CFGGuider...")
+
+try:
+    orig_set_conds = comfy.samplers.CFGGuider.set_conds
+    def patched_set_conds(self, positive, negative):
+        self.raw_conds = (positive, negative)
+        return orig_set_conds(self, positive, negative)
+    comfy.samplers.CFGGuider.set_conds = patched_set_conds
+    print("🩹 [CFGGuiderPatch] CFGGuider patch applied successfully!")
+except Exception as e:
+    print(f"⚠️ [CFGGuiderPatch] Failed to patch CFGGuider: {e}")
+
+NODE_CLASS_MAPPINGS = {}
+NODE_DISPLAY_NAME_MAPPINGS = {}
+"""
+            with open(init_filepath, "w") as f:
+                f.write(patch_code)
+            print("✅ CFGGuider startup custom node successfully injected!")
+        except Exception as patch_err:
+            print(f"⚠️ Error injecting CFGGuider patch: {patch_err}")
+
+        # Ensure looping_sampler.py is pristine or cleanly restored to avoid double patch conflicts
         try:
             filepath = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
             if os.path.exists(filepath):
-                print("🩹 Patching looping_sampler.py to support core CFGGuider...")
                 content = open(filepath, "r").read()
-                old_str = "positive, negative = guider.raw_conds"
-                new_str = "positive, negative = getattr(guider, 'raw_conds', (guider.conds.get('positive'), guider.conds.get('negative')) if hasattr(guider, 'conds') else (None, None))"
-                if old_str in content:
-                    content = content.replace(old_str, new_str)
-                    open(filepath, "w").write(content)
-                    print("✅ Looping Sampler patched successfully!")
-                else:
-                    print("ℹ️ Looping Sampler already patched or clean.")
-        except Exception as patch_err:
-            print(f"⚠️ Warning: CFGGuider compatibility patch failed: {patch_err}")
+                broken_str = "positive, negative = getattr(guider, 'raw_conds', (guider.conds.get('positive'), guider.conds.get('negative')) if hasattr(guider, 'conds') else (None, None))"
+                clean_str = "positive, negative = guider.raw_conds"
+                if broken_str in content:
+                    print("🩹 Reverting legacy looping_sampler.py dirty patch to standard pristine format...")
+                    content = content.replace(broken_str, clean_str)
+                    with open(filepath, "w") as f:
+                        f.write(content)
+                    print("✅ Looping Sampler code cleanly restored to native.")
+        except Exception as restore_err:
+            print(f"⚠️ Warning during file restore: {restore_err}")
 
         self.s3 = boto3.client(
             service_name='s3', 
