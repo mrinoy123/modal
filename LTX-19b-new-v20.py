@@ -9,7 +9,6 @@ import aiohttp
 import urllib.request
 import asyncio
 import ctypes
-import uuid
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
@@ -17,11 +16,7 @@ from typing import Optional
 # PART 1: Infrastructure Configuration & Base Image
 # ==========================================
 
-R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
-R2_ACCESS_KEY_ID = "3c33425ba6e5abbd3e63afab14dc8866"
-R2_SECRET_ACCESS_KEY = "d65f107bb61093843c6dd980c764443fdf50924a7701078b99f007d3060e25a8"
-R2_ENDPOINT_URL = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-
+# Setup optimized development container image with required compilation tooling
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
     add_python="3.12"
@@ -35,302 +30,41 @@ build_image = base_image.env({
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
     "FORCE_CUDA": "1",
     "TORCH_CUDA_ARCH_LIST": "8.9", 
-    "MAX_JOBS": "4",
+    "MAX_JOBS": "1",
     "CC": "gcc",
-    "CXX": "g++",
-    "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
-    "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
-    "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY
+    "CXX": "g++"
 }).pip_install(
+    "torch==2.5.1", "torchvision", "torchaudio", 
+    index_url="https://download.pytorch.org/whl/cu124"
+).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
-).pip_install(
-    "pandas", "numexpr", "pytz", "python-dateutil", 
-    "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
-    "decord", "imageio", "scikit-image", "numba", "einops", 
-    "transformers", "diffusers", "accelerate", "bitsandbytes",
-    "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil", 
-    "sageattention"
 )
 
-TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
-TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
-TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
-TARGET_VIDEO_VAE = "ltx-2-19b-dev_video_vae.safetensors"
-TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
-TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
-
-# ==========================================
-# PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# ==========================================
-
-def bake_private_workflow_into_image():
-    import boto3
-    import json
-    import os
-
-    print("🏗️ Build Phase: Securely fetching master workflow from private Cloudflare R2...")
-    
-    s3 = boto3.client(
-        service_name='s3', 
-        endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", 
-        aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], 
-        aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], 
-        region_name="auto"
-    )
-
-    raw_path = "/tmp/raw_workflow.json"
-    try:
-        s3.download_file(
-            "video-asset-files-storage-workflow", 
-            "Comfyui-workflows-json/ltx2-19b-new-workflow-modified1-lora(api).json", 
-            raw_path
-        )
-
-        with open(raw_path, "r") as f:
-            wf_data = json.load(f)
-
-        if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
-            wf_data = wf_data["workflow"]
-
-        print("🏗️ Build Phase: Executing Single-LoRA Topological Graph Tracing...")
-
-        for node_id, node in wf_data.items():
-            if not isinstance(node, dict) or "inputs" not in node:
-                continue
-                
-            cls = node.get("class_type", "")
-            inputs = node["inputs"]
-            
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
-                node["class_type"] = "UNETLoader"
-                inputs["unet_name"] = TARGET_UNET
-                if "weight_dtype" not in inputs:
-                    inputs["weight_dtype"] = "default"
-                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    node["widgets_values"][0] = TARGET_UNET
-
-            elif cls == "LTXAVTextEncoderLoader":
-                inputs["text_encoder"] = TARGET_GEMMA
-                inputs["ckpt_name"] = TARGET_CONNECTOR
-                inputs["device"] = "default"  # ⚡ Default GPU routing is safe now that float8 is removed
-            elif cls in ["VAELoaderKJ", "VAELoader"]:
-                inputs["vae_name"] = TARGET_VIDEO_VAE
-                inputs["ckpt_name"] = TARGET_VIDEO_VAE
-            elif cls in ["LTXVAudioVAELoader", "LowVRAMAudioVAELoader"]:
-                node["class_type"] = "LTXVAudioVAELoader"
-                inputs["ckpt_name"] = TARGET_AUDIO_VAE
-                inputs["vae_name"] = TARGET_AUDIO_VAE
-            
-            elif cls == "LoraLoader":
-                inputs["lora_name"] = TARGET_DETAILER_LORA
-                if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    node["widgets_values"][0] = TARGET_DETAILER_LORA
-            
-            elif cls == "DenoMultiImageLoader":
-                inputs["image_paths"] = ""  
-            
-            elif cls == "LTXVSpatioTemporalTiledVAEDecode":
-                inputs["working_device"] = "auto"
-                inputs["working_dtype"] = "float16"
-            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
-                inputs["working_device"] = "cuda"
-                inputs["working_dtype"] = "float16"
-
-        os.makedirs("/workspace", exist_ok=True)
-        with open("/workspace/prebaked_workflow.json", "w") as f:
-            json.dump(wf_data, f, indent=2)
-            
-        print("🏗️ Build Phase: Successfully sealed prebaked_workflow.json to container disk!")
-    except Exception as e:
-        print(f"⚠️ Build Phase Issue (Fallback Skipped): {e}")
-
-# ==========================================
-# PART 3: Advanced Optimization Patches & Custom Node Installation
-# ==========================================
-
-def patch_ltx_video_imports():
-    import os
-    init_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
-    if os.path.exists(init_path):
-        with open(init_path, "r") as f:
-            content = f.read()
-        patch_code = (
-            "import sys\n"
-            "import torch\n"
-            "import math\n"
-            "try:\n"
-            "    import comfy.ldm.lightricks.model as m\n"
-            "    if not hasattr(m, 'precompute_freqs_cis'):\n"
-            "        def precompute_freqs_cis(coords, dim, out_dtype):\n"
-            "            try:\n"
-            "                if hasattr(m, 'LTXBaseModel'):\n"
-            "                    for name in ['_precompute_freqs_cis', 'precompute_freqs_cis']:\n"
-            "                        if hasattr(m.LTXBaseModel, name):\n"
-            "                            return getattr(m.LTXBaseModel, name)(coords, dim, out_dtype)\n"
-            "            except Exception: pass\n"
-            "            theta = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=coords.device, dtype=torch.float32) / dim))\n"
-            "            freqs = torch.einsum('... , d -> ... d', coords.flatten(1, -2).to(torch.float32), theta)\n"
-            "            freqs = freqs.view(*coords.shape[:-1], -1)\n"
-            "            return torch.polar(torch.ones_like(freqs), freqs.to(out_dtype))\n"
-            "        m.precompute_freqs_cis = precompute_freqs_cis\n"
-            "except Exception as e:\n"
-            "    print(f'⚠️ Warning: LTX-Video import monkeypatch failed: {e}')\n"
-        )
-        with open(init_path, "w") as f:
-            f.write(patch_code + content)
-
-def patch_comfy_lightricks_model():
-    import os
-    model_path = "/workspace/ComfyUI/comfy/ldm/lightricks/model.py"
-    if os.path.exists(model_path):
-        with open(model_path, "r") as f:
-            content = f.read()
-        if "def precompute_freqs_cis" not in content:
-            fallback_code = """
-# --- LTX-Video/LTX-2.0 Compatibility Patch ---
-import torch
-import math
-
-def precompute_freqs_cis(coords, dim, out_dtype):
-    try:
-        if "LTXBaseModel" in globals():
-            base_model = globals()["LTXBaseModel"]
-            for method_name in ["_precompute_freqs_cis", "precompute_freqs_cis"]:
-                if hasattr(base_model, method_name):
-                    return getattr(base_model, method_name)(coords, dim, out_dtype)
-    except Exception:
-        pass
-        
-    theta = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=coords.device, dtype=torch.float32) / dim))
-    freqs = torch.einsum('... , d -> ... d', coords.flatten(1, -2).to(torch.float32), theta)
-    freqs = freqs.view(*coords.shape[:-1], -1)
-    return torch.polar(torch.ones_like(freqs), freqs.to(out_dtype))
-
-def apply_rotary_emb(x, freqs):
-    try:
-        if "LTXBaseModel" in globals():
-            base_model = globals()["LTXBaseModel"]
-            for name in ["_apply_rotary_emb", "apply_rotary_emb"]:
-                if hasattr(base_model, name):
-                    return getattr(base_model, name)(x, freqs)
-    except Exception:
-        pass
-    from comfy.ldm.flux.layers import apply_rotary_emb as flux_apply_rope
-    try:
-        return flux_apply_rope(x, freqs)
-    except Exception:
-        pass
-    return x
-
-globals()["precompute_freqs_cis"] = precompute_freqs_cis
-globals()["apply_rotary_emb"] = apply_rotary_emb
-"""
-            with open(model_path, "w") as f:
-                f.write(content + fallback_code)
-
-def patch_ltx_kornia_pad():
-    import os
-    pyramid_blending_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/pyramid_blending.py"
-    if os.path.exists(pyramid_blending_path):
-        with open(pyramid_blending_path, "r") as f:
-            lines = f.readlines()
-        new_lines = []
-        in_pyramid_import = False
-        patched = False
-        for line in lines:
-            if "from kornia.geometry.transform.pyramid import" in line:
-                in_pyramid_import = True
-                new_lines.append(line)
-                continue
-            if in_pyramid_import:
-                if ")" in line:
-                    in_pyramid_import = False
-                import re
-                if re.search(r'\bpad\b', line):
-                    patched = True
-                    line = re.sub(r'\bpad\b\s*,?', '', line)
-                    if line.strip() == "," or not line.strip():
-                        continue
-            new_lines.append(line)
-        if patched:
-            new_lines.insert(0, "from torch.nn.functional import pad\n")
-            with open(pyramid_blending_path, "w") as f:
-                f.writelines(new_lines)
-
-def patch_flux_layers():
-    import os
-    layers_path = "/workspace/ComfyUI/comfy/ldm/flux/layers.py"
-    if os.path.exists(layers_path):
-        with open(layers_path, "r") as f:
-            content = f.read()
-        
-        patch_code = (
-            "\n# --- LTX-Video Compatibility Fallback (apply_rotary_emb) ---\n"
-            "def apply_rotary_emb(x, freqs_cis):\n"
-            "    if x.shape[1] == 0: return x\n"
-            "    t_ = x.reshape(*x.shape[:-1], -1, 1, 2)\n"
-            "    t_out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]\n"
-            "    return t_out.reshape(*x.shape).type_as(x)\n"
-        )
-        
-        if "def apply_rotary_emb" not in content:
-            with open(layers_path, "w") as f:
-                f.write(content + patch_code)
-            
-            with open(layers_path, "r") as f:
-                new_content = f.read()
-            if "__all__" in new_content:
-                with open(layers_path, "a") as f:
-                    f.write("\ntry:\n    if '__all__' in globals():\n        if 'apply_rotary_emb' not in __all__:\n            __all__.append('apply_rotary_emb')\nexcept Exception: pass\n")
-
-final_image = (
-    build_image.pip_install(
-        "torch==2.5.1",
-        "torchvision==0.20.1",
-        "torchaudio==2.5.1",
-        index_url="https://download.pytorch.org/whl/cu124"
-    )
-    .pip_install(
-        "numpy==1.26.4", "diffusers", "accelerate", "transformers", 
-        "comfyui-workflow-templates", "peft"
-    )
-    .run_commands(
-        "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI # cache_bust=2026_05_23_19b_v7",
-        "pip install -r /workspace/ComfyUI/requirements.txt # cache_bust=2026_05_23_19b_v7"
-    )
-    .run_commands(
-        "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts # cache_bust=2026_05_23_19b_v7",
-        "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG # cache_bust=2026_05_23_19b_v7"
-    )
-    .run_commands(
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt # cache_bust=2026_05_23_19b_v7",
-        "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt # cache_bust=2026_05_23_19b_v7"
-    )
-    .run_commands(
-        "pip install kornia==0.6.12 # cache_bust=2026_05_23_19b_v7"
-    )
-    .run_commands(
-        "sed -i 's/final_pooled_output = torch.cat(pooled_out, dim=0)/final_pooled_output = torch.cat([p for p in pooled_out if p is not None], dim=0) if any(p is not None for p in pooled_out) else None/g' /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes/BatchFuncs.py"
-    )
-    .run_function(patch_comfy_lightricks_model)
-    .run_function(patch_ltx_video_imports)
-    .run_function(patch_ltx_kornia_pad)
-    .run_function(patch_flux_layers)
-    .run_function(bake_private_workflow_into_image)
+# ⚡ SageAttention source compilation matching your working config
+compiled_image = build_image.run_commands(
+    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
+    "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
-# ==========================================
-# PART 4: Production Class Definition & Engine Initialization
-# ==========================================
+final_image = compiled_image.run_commands(
+    "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
+    "pip install -r /workspace/ComfyUI/requirements.txt"
+).run_commands(
+    "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
+    "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
+    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
+    "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
+    "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
+    "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
+    "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
+    "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
+    "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"  # ⚡ Restored FDG Guider clone
+).run_commands(
+    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
+).run_commands(
+    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
+)
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -339,130 +73,26 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     gpu="L4", 
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
-    secrets=[modal.Secret.from_dict({
-        "R2_ACCOUNT_ID": R2_ACCOUNT_ID,
-        "R2_ACCESS_KEY_ID": R2_ACCESS_KEY_ID,
-        "R2_SECRET_ACCESS_KEY": R2_SECRET_ACCESS_KEY,
-        "API_KEY": "secure-video-n8n-workflow-2026"
-    })],
-    memory=32768,  # ⚡ KEEP AT 32GB: Required to buffer model swapping in system RAM
-    scaledown_window=5,  
-    timeout=3600
+    secrets=[modal.Secret.from_name("video-generator-workflow")], 
+    memory=8192,
+    scaledown_window=60,
+    timeout=3600 
 )
 class LTXEngine:
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
-            if line:
-                print(f"[ComfyUI] {line.strip()}")
+            if line: print(f"[ComfyUI] {line.strip()}")
 
     async def _ram_squeezer(self):
+        print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
             try:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
                     f.write('1\n')
-            except Exception: pass
-            try:
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception: pass
+            except Exception:
+                try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception: pass
             await asyncio.sleep(2)
-
-    def patch_comfyui_main_ram(self):
-        main_path = "/workspace/ComfyUI/main.py"
-        if os.path.exists(main_path):
-            with open(main_path, "r") as f:
-                content = f.read()
-            
-            mock_code = """import sys
-import os
-import psutil
-import importlib.abc
-import importlib.machinery
-
-# --- Import Redirection Hook to Resolve Module vs Package Conflict ---
-class UtilsPackageRedirector(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path, target=None):
-        if fullname == "utils" or fullname.startswith("utils."):
-            comfyui_path = "/workspace/ComfyUI"
-            original_path = list(sys.path)
-            try:
-                sys.path = [p for p in sys.path if not (p.endswith("comfy") or "comfy/" in p or "comfy\\\\" in p or p.endswith("comfy-cli") or "comfy-cli" in p)]
-                if comfyui_path not in sys.path:
-                    sys.path.insert(0, comfyui_path)
-                for finder in sys.meta_path:
-                    if finder is self: continue
-                    try:
-                        spec = finder.find_spec(fullname, path, target)
-                        if spec is not None: return spec
-                    except Exception: pass
-            finally:
-                sys.path = original_path
-        return None
-sys.meta_path.insert(0, UtilsPackageRedirector())
-
-def mock_virtual_memory():
-    class MockVM:
-        def __init__(self):
-            self.total = 32 * 1024 * 1024 * 1024  
-            self.available = 24 * 1024 * 1024 * 1024  
-            self.percent = 25.0
-            self.used = 8 * 1024 * 1024 * 1024
-            self.free = 24 * 1024 * 1024 * 1024
-    return MockVM()
-psutil.virtual_memory = mock_virtual_memory
-
-try:
-    import threading
-    import time
-    def background_patcher():
-        try:
-            patched = False
-            while not patched:
-                import sys
-                modules_to_patch = []
-                if "comfy.samplers" in sys.modules:
-                    try:
-                        import comfy.samplers
-                        modules_to_patch.append(sys.modules["comfy.samplers"])
-                    except Exception: pass
-                if "comfy.guiders" in sys.modules:
-                    try:
-                        import comfy.guiders
-                        modules_to_patch.append(sys.modules["comfy.guiders"])
-                    except Exception: pass
-                
-                modules_to_patch = [m for m in modules_to_patch if m is not None]
-                if not modules_to_patch:
-                    time.sleep(0.1)
-                    continue
-                    
-                patched_classes = set()
-                for module in modules_to_patch:
-                    for name in dir(module):
-                        obj = getattr(module, name)
-                        if isinstance(obj, type) and hasattr(obj, "set_conds"):
-                            if obj in patched_classes: continue
-                            orig_set_conds = obj.set_conds
-                            if getattr(orig_set_conds, "__name__", "") == "patched_set_conds": continue
-                            def make_patched_set_conds(original_method):
-                                def patched_set_conds(self, *args, **kwargs):
-                                    pos = args[0] if len(args) >= 1 else None
-                                    neg = args[1] if len(args) >= 2 else None
-                                    if "positive" in kwargs: pos = kwargs["positive"]
-                                    if "negative" in kwargs: neg = kwargs["negative"]
-                                    self.raw_conds = (pos, neg)
-                                    return original_method(self, *args, **kwargs)
-                                return patched_set_conds
-                            obj.set_conds = make_patched_set_conds(orig_set_conds)
-                            patched_classes.add(obj)
-                patched = True
-                time.sleep(0.1)
-        except Exception: pass
-    threading.Thread(target=background_patcher, daemon=True).start()
-except Exception: pass
-"""
-            if "mock_virtual_memory" not in content:
-                with open(main_path, "w") as f:
-                    f.write(mock_code + "\n" + content)
 
     @modal.enter()
     def start_comfy(self):
@@ -470,52 +100,36 @@ except Exception: pass
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
+        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf", "loras"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        exact_mapping = {
-            "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
-            "ltx-2-19b-embeddings_connector_dev_bf16.safetensors": ["checkpoints"],
-            "ltx-2-19b-distilled-fp8.safetensors": ["unet", "diffusion_models"],
-            "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
-            "ltx-2-19b-dev_audio_vae.safetensors": ["checkpoints"],
-            "ltx-2-19b-dev_video_vae.safetensors": ["vae"]
-        }
-
         if os.path.exists("/mnt/weights"):
-            os.makedirs("/mnt/weights/.triton_cache", exist_ok=True)
-            os.makedirs("/mnt/weights/.inductor_cache", exist_ok=True)
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
-                    if filename in exact_mapping:
-                        src_path = os.path.join(root_dir, filename)
-                        for target_dir in exact_mapping[filename]:
-                            dest = os.path.join(base_models_dir, target_dir, filename)
-                            if not os.path.exists(dest):
-                                try:
-                                    os.symlink(src_path, dest)
-                                except FileExistsError:
-                                    pass
-                                except Exception as e:
-                                    print(f"⚠️ Failed linking {filename}: {e}")
-
-        self.patch_comfyui_main_ram()
+                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
+                        continue
+                        
+                    src_path = os.path.join(root_dir, filename)
+                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "vfi", "loras"]:
+                        dest = os.path.join(base_models_dir, target_dir, filename)
+                        if not os.path.exists(dest):
+                            try: os.symlink(src_path, dest)
+                            except FileExistsError: pass
 
         self.s3 = boto3.client(
             service_name='s3', 
-            endpoint_url=R2_ENDPOINT_URL, 
-            aws_access_key_id=R2_ACCESS_KEY_ID, 
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY, 
+            endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com", 
+            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'], 
+            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], 
             region_name="auto"
         )
 
-        print("🚀 Launching Clean Native Normal-VRAM Engine...")
+        print("🚀 Launching Clean LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
         env_vars = os.environ.copy()
-        env_vars["PYTHONUNBUFFERED"] = "1" 
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["OMP_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,max_split_size_mb:64"
@@ -523,292 +137,245 @@ except Exception: pass
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # ⚡ SAGEATTENTION NO-COMPILING CACHE INTEGRATION
-        env_vars["TRITON_CACHE_DIR"] = "/mnt/weights/.triton_cache"
-        env_vars["TORCHINDUCTOR_CACHE_DIR"] = "/mnt/weights/.inductor_cache"
-        
-        # ⚡ NORMAL VRAM EXECUTION (Removed float8 text encoder flag to prevent rms_norm hangs)
         self.process = subprocess.Popen([
-            "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
-            "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers",
-            "--disable-pinned-memory", "--disable-smart-memory"
+            "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
+            "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"        
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
         self.t.start()
 
-        asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
-
         start_time = time.time()
-        node_registration_verified = False
         while time.time() - start_time < 300:
             if self.process.poll() is not None:
+                print("❌ Startup Crash!")
                 os._exit(1)
             try:
-                req = urllib.request.Request("http://127.0.0.1:8188/object_info")
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
                     if response.status == 200:
-                        data = json.loads(response.read().decode())
-                        if "LTXVLoopingSampler" in data or "KSamplerSelect" in data:
-                            print("⚡ LTX-19B API ONLINE & Node Registry Verified!")
-                            node_registration_verified = True
-                            break
+                        print("⚡ LTX-2 API ONLINE!")
+                        return
             except Exception:
-                pass
-            time.sleep(2)
-            
-        if not node_registration_verified:
-            time.sleep(15)
-            print("⚡ LTX-19B API ONLINE (Fallback Mode)!")
-
-    def purge_memory(self):
-        """Hardcoded strict memory sweep to unload resident models and free system/VRAM buffers."""
-        import gc
-        import torch
-        import ctypes
-        import urllib.request
-        import json
-
-        print("🧹 [Memory Purger] Initiating strict step-wise VRAM & system memory purge...")
-        gc.collect()
-        torch.cuda.empty_cache()
-        try:
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except Exception:
-            pass
-        try:
-            free_url = "http://127.0.0.1:8188/free"
-            free_payload = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
-            free_req = urllib.request.Request(
-                free_url, 
-                data=free_payload, 
-                headers={"Content-Type": "application/json"},
-                method="POST"
-            )
-            with urllib.request.urlopen(free_req, timeout=5) as free_resp:
-                if free_resp.status == 200:
-                    print("🛡️ [Memory Purger] Local VRAM cleared and returned to clean resident model state.")
-        except Exception as e:
-            print(f"⚠️ [Memory Purger] Local VRAM cleanup sweep skipped: {e}")
-
-# ==========================================
-# PART 5: Hybrid Endpoint Handler & Execution Process
-# ==========================================
+                time.sleep(2)
+        os._exit(1)
 
     @modal.fastapi_endpoint(method="POST")
-    async def generate(self, body: dict, x_api_key: str = Header(None)):
-        import aiohttp
-        import json
-        import os
-        import uuid
-        import shutil
-        import torch
-        import gc
-        from urllib.parse import urlparse
-
-        if x_api_key != os.environ.get("API_KEY"):
+    async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
+        if x_api_key != os.environ.get("API_KEY"): 
             raise HTTPException(status_code=403, detail="Unauthorized")
+        
+        body = await request.json()
+        if isinstance(body, dict) and "json" in body:
+            body = body["json"]
+
+        image_url = body.get("image_url")
+        workflow = body.get("workflow")
+        requested_length = body.get("length")
+
+        if isinstance(workflow, str):
+            try: workflow = json.loads(workflow)
+            except Exception: pass
+
+        if isinstance(workflow, dict) and "workflow" in workflow:
+            if not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
+                workflow = workflow["workflow"]
+
+        if isinstance(workflow, dict):
+            if "nodes" in workflow and "last_node_id" in workflow:
+                raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
+
+        # Real model file names from weight volume
+        target_unet = "ltx-2-19b-distilled-fp8.safetensors"
+        target_gemma = "gemma-3-12b-it-FP8.safetensors"
+        target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
+        target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
+        target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
+        target_distilled_lora = "ltx-2-19b-distilled-lora-384.safetensors"
+        target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
+
+        def find_node(cls_name):
+            return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
+
+        if isinstance(workflow, dict):
+            if requested_length is not None:
+                try:
+                    tgt_len = int(requested_length)
+                    if (tgt_len - 1) % 8 != 0:
+                        tgt_len = ((tgt_len - 1) // 8) * 8 + 1
+                        if tgt_len < 9: tgt_len = 9
+                    
+                    video_latent_node = find_node("EmptyLTXVLatentVideo")
+                    audio_latent_node = find_node("LTXVEmptyLatentAudio")
+                    
+                    if video_latent_node:
+                        workflow[video_latent_node]["inputs"]["length"] = tgt_len
+                    if audio_latent_node:
+                        workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
+                except Exception as e:
+                    print(f"⚠️ Dynamic framing error: {e}")
+
+            sanitized_workflow = {}
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict) and "class_type" in node_data:
+                    if "inputs" not in node_data or node_data["inputs"] is None:
+                        node_data["inputs"] = {}
+
+                    class_type = node_data.get("class_type")
+
+                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
+                        if "unet_name" in node_data["inputs"]:
+                            node_data["inputs"]["unet_name"] = target_unet
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["ckpt_name"] = target_unet
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                node_data["widgets_values"][0] = target_unet
+
+                    if class_type == "LTXAVTextEncoderLoader":
+                        node_data["inputs"]["text_encoder"] = target_gemma
+                        node_data["inputs"]["ckpt_name"] = target_connector
+
+                    if class_type in ["VAELoaderKJ", "VAELoader"]:
+                        if "vae_name" in node_data["inputs"]:
+                            node_data["inputs"]["vae_name"] = target_video_vae
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["ckpt_name"] = target_video_vae
+
+                    if class_type == "LTXVAudioVAELoader":
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["ckpt_name"] = target_audio_vae
+                        if "vae_name" in node_data["inputs"]:
+                            node_data["inputs"]["vae_name"] = target_audio_vae
+
+                    if class_type == "DenoMultiImageLoader":
+                        node_data["inputs"]["image_paths"] = "input/dynamic_guides"
+
+                    if class_type == "LTXVEmptyLatentAudio":
+                        node_data["inputs"]["frame_rate"] = 12
+
+                    if class_type == "LoraLoader":
+                        lora_input_name = node_data["inputs"].get("lora_name", "")
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                lora_input_name = node_data["widgets_values"][0]
+                        
+                        resolved_lora = None
+                        if "distilled" in str(lora_input_name).lower():
+                            resolved_lora = target_distilled_lora
+                        elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
+                            resolved_lora = target_detailer_lora
+                        
+                        if resolved_lora:
+                            if "lora_name" in node_data["inputs"]:
+                                node_data["inputs"]["lora_name"] = resolved_lora
+                            if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                                if len(node_data["widgets_values"]) > 0:
+                                    node_data["widgets_values"][0] = resolved_lora
+
+                    sanitized_workflow[str(node_id)] = node_data
+            
+            workflow = sanitized_workflow
+
+        dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
+        if os.path.exists(dynamic_guides_dir):
+            shutil.rmtree(dynamic_guides_dir)
+        os.makedirs(dynamic_guides_dir, exist_ok=True)
+
+        urls_to_download = []
+        if image_url:
+            if isinstance(image_url, list):
+                urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
+            elif isinstance(image_url, str) and image_url.strip():
+                if "," in image_url:
+                    urls_to_download = [u.strip() for u in image_url.split(",") if u.strip()]
+                else:
+                    urls_to_download = [image_url.strip()]
+
+        if not urls_to_download:
+            from PIL import Image
+            img = Image.new('RGB', (1024, 1024), color='black')
+            img.save(os.path.join(dynamic_guides_dir, "guide_0.png"))
+            print("Creating black canvas fallback guide.")
+        else:
+            async def download_one(session, url_str, target_dest):
+                from urllib.parse import urlparse
+                parsed = urlparse(url_str)
+                is_r2_storage = ("r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme)
+                
+                if is_r2_storage:
+                    file_key = parsed.path.lstrip('/')
+                    while "//" in file_key:
+                        file_key = file_key.replace("//", "/")
+                    print(f"📥 Fetching R2 file: {file_key}")
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        self.s3.download_file, 
+                        "video-asset-files-storage-workflow", 
+                        file_key, 
+                        target_dest
+                    )
+                else:
+                    print(f"📥 Downloading HTTP file: {url_str}")
+                    try:
+                        async with session.get(url_str, timeout=120) as r:
+                            if r.status == 200:
+                                f_content = await r.read()
+                                with open(target_dest, "wb") as f:
+                                    f.write(f_content)
+                            else:
+                                raise Exception(f"HTTP code {r.status}")
+                    except Exception as err:
+                        print(f"HTTP direct download failed, falling back to urllib: {err}")
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            urllib.request.urlretrieve,
+                            url_str,
+                            target_dest
+                        )
+
+            async with aiohttp.ClientSession() as session:
+                tasks = []
+                for idx, url in enumerate(urls_to_download):
+                    dest = os.path.join(dynamic_guides_dir, f"guide_{idx}.png")
+                    tasks.append(download_one(session, url, dest))
+                await asyncio.gather(*tasks)
+
+        out_dir = "/workspace/ComfyUI/output"
+        if os.path.exists(out_dir): shutil.rmtree(out_dir)
+        os.makedirs(out_dir)
+
+        ram_task = asyncio.create_task(self._ram_squeezer())
 
         try:
-            image_url = body.get("image_url")
-            workflow_str = body.get("workflow")
-            requested_length = body.get("length", 65)
-            filename_prefix = body.get("filename", "output_video")
-
-            if not workflow_str:
-                raise HTTPException(status_code=400, detail="Missing 'workflow' in request body")
-
-            if isinstance(workflow_str, str):
-                try:
-                    wf_data = json.loads(workflow_str)
-                except Exception as e:
-                    raise HTTPException(status_code=400, detail=f"Invalid JSON format: {e}")
-            else:
-                wf_data = workflow_str
-
-            dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
-            if os.path.exists(dynamic_guides_dir):
-                shutil.rmtree(dynamic_guides_dir)
-            os.makedirs(dynamic_guides_dir, exist_ok=True)
-            
-            has_images = False
-            downloaded_paths = []
-            if image_url:
-                urls = [u.strip() for u in image_url.split(",") if u.strip()]
-                for idx, url in enumerate(urls):
-                    ext = os.path.splitext(url.split("?")[0])[1] or ".png"
-                    target_image_path = os.path.join(dynamic_guides_dir, f"guide_image_{idx}{ext}")
-                    
-                    if "r2.dev" in url or R2_ACCOUNT_ID in url:
-                        parsed_url = urlparse(url)
-                        key = parsed_url.path.lstrip("/")
-                        try:
-                            self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
-                            downloaded_paths.append(target_image_path)
-                            has_images = True
-                        except Exception as e:
-                            raise HTTPException(status_code=400, detail=f"S3 R2 download failure for {url}: {e}")
-                    else:
-                        try:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(url) as resp:
-                                    if resp.status == 200:
-                                        with open(target_image_path, "wb") as f:
-                                            f.write(await resp.read())
-                                        downloaded_paths.append(target_image_path)
-                                        has_images = True
-                                    else:
-                                        raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
-                        except Exception as e:
-                            raise HTTPException(status_code=400, detail=f"Download failure for {url}: {e}")
-
-            tgt_len = int(requested_length)
-            if (tgt_len - 1) % 16 != 0:
-                tgt_len = ((tgt_len - 1) // 16) * 16 + 1
-                if tgt_len < 17:
-                    tgt_len = 17
-
-            for node_id, node in wf_data.items():
-                if not isinstance(node, dict) or "inputs" not in node:
-                    continue
-                    
-                cls = node.get("class_type", "")
-                inputs = node["inputs"]
-                
-                if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
-                    node["class_type"] = "UNETLoader"
-                    inputs["unet_name"] = TARGET_UNET
-                    if "weight_dtype" not in inputs:
-                        inputs["weight_dtype"] = "default"
-                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = TARGET_UNET
-
-                elif cls == "LTXAVTextEncoderLoader":
-                    inputs["text_encoder"] = TARGET_GEMMA
-                    inputs["ckpt_name"] = TARGET_CONNECTOR
-                    inputs["device"] = "default"  # ⚡ Runs the prompt encoding instantly on GPU
-                elif cls in ["VAELoaderKJ", "VAELoader"]:
-                    inputs["vae_name"] = TARGET_VIDEO_VAE
-                    inputs["ckpt_name"] = TARGET_VIDEO_VAE
-                elif cls in ["LTXVAudioVAELoader", "LowVRAMAudioVAELoader"]:
-                    node["class_type"] = "LTXVAudioVAELoader"
-                    inputs["ckpt_name"] = TARGET_AUDIO_VAE
-                    inputs["vae_name"] = TARGET_AUDIO_VAE
-                    
-                elif cls == "LoraLoader":
-                    inputs["lora_name"] = TARGET_DETAILER_LORA
-                    if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                        node["widgets_values"][0] = TARGET_DETAILER_LORA
-                        
-                elif cls == "DenoMultiImageLoader":
-                    if has_images:
-                        inputs["image_paths"] = "\n".join(downloaded_paths)
-                elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
-                    inputs["length"] = tgt_len
-                elif "LTXVEmptyLatentAudio" in cls:
-                    inputs["frames_number"] = tgt_len
-                
-                elif cls == "LTXVSpatioTemporalTiledVAEDecode":
-                    inputs["working_device"] = "auto" 
-                    inputs["working_dtype"] = "float16"
-                    if "tile_size" in inputs: inputs["tile_size"] = 512
-                    if "overlap" in inputs: inputs["overlap"] = 64
-                    if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
-                    if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
-                    if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
-                    if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
-                elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
-                    inputs["working_device"] = "cuda"
-                    inputs["working_dtype"] = "float16"
-                    if "tile_size" in inputs: inputs["tile_size"] = 512
-                    if "overlap" in inputs: inputs["overlap"] = 64
-                    if "temporal_tile_length" in inputs: inputs["temporal_tile_length"] = 8
-                    if "temporal_overlap" in inputs: inputs["temporal_overlap"] = 4
-                    if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
-                    if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
-
-            sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
-            if sage_node_id:
-                print(f"🧠 Native Memory Optimization Active: Preserving Sage Attention Patch (Node {sage_node_id}) for enhanced VRAM efficiency and speed.")
-
-            print("⚡ Dispatching NVMe Stream-Optimized LTX-19B workflow to local endpoint...")
-            comfy_url = "http://127.0.0.1:8188/prompt"
-            payload = {"prompt": wf_data}
-            
             async with aiohttp.ClientSession() as session:
-                async with session.post(comfy_url, json=payload) as resp:
-                    if resp.status != 200:
-                        err_txt = await resp.text()
-                        raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {err_txt}")
-                    
+                print("🎨 Running Pipeline...")
+                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
                     res_json = await resp.json()
-                    prompt_id = res_json.get("prompt_id")
-                    print(f"🎉 Job queued successfully. Prompt ID: {prompt_id}")
+                    if "error" in res_json or "prompt_id" not in res_json:
+                        error_msg = res_json.get("error", res_json)
+                        raise HTTPException(status_code=400, detail=f"Invalid JSON: {error_msg}")
+                    prompt_id = res_json['prompt_id']
 
-                history_url = f"http://127.0.0.1:8188/history/{prompt_id}"
-                print("⏳ Polling local ComfyUI history for rendering outputs...")
-                
+                start_time = time.time()
                 while True:
-                    async with session.get(history_url) as resp:
-                        if resp.status == 200:
-                            hist_data = await resp.json()
-                            if prompt_id in hist_data:
-                                print("✅ Local generation task completed.")
+                    if self.process.poll() is not None:
+                        raise HTTPException(status_code=500, detail="Backend server execution failure.")
+                    async with session.get("http://127.0.0.1:8188/history") as hist_resp:
+                        if hist_resp.status == 200:
+                            history = await hist_resp.json()
+                            if prompt_id in history:
                                 break
-                    await asyncio.sleep(2)
+                    if time.time() - start_time > 2400:
+                        raise HTTPException(status_code=540, detail="Execution timeout reached.")
+                    await asyncio.sleep(5)
 
-                # 🧹 STEP PURGE 1: Purge VRAM immediately after completion, prior to S3 upload
-                self.purge_memory()
-
-                outputs = hist_data[prompt_id].get("outputs", {})
-                output_file_path = None
-                for node_id, node_output in outputs.items():
-                    if "gifs" in node_output:
-                        for gif in node_output["gifs"]:
-                            filename = gif.get("filename")
-                            output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
-                            break
-                    elif "images" in node_output:
-                        for img in node_output["images"]:
-                            filename = img.get("filename")
-                            output_file_path = os.path.join("/workspace/ComfyUI/output", filename)
-                            break
+            videos = [v for v in os.listdir(out_dir) if v.endswith(".mp4")]
+            if not videos:
+                raise HTTPException(status_code=500, detail="Output generation target missing.")
                 
-                if not output_file_path or not os.path.exists(output_file_path):
-                    output_dir = "/workspace/ComfyUI/output"
-                    files = [os.path.join(output_dir, f) for f in os.listdir(output_dir) if filename_prefix in f]
-                    if files:
-                        output_file_path = max(files, key=os.path.getmtime)
-                    else:
-                        raise HTTPException(status_code=500, detail="Output video file not found in output directory")
-
-                r2_output_key = f"rendered-videos/{uuid.uuid4()}_{os.path.basename(output_file_path)}"
-                print(f"📤 Uploading final rendering to Cloudflare R2 path: {r2_output_key}")
-                
-                try:
-                    self.s3.upload_file(
-                        output_file_path, 
-                        "video-asset-files-storage-workflow", 
-                        r2_output_key,
-                        ExtraArgs={"ContentType": "video/mp4"}
-                    )
-                    
-                    signed_url = self.s3.generate_presigned_url(
-                        'get_object',
-                        Params={
-                            'Bucket': "video-asset-files-storage-workflow",
-                            'Key': r2_output_key
-                        },
-                        ExpiresIn=86400
-                    )
-                    
-                    print(f"✨ Task finished successfully. Returning signed asset path: {signed_url}")
-                    return {"status": "success", "video_url": signed_url}
-                    
-                except Exception as e:
-                    print(f"❌ Failed to transfer output asset to Cloudflare R2: {e}")
-                    raise HTTPException(status_code=500, detail=f"R2 asset storage exception: {e}")
+            videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
+            with open(os.path.join(out_dir, videos[0]), "rb") as f:
+                return Response(content=f.read(), media_type="video/mp4")
         finally:
-            # 🧹 STEP PURGE 2: Final sweep inside a fallback block to reset device state
-            self.purge_memory()
+            ram_task.cancel()
