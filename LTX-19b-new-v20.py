@@ -173,7 +173,7 @@ def bake_private_workflow_into_image():
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
                     node["widgets_values"][0] = resolved
             elif cls == "DenoMultiImageLoader":
-                inputs["image_paths"] = "input/dynamic_guides"
+                inputs["image_paths"] = ""  # Safe default initialization value
             
             # Hardware-Optimized Decoding Rules
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
@@ -344,7 +344,7 @@ def patch_comfyui_model_management_all():
         with open(mm_path, "r") as f:
             content = f.read()
         
-        # 1. Inject Upgraded Category-Aware Sequential Model Purger (Scoped-Safe to avoid UnboundLocalError)
+        # 1. Inject Upgraded Category-Aware Sequential Model Purger (Scoped-Safe to avoid name shadow / UnboundLocalError)
         if "### SEQUENTIAL MODEL PURGER PATCH ###" not in content:
             print("🔧 Injecting upgraded category-aware sequential model-purging patch into comfy/model_management.py...")
             target_str = "def load_models_gpu("
@@ -468,6 +468,7 @@ final_image = (
 
 # ==========================================
 # PART 4: Production Class Definition & Resource Reclamation Loops
+# Purpose: Manages the Modal lifecycle, handles normal VRAM mapping directly from NVMe, and prevents System leaks.
 # ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -725,6 +726,7 @@ except Exception as e:
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
+# Purpose: Intercepts requests, forces dynamic decoding and parameters to run optimally on the L4.
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -763,6 +765,7 @@ except Exception as e:
         os.makedirs(dynamic_guides_dir, exist_ok=True)
         
         has_images = False
+        downloaded_paths = []
         if image_url:
             # Supports single image as well as comma-separated image sequences
             urls = [u.strip() for u in image_url.split(",") if u.strip()]
@@ -776,6 +779,7 @@ except Exception as e:
                     key = parsed_url.path.lstrip("/")
                     try:
                         self.s3.download_file("video-asset-files-storage-workflow", key, target_image_path)
+                        downloaded_paths.append(target_image_path)
                         has_images = True
                     except Exception as e:
                         raise HTTPException(status_code=400, detail=f"S3 R2 download failure for {url}: {e}")
@@ -786,6 +790,7 @@ except Exception as e:
                                 if resp.status == 200:
                                     with open(target_image_path, "wb") as f:
                                         f.write(await resp.read())
+                                    downloaded_paths.append(target_image_path)
                                     has_images = True
                                 else:
                                     raise HTTPException(status_code=400, detail=f"Failed to download guide image. HTTP {resp.status}")
@@ -874,7 +879,8 @@ except Exception as e:
                     node["widgets_values"][0] = resolved
             elif cls == "DenoMultiImageLoader":
                 if has_images:
-                    inputs["image_paths"] = dynamic_guides_dir
+                    # Provide newline-separated file paths as expected by the multi-loader node
+                    inputs["image_paths"] = "\\n".join(downloaded_paths)
             elif "EmptyLTXVLatentVideo" in cls or "LTXVEmptyLatentVideo" in cls:
                 inputs["length"] = tgt_len
             elif "LTXVEmptyLatentAudio" in cls:
