@@ -141,6 +141,26 @@ class LTXEngine:
             region_name="auto"
         )
 
+        # ⚡ EQUIP NATIVE CFGGUIDER WITH THE raw_conds ATTRIBUTE
+        init_file_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
+        if os.path.exists(init_file_path):
+            print("🔗 Injecting CFGGuider raw_conds monkeypatch into ComfyUI-LTXVideo initialization...")
+            patch_code = """
+# Monkeypatch comfy.samplers.CFGGuider to support raw_conds
+try:
+    import comfy.samplers
+    _orig_set_conds = comfy.samplers.CFGGuider.set_conds
+    def _patched_set_conds(self, positive, negative):
+        self.raw_conds = (positive, negative)
+        return _orig_set_conds(self, positive, negative)
+    comfy.samplers.CFGGuider.set_conds = _patched_set_conds
+    print("Successfully monkeypatched comfy.samplers.CFGGuider to support raw_conds attribute!")
+except Exception as e:
+    print("Failed to monkeypatch comfy.samplers.CFGGuider:", e)
+"""
+            with open(init_file_path, "a") as f:
+                f.write(patch_code)
+
         print("🚀 Launching Clean LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -218,90 +238,6 @@ class LTXEngine:
         def find_node(cls_name):
             return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
 
-        if isinstance(workflow, dict):
-            if requested_length is not None:
-                try:
-                    tgt_len = int(requested_length)
-                    if (tgt_len - 1) % 8 != 0:
-                        tgt_len = ((tgt_len - 1) // 8) * 8 + 1
-                        if tgt_len < 9: tgt_len = 9
-                    
-                    video_latent_node = find_node("EmptyLTXVLatentVideo")
-                    audio_latent_node = find_node("LTXVEmptyLatentAudio")
-                    
-                    if video_latent_node:
-                        workflow[video_latent_node]["inputs"]["length"] = tgt_len
-                    if audio_latent_node:
-                        workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
-                except Exception as e:
-                    print(f"⚠️ Dynamic framing error: {e}")
-
-            sanitized_workflow = {}
-            for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict) and "class_type" in node_data:
-                    class_type = node_data.get("class_type")
-
-                    # 🧹 Safe Purge: Skip unused text compilation nodes
-                    if class_type in ["MultiStringPrompts", "JoinStringMulti"]:
-                        continue
-
-                    if "inputs" not in node_data or node_data["inputs"] is None:
-                        node_data["inputs"] = {}
-
-                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
-                        if "unet_name" in node_data["inputs"]:
-                            node_data["inputs"]["unet_name"] = target_unet
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_unet
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                node_data["widgets_values"][0] = target_unet
-
-                    if class_type == "LTXAVTextEncoderLoader":
-                        node_data["inputs"]["text_encoder"] = target_gemma
-                        node_data["inputs"]["ckpt_name"] = target_connector
-
-                    if class_type in ["VAELoaderKJ", "VAELoader"]:
-                        if "vae_name" in node_data["inputs"]:
-                            node_data["inputs"]["vae_name"] = target_video_vae
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_video_vae
-
-                    if class_type == "LTXVAudioVAELoader":
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_audio_vae
-                        if "vae_name" in node_data["inputs"]:
-                            node_data["inputs"]["vae_name"] = target_audio_vae
-
-                    if class_type == "DenoMultiImageLoader":
-                        node_data["inputs"]["image_paths"] = "input/dynamic_guides"
-
-                    if class_type == "LTXVEmptyLatentAudio":
-                        node_data["inputs"]["frame_rate"] = 12
-
-                    if class_type == "LoraLoader":
-                        lora_input_name = node_data["inputs"].get("lora_name", "")
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                lora_input_name = node_data["widgets_values"][0]
-                        
-                        resolved_lora = None
-                        if "distilled" in str(lora_input_name).lower():
-                            resolved_lora = target_distilled_lora
-                        elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
-                            resolved_lora = target_detailer_lora
-                        
-                        if resolved_lora:
-                            if "lora_name" in node_data["inputs"]:
-                                node_data["inputs"]["lora_name"] = resolved_lora
-                            if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                                if len(node_data["widgets_values"]) > 0:
-                                    node_data["widgets_values"][0] = resolved_lora
-
-                    sanitized_workflow[str(node_id)] = node_data
-            
-            workflow = sanitized_workflow
-
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
         if os.path.exists(dynamic_guides_dir):
             shutil.rmtree(dynamic_guides_dir)
@@ -365,6 +301,101 @@ class LTXEngine:
                     dest = os.path.join(dynamic_guides_dir, f"guide_{idx}.png")
                     tasks.append(download_one(session, url, dest))
                 await asyncio.gather(*tasks)
+
+        # ⚡ COLLECT ABSOLUTE PATHS OF GENERATED IMAGES FOR THE MULTI-IMAGE LOADER
+        downloaded_paths = []
+        if urls_to_download:
+            for idx in range(len(urls_to_download)):
+                downloaded_paths.append(os.path.join(dynamic_guides_dir, f"guide_{idx}.png"))
+        else:
+            downloaded_paths.append(os.path.join(dynamic_guides_dir, "guide_0.png"))
+        
+        image_paths_str = "\n".join(downloaded_paths)
+
+        if isinstance(workflow, dict):
+            if requested_length is not None:
+                try:
+                    tgt_len = int(requested_length)
+                    if (tgt_len - 1) % 8 != 0:
+                        tgt_len = ((tgt_len - 1) // 8) * 8 + 1
+                        if tgt_len < 9: tgt_len = 9
+                    
+                    video_latent_node = find_node("EmptyLTXVLatentVideo")
+                    audio_latent_node = find_node("LTXVEmptyLatentAudio")
+                    
+                    if video_latent_node:
+                        workflow[video_latent_node]["inputs"]["length"] = tgt_len
+                    if audio_latent_node:
+                        workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
+                except Exception as e:
+                    print(f"⚠️ Dynamic framing error: {e}")
+
+            sanitized_workflow = {}
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict) and "class_type" in node_data:
+                    class_type = node_data.get("class_type")
+
+                    # 🧹 Safe Purge: Skip unused text compilation nodes
+                    if class_type in ["MultiStringPrompts", "JoinStringMulti"]:
+                        continue
+
+                    if "inputs" not in node_data or node_data["inputs"] is None:
+                        node_data["inputs"] = {}
+
+                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
+                        if "unet_name" in node_data["inputs"]:
+                            node_data["inputs"]["unet_name"] = target_unet
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["ckpt_name"] = target_unet
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                node_data["widgets_values"][0] = target_unet
+
+                    if class_type == "LTXAVTextEncoderLoader":
+                        node_data["inputs"]["text_encoder"] = target_gemma
+                        node_data["inputs"]["ckpt_name"] = target_connector
+
+                    if class_type in ["VAELoaderKJ", "VAELoader"]:
+                        if "vae_name" in node_data["inputs"]:
+                            node_data["inputs"]["vae_name"] = target_video_vae
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["ckpt_name"] = target_video_vae
+
+                    if class_type == "LTXVAudioVAELoader":
+                        if "ckpt_name" in node_data["inputs"]:
+                            node_data["inputs"]["ckpt_name"] = target_audio_vae
+                        if "vae_name" in node_data["inputs"]:
+                            node_data["inputs"]["vae_name"] = target_audio_vae
+
+                    # ⚡ RESOLVE IMAGE PATHS TO EXPLICIT NEWLINE-SEPARATED FILE LIST
+                    if class_type in ["DenoMultiImageLoader", "MultiImageLoader"]:
+                        node_data["inputs"]["image_paths"] = image_paths_str
+
+                    if class_type == "LTXVEmptyLatentAudio":
+                        node_data["inputs"]["frame_rate"] = 12
+
+                    if class_type == "LoraLoader":
+                        lora_input_name = node_data["inputs"].get("lora_name", "")
+                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                            if len(node_data["widgets_values"]) > 0:
+                                lora_input_name = node_data["widgets_values"][0]
+                        
+                        resolved_lora = None
+                        if "distilled" in str(lora_input_name).lower():
+                            resolved_lora = target_distilled_lora
+                        elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
+                            resolved_lora = target_detailer_lora
+                        
+                        if resolved_lora:
+                            if "lora_name" in node_data["inputs"]:
+                                node_data["inputs"]["lora_name"] = resolved_lora
+                            if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                                if len(node_data["widgets_values"]) > 0:
+                                    node_data["widgets_values"][0] = resolved_lora
+
+                    sanitized_workflow[str(node_id)] = node_data
+            
+            workflow = sanitized_workflow
 
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
