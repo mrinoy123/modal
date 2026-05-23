@@ -15,7 +15,6 @@ from typing import Optional
 
 # ==========================================
 # PART 1: Infrastructure Configuration & Base Image
-# Purpose: Defines the core operating system, environment variables, system-level dependencies, and the base python libraries needed for video processing and AI model inference.
 # ==========================================
 
 R2_ACCOUNT_ID = "4d91f4d3d0366568a54ffa32ffcb7bf4"
@@ -51,10 +50,9 @@ build_image = base_image.env({
     "decord", "imageio", "scikit-image", "numba", "einops", 
     "transformers", "diffusers", "accelerate", "bitsandbytes",
     "lark", "openpyxl", "blake3", "sqlalchemy", "alembic", "psutil", 
-    "sageattention"  # ⚡ Added native sageattention dependency to prevent node execution conflicts
+    "sageattention"
 )
 
-# ⚡ UPDATED: Pointing directly to the Distilled FP8 version and keeping only the Detailer LoRA
 TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
 TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
 TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
@@ -64,7 +62,6 @@ TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# Purpose: Pre-downloads the master workflow, analyzes node pathways, and standardizes models into the prebaked appliance.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -84,7 +81,6 @@ def bake_private_workflow_into_image():
 
     raw_path = "/tmp/raw_workflow.json"
     try:
-        # ⚡ UPDATED: Fetching the newly uploaded 1-LoRA API workflow
         s3.download_file(
             "video-asset-files-storage-workflow", 
             "Comfyui-workflows-json/ltx2-19b-new-workflow-modified1-lora(api).json", 
@@ -106,7 +102,6 @@ def bake_private_workflow_into_image():
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            # Injection of Standard Pipeline Models directly (No execution fences needed)
             if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 node["class_type"] = "UNETLoader"
                 inputs["unet_name"] = TARGET_UNET
@@ -126,7 +121,6 @@ def bake_private_workflow_into_image():
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
             
-            # ⚡ UPDATED: Directly inject the IC Detailer into the single LoraLoader node
             elif cls == "LoraLoader":
                 inputs["lora_name"] = TARGET_DETAILER_LORA
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
@@ -135,6 +129,7 @@ def bake_private_workflow_into_image():
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = ""  
             
+            # ⚡ FIXED: Reverted back to "auto" to pass validation
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
@@ -184,7 +179,6 @@ def patch_ltx_video_imports():
         )
         with open(init_path, "w") as f:
             f.write(patch_code + content)
-        print("🔧 Successfully applied LTXVideo backwards-compatibility monkey-patch for precompute_freqs_cis.")
 
 def patch_comfy_lightricks_model():
     import os
@@ -193,7 +187,6 @@ def patch_comfy_lightricks_model():
         with open(model_path, "r") as f:
             content = f.read()
         if "def precompute_freqs_cis" not in content:
-            print("🔧 Patching comfy/ldm/lightricks/model.py to add backward compatibility helpers...")
             fallback_code = """
 # --- LTX-Video/LTX-2.0 Compatibility Patch ---
 import torch
@@ -363,7 +356,6 @@ class LTXEngine:
                 print(f"[ComfyUI] {line.strip()}")
 
     async def _ram_squeezer(self):
-        print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
             try:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
@@ -485,7 +477,7 @@ except Exception: pass
         exact_mapping = {
             "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
             "ltx-2-19b-embeddings_connector_dev_bf16.safetensors": ["checkpoints"],
-            "ltx-2-19b-distilled-fp8.safetensors": ["unet", "diffusion_models"], # ⚡ Updated to the Distilled FP8 UNet
+            "ltx-2-19b-distilled-fp8.safetensors": ["unet", "diffusion_models"],
             "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
             "ltx-2-19b-dev_audio_vae.safetensors": ["checkpoints"],
             "ltx-2-19b-dev_video_vae.safetensors": ["vae"]
@@ -501,7 +493,6 @@ except Exception: pass
                             if not os.path.exists(dest):
                                 try:
                                     os.symlink(src_path, dest)
-                                    print(f"🔗 Linked: {filename} -> models/{target_dir}")
                                 except FileExistsError:
                                     pass
                                 except Exception as e:
@@ -609,7 +600,6 @@ except Exception: pass
         if image_url:
             urls = [u.strip() for u in image_url.split(",") if u.strip()]
             for idx, url in enumerate(urls):
-                print(f"📥 Downloading dynamic guide image {idx}: {url}")
                 ext = os.path.splitext(url.split("?")[0])[1] or ".png"
                 target_image_path = os.path.join(dynamic_guides_dir, f"guide_image_{idx}{ext}")
                 
@@ -649,7 +639,6 @@ except Exception: pass
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            # 🛡️ PURE NORMAL LOADERS (Graph Dependencies removed) 🛡️
             if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 node["class_type"] = "UNETLoader"
                 inputs["unet_name"] = TARGET_UNET
@@ -669,7 +658,6 @@ except Exception: pass
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
                 
-            # ⚡ UPDATED: Forces the single LoRA block to pull the IC Detailer
             elif cls == "LoraLoader":
                 inputs["lora_name"] = TARGET_DETAILER_LORA
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
@@ -683,8 +671,9 @@ except Exception: pass
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
             
+            # ⚡ FIXED: Working device is correctly reverted to "auto"
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
-                inputs["working_device"] = "cuda" # Forced high-speed Decode
+                inputs["working_device"] = "auto" 
                 inputs["working_dtype"] = "float16"
                 if "tile_size" in inputs: inputs["tile_size"] = 512
                 if "overlap" in inputs: inputs["overlap"] = 64
@@ -702,7 +691,6 @@ except Exception: pass
                 if "spatial_tiles" in inputs: inputs["spatial_tiles"] = 8
                 if "spatial_overlap" in inputs: inputs["spatial_overlap"] = 4
 
-        # ⚡ SAGE ATTENTION PATCH PRESERVATION
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
             print(f"🧠 Native Memory Optimization Active: Preserving Sage Attention Patch (Node {sage_node_id}) for enhanced VRAM efficiency and speed.")
@@ -775,7 +763,6 @@ except Exception: pass
                     ExpiresIn=86400
                 )
                 
-                # Free memory immediately AFTER the complete generation pipeline safely finishes 
                 gc.collect()
                 torch.cuda.empty_cache()
                 try:
