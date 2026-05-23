@@ -49,7 +49,8 @@ build_image = base_image.env({
     "pandas", "numexpr", "pytz", "python-dateutil", 
     "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
     "decord", "imageio", "scikit-image", "numba", "einops", 
-    "transformers", "diffusers", "accelerate", "bitsandbytes"
+    "transformers", "diffusers", "accelerate", "bitsandbytes",
+    "lark", "openpyxl"  # Pre-installed dependencies to prevent runtime blocking
 )
 
 TARGET_UNET = "ltx-2-19b-dev-fp8.safetensors"
@@ -313,14 +314,28 @@ def patch_flux_layers():
     import os
     layers_path = "/workspace/ComfyUI/comfy/ldm/flux/layers.py"
     if os.path.exists(layers_path):
-        with open(layers_path, "a") as f:
-            f.write("\n# --- LTX-Video Compatibility Fallback (apply_rotary_emb) ---\n")
-            f.write("def apply_rotary_emb(x, freqs_cis):\n")
-            f.write("    if x.shape[1] == 0: return x\n")
-            f.write("    t_ = x.reshape(*x.shape[:-1], -1, 1, 2)\n")
-            f.write("    t_out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]\n")
-            f.write("    return t_out.reshape(*x.shape).type_as(x)\n")
-        print("✅ Patched comfy/ldm/flux/layers.py to inject missing apply_rotary_emb function!")
+        with open(layers_path, "r") as f:
+            content = f.read()
+        
+        patch_code = (
+            "\n# --- LTX-Video Compatibility Fallback (apply_rotary_emb) ---\n"
+            "def apply_rotary_emb(x, freqs_cis):\n"
+            "    if x.shape[1] == 0: return x\n"
+            "    t_ = x.reshape(*x.shape[:-1], -1, 1, 2)\n"
+            "    t_out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]\n"
+            "    return t_out.reshape(*x.shape).type_as(x)\n"
+        )
+        
+        if "def apply_rotary_emb" not in content:
+            with open(layers_path, "w") as f:
+                f.write(content + patch_code)
+            
+            with open(layers_path, "r") as f:
+                new_content = f.read()
+            if "__all__" in new_content:
+                with open(layers_path, "a") as f:
+                    f.write("\ntry:\n    if '__all__' in globals():\n        if 'apply_rotary_emb' not in __all__:\n            __all__.append('apply_rotary_emb')\nexcept Exception: pass\n")
+        print("✅ Patched comfy/ldm/flux/layers.py with robust apply_rotary_emb fallback!")
 
 def patch_comfyui_model_management():
     import os
@@ -435,6 +450,7 @@ class LTXEngine:
                 content = f.read()
             
             mock_code = """
+import sys
 import psutil
 def mock_virtual_memory():
     class MockVM:
@@ -448,7 +464,7 @@ def mock_virtual_memory():
 psutil.virtual_memory = mock_virtual_memory
 print("🔧 [Patched] System RAM mocked to 6GB to force aggressive disk-streaming & disable pinned CPU memory allocations!")
 
-# --- Guider raw_conds backward-compatibility patch ---
+# --- Guider raw_conds resilient background-compatibility patch ---
 try:
     import threading
     import time
@@ -457,46 +473,57 @@ try:
             patched = False
             while not patched:
                 import sys
-                if "comfy.samplers" in sys.modules or "comfy.guiders" in sys.modules:
-                    import comfy.samplers
-                    import comfy.guiders
-                    
-                    modules_to_patch = []
-                    if "comfy.samplers" in sys.modules:
+                modules_to_patch = []
+                
+                if "comfy.samplers" in sys.modules:
+                    try:
+                        import comfy.samplers
                         modules_to_patch.append(sys.modules["comfy.samplers"])
-                    if "comfy.guiders" in sys.modules:
-                        modules_to_patch.append(sys.modules["comfy.guiders"])
+                    except Exception:
+                        pass
                         
-                    patched_classes = set()
-                    for module in modules_to_patch:
-                        for name in dir(module):
-                            obj = getattr(module, name)
-                            if isinstance(obj, type) and hasattr(obj, "set_conds"):
-                                if obj in patched_classes:
-                                    continue
-                                orig_set_conds = obj.set_conds
-                                if getattr(orig_set_conds, "__name__", "") == "patched_set_conds":
-                                    continue
-                                    
-                                def make_patched_set_conds(original_method):
-                                    def patched_set_conds(self, *args, **kwargs):
-                                        pos = args[0] if len(args) >= 1 else None
-                                        neg = args[1] if len(args) >= 2 else None
-                                        if "positive" in kwargs:
-                                            pos = kwargs["positive"]
-                                        if "negative" in kwargs:
-                                            neg = kwargs["negative"]
-                                        self.raw_conds = (pos, neg)
-                                        return original_method(self, *args, **kwargs)
-                                    return patched_set_conds
-                                    
-                                obj.set_conds = make_patched_set_conds(orig_set_conds)
-                                patched_classes.add(obj)
-                                print(f"🔧 [Background Patched] preserved raw_conds on class {obj.__name__} in module {module.__name__}.")
-                    patched = True
+                if "comfy.guiders" in sys.modules:
+                    try:
+                        import comfy.guiders
+                        modules_to_patch.append(sys.modules["comfy.guiders"])
+                    except Exception:
+                        pass
+                        
+                modules_to_patch = [m for m in modules_to_patch if m is not None]
+                if not modules_to_patch:
+                    time.sleep(0.1)
+                    continue
+                    
+                patched_classes = set()
+                for module in modules_to_patch:
+                    for name in dir(module):
+                        obj = getattr(module, name)
+                        if isinstance(obj, type) and hasattr(obj, "set_conds"):
+                            if obj in patched_classes:
+                                continue
+                            orig_set_conds = obj.set_conds
+                            if getattr(orig_set_conds, "__name__", "") == "patched_set_conds":
+                                continue
+                                
+                            def make_patched_set_conds(original_method):
+                                def patched_set_conds(self, *args, **kwargs):
+                                    pos = args[0] if len(args) >= 1 else None
+                                    neg = args[1] if len(args) >= 2 else None
+                                    if "positive" in kwargs:
+                                        pos = kwargs["positive"]
+                                    if "negative" in kwargs:
+                                        neg = kwargs["negative"]
+                                    self.raw_conds = (pos, neg)
+                                    return original_method(self, *args, **kwargs)
+                                return patched_set_conds
+                                
+                            obj.set_conds = make_patched_set_conds(orig_set_conds)
+                            patched_classes.add(obj)
+                            print(f"🔧 [Background Patched] preserved raw_conds on class {obj.__name__} in module {module.__name__}.")
+                patched = True
                 time.sleep(0.1)
         except Exception as e:
-            print(f"⚠️ Warning: background patcher failed: {e}")
+            print(f"⚠️ Warning: background patcher loop failed: {e}")
             
     threading.Thread(target=background_patcher, daemon=True).start()
 except Exception as e:
@@ -578,18 +605,28 @@ except Exception as e:
 
         asyncio.run_coroutine_threadsafe(self._ram_squeezer(), asyncio.get_event_loop())
 
+        # ⚡ Safe node registry poll loop: Blocks until node schema loads cleanly
         start_time = time.time()
+        node_registration_verified = False
         while time.time() - start_time < 300:
             if self.process.poll() is not None:
                 os._exit(1)
             try:
-                with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
+                req = urllib.request.Request("http://127.0.0.1:8188/object_info")
+                with urllib.request.urlopen(req, timeout=5) as response:
                     if response.status == 200:
-                        print("⚡ LTX-19B API ONLINE!")
-                        return
+                        data = json.loads(response.read().decode())
+                        if "LTXVLoopingSampler" in data or "KSamplerSelect" in data:
+                            print("⚡ LTX-19B API ONLINE & Node Registry Verified!")
+                            node_registration_verified = True
+                            break
             except Exception:
-                time.sleep(2)
-        os._exit(1)
+                pass
+            time.sleep(2)
+            
+        if not node_registration_verified:
+            time.sleep(15)
+            print("⚡ LTX-19B API ONLINE (Fallback Mode)!")
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Dynamic Parameter Override
