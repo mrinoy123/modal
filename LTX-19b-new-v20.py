@@ -54,18 +54,17 @@ build_image = base_image.env({
     "sageattention"  # ⚡ Added native sageattention dependency to prevent node execution conflicts
 )
 
-TARGET_UNET = "ltx-2-19b-dev-fp8.safetensors"
+# ⚡ UPDATED: Pointing directly to the Distilled FP8 version and keeping only the Detailer LoRA
+TARGET_UNET = "ltx-2-19b-distilled-fp8.safetensors"
 TARGET_GEMMA = "gemma-3-12b-it-FP8.safetensors"
 TARGET_CONNECTOR = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
 TARGET_VIDEO_VAE = "ltx-2-19b-dev_video_vae.safetensors"
 TARGET_AUDIO_VAE = "ltx-2-19b-dev_audio_vae.safetensors"
-
-TARGET_DISTILLED_LORA = "ltx-2-19b-distilled-lora-384.safetensors"
 TARGET_DETAILER_LORA = "ltx-2-19b-ic-lora-detailer.safetensors"
 
 # ==========================================
 # PART 2: Topological Graph Analyzer & Build-Time Appliance Baker
-# Purpose: Pre-downloads the master workflow, analyzes node pathways, and standardizes standard Normal VRAM models into the prebaked appliance.
+# Purpose: Pre-downloads the master workflow, analyzes node pathways, and standardizes models into the prebaked appliance.
 # ==========================================
 
 def bake_private_workflow_into_image():
@@ -85,9 +84,10 @@ def bake_private_workflow_into_image():
 
     raw_path = "/tmp/raw_workflow.json"
     try:
+        # ⚡ UPDATED: Fetching the newly uploaded 1-LoRA API workflow
         s3.download_file(
             "video-asset-files-storage-workflow", 
-            "Comfyui-workflows-json/ltx2-19b-new-workflow-modified(api)new.json", 
+            "Comfyui-workflows-json/ltx2-19b-new-workflow-modified1-lora(api).json", 
             raw_path
         )
 
@@ -97,48 +97,7 @@ def bake_private_workflow_into_image():
         if "workflow" in wf_data and not any("class_type" in v for v in wf_data.values() if isinstance(v, dict)):
             wf_data = wf_data["workflow"]
 
-        print("🏗️ Build Phase: Executing Topological Graph Tracing...")
-        
-        unet_nodes = []
-        lora_nodes = []
-        for node_id, node in wf_data.items():
-            if not isinstance(node, dict): continue
-            cls = node.get("class_type", "")
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
-                unet_nodes.append(node_id)
-            elif cls == "LoraLoader":
-                lora_nodes.append(node_id)
-
-        assignments = {}
-        if unet_nodes and len(lora_nodes) >= 2:
-            unet_id = unet_nodes[0]
-            first_lora, second_lora = None, None
-            for l_id in lora_nodes:
-                model_input = wf_data[l_id].get("inputs", {}).get("model")
-                if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
-                    first_lora = l_id
-                    break
-            if first_lora:
-                for l_id in lora_nodes:
-                    if l_id == first_lora: continue
-                    model_input = wf_data[l_id].get("inputs", {}).get("model")
-                    if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(first_lora):
-                        second_lora = l_id
-                        break
-                        
-            if first_lora and second_lora:
-                print(f"🎯 Traced Connection Pathway: UNET -> Node {first_lora} (Rank 384 Distill) -> Node {second_lora} (19b Detailer)")
-                assignments[first_lora] = TARGET_DISTILLED_LORA
-                assignments[second_lora] = TARGET_DETAILER_LORA
-        
-        for l_id in lora_nodes:
-            if l_id not in assignments:
-                node = wf_data[l_id]
-                lora_name = str(node.get("inputs", {}).get("lora_name", "")).lower()
-                if "detail" in lora_name or "ic-lora" in lora_name or l_id == "229":
-                    assignments[l_id] = TARGET_DETAILER_LORA
-                else:
-                    assignments[l_id] = TARGET_DISTILLED_LORA
+        print("🏗️ Build Phase: Executing Single-LoRA Topological Graph Tracing...")
 
         for node_id, node in wf_data.items():
             if not isinstance(node, dict) or "inputs" not in node:
@@ -147,7 +106,7 @@ def bake_private_workflow_into_image():
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            # Injection of Standard/Normal Pipeline Models
+            # Injection of Standard Pipeline Models directly (No execution fences needed)
             if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
                 node["class_type"] = "UNETLoader"
                 inputs["unet_name"] = TARGET_UNET
@@ -166,11 +125,13 @@ def bake_private_workflow_into_image():
                 node["class_type"] = "LTXVAudioVAELoader"
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
+            
+            # ⚡ UPDATED: Directly inject the IC Detailer into the single LoraLoader node
             elif cls == "LoraLoader":
-                resolved = assignments.get(node_id, TARGET_DISTILLED_LORA)
-                inputs["lora_name"] = resolved
+                inputs["lora_name"] = TARGET_DETAILER_LORA
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    node["widgets_values"][0] = resolved
+                    node["widgets_values"][0] = TARGET_DETAILER_LORA
+            
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = ""  
             
@@ -191,7 +152,6 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Applies necessary backwards-compatibility patches to core libraries.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -275,7 +235,6 @@ globals()["apply_rotary_emb"] = apply_rotary_emb
 """
             with open(model_path, "w") as f:
                 f.write(content + fallback_code)
-            print("✅ Successfully patched comfy/ldm/lightricks/model.py!")
 
 def patch_ltx_kornia_pad():
     import os
@@ -283,7 +242,6 @@ def patch_ltx_kornia_pad():
     if os.path.exists(pyramid_blending_path):
         with open(pyramid_blending_path, "r") as f:
             lines = f.readlines()
-        print("🔧 Patching pyramid_blending.py to resolve kornia pad Import Error...")
         new_lines = []
         in_pyramid_import = False
         patched = False
@@ -306,7 +264,6 @@ def patch_ltx_kornia_pad():
             new_lines.insert(0, "from torch.nn.functional import pad\n")
             with open(pyramid_blending_path, "w") as f:
                 f.writelines(new_lines)
-            print("✅ Successfully patched pyramid_blending.py!")
 
 def patch_flux_layers():
     import os
@@ -333,7 +290,6 @@ def patch_flux_layers():
             if "__all__" in new_content:
                 with open(layers_path, "a") as f:
                     f.write("\ntry:\n    if '__all__' in globals():\n        if 'apply_rotary_emb' not in __all__:\n            __all__.append('apply_rotary_emb')\nexcept Exception: pass\n")
-        print("✅ Patched comfy/ldm/flux/layers.py with robust apply_rotary_emb fallback!")
 
 final_image = (
     build_image.pip_install(
@@ -381,7 +337,6 @@ final_image = (
 
 # ==========================================
 # PART 4: Production Class Definition & Engine Initialization
-# Purpose: Manages the Modal lifecycle, intercepts startup flags for Normal VRAM handling.
 # ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -516,7 +471,6 @@ except Exception: pass
             if "mock_virtual_memory" not in content:
                 with open(main_path, "w") as f:
                     f.write(mock_code + "\n" + content)
-                print("✅ Successfully injected virtual RAM and raw_conds patches into ComfyUI's main.py! (Node purger fully disabled for stable execution)")
 
     @modal.enter()
     def start_comfy(self):
@@ -531,9 +485,8 @@ except Exception: pass
         exact_mapping = {
             "gemma-3-12b-it-FP8.safetensors": ["text_encoders", "text_encoder"],
             "ltx-2-19b-embeddings_connector_dev_bf16.safetensors": ["checkpoints"],
-            "ltx-2-19b-dev-fp8.safetensors": ["unet", "diffusion_models"],
+            "ltx-2-19b-distilled-fp8.safetensors": ["unet", "diffusion_models"], # ⚡ Updated to the Distilled FP8 UNet
             "ltx-2-19b-ic-lora-detailer.safetensors": ["loras"],
-            "ltx-2-19b-distilled-lora-384.safetensors": ["loras"],
             "ltx-2-19b-dev_audio_vae.safetensors": ["checkpoints"],
             "ltx-2-19b-dev_video_vae.safetensors": ["vae"]
         }
@@ -577,7 +530,7 @@ except Exception: pass
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # ⚡ NORMAL VRAM EXECUTION: Relying on native LRU swapping.
+        # ⚡ NORMAL VRAM EXECUTION
         self.process = subprocess.Popen([
             "python", "-u", "main.py", "--listen", "127.0.0.1", "--port", "8188",  
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -614,7 +567,6 @@ except Exception: pass
 
 # ==========================================
 # PART 5: Hybrid Endpoint Handler & Execution Process
-# Purpose: Handles incoming data, configures node settings, and performs post-generation VRAM cleanup.
 # ==========================================
 
     @modal.fastapi_endpoint(method="POST")
@@ -684,48 +636,6 @@ except Exception: pass
                     except Exception as e:
                         raise HTTPException(status_code=400, detail=f"Download failure for {url}: {e}")
 
-        unet_nodes = []
-        lora_nodes = []
-        for node_id, node in wf_data.items():
-            if not isinstance(node, dict): continue
-            cls = node.get("class_type", "")
-            if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader", "LowVRAMCheckpointLoader"]:
-                unet_nodes.append(node_id)
-            elif cls == "LoraLoader":
-                lora_nodes.append(node_id)
-
-        assignments = {}
-        if unet_nodes and len(lora_nodes) >= 2:
-            unet_id = unet_nodes[0]
-            first_lora, second_lora = None, None
-            
-            for l_id in lora_nodes:
-                model_input = wf_data[l_id].get("inputs", {}).get("model")
-                if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(unet_id):
-                    first_lora = l_id
-                    break
-            
-            if first_lora:
-                for l_id in lora_nodes:
-                    if l_id == first_lora: continue
-                    model_input = wf_data[l_id].get("inputs", {}).get("model")
-                    if isinstance(model_input, list) and len(model_input) > 0 and str(model_input[0]) == str(first_lora):
-                        second_lora = l_id
-                        break
-                        
-            if first_lora and second_lora:
-                assignments[first_lora] = TARGET_DISTILLED_LORA
-                assignments[second_lora] = TARGET_DETAILER_LORA
-        
-        for l_id in lora_nodes:
-            if l_id not in assignments:
-                node = wf_data[l_id]
-                lora_name = str(node.get("inputs", {}).get("lora_name", "")).lower()
-                if "detail" in lora_name or "ic-lora" in lora_name or l_id == "229":
-                    assignments[l_id] = TARGET_DETAILER_LORA
-                else:
-                    assignments[l_id] = TARGET_DISTILLED_LORA
-
         tgt_len = int(requested_length)
         if (tgt_len - 1) % 16 != 0:
             tgt_len = ((tgt_len - 1) // 16) * 16 + 1
@@ -758,11 +668,13 @@ except Exception: pass
                 node["class_type"] = "LTXVAudioVAELoader"
                 inputs["ckpt_name"] = TARGET_AUDIO_VAE
                 inputs["vae_name"] = TARGET_AUDIO_VAE
+                
+            # ⚡ UPDATED: Forces the single LoRA block to pull the IC Detailer
             elif cls == "LoraLoader":
-                resolved = assignments.get(node_id, TARGET_DISTILLED_LORA)
-                inputs["lora_name"] = resolved
+                inputs["lora_name"] = TARGET_DETAILER_LORA
                 if "widgets_values" in node and isinstance(node["widgets_values"], list) and len(node["widgets_values"]) > 0:
-                    node["widgets_values"][0] = resolved
+                    node["widgets_values"][0] = TARGET_DETAILER_LORA
+                    
             elif cls == "DenoMultiImageLoader":
                 if has_images:
                     inputs["image_paths"] = "\n".join(downloaded_paths)
@@ -772,7 +684,7 @@ except Exception: pass
                 inputs["frames_number"] = tgt_len
             
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
-                inputs["working_device"] = "auto"
+                inputs["working_device"] = "cuda" # Forced high-speed Decode
                 inputs["working_dtype"] = "float16"
                 if "tile_size" in inputs: inputs["tile_size"] = 512
                 if "overlap" in inputs: inputs["overlap"] = 64
@@ -794,7 +706,6 @@ except Exception: pass
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
             print(f"🧠 Native Memory Optimization Active: Preserving Sage Attention Patch (Node {sage_node_id}) for enhanced VRAM efficiency and speed.")
-            # Note: Explicitly NOT bypassing or deleting this node anymore. It will execute natively via the pipeline.
 
         print("⚡ Dispatching NVMe Stream-Optimized LTX-19B workflow to local endpoint...")
         comfy_url = "http://127.0.0.1:8188/prompt"
