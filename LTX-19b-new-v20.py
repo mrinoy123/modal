@@ -174,7 +174,7 @@ def bake_private_workflow_into_image():
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = "input/dynamic_guides"
             
-            # Hardware-Optimized Decoding Rules (Dynamic Device Checking)
+            # Hardware-Optimized Decoding Rules
             elif cls == "LTXVSpatioTemporalTiledVAEDecode":
                 inputs["working_device"] = "auto"
                 inputs["working_dtype"] = "float16"
@@ -192,7 +192,7 @@ def bake_private_workflow_into_image():
 
 # ==========================================
 # PART 3: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Applies necessary backwards-compatibility patches and establishes the 2GB VRAM reserve rule.
+# Purpose: Applies necessary backwards-compatibility patches and establishes the tuple-safe VRAM reserve rule.
 # ==========================================
 
 def patch_ltx_video_imports():
@@ -314,14 +314,17 @@ def patch_comfyui_model_management():
     mm_path = "/workspace/ComfyUI/comfy/model_management.py"
     if os.path.exists(mm_path):
         with open(mm_path, "a") as f:
-            f.write("\n# --- 2.0 GB VRAM Reservation Patch ---\n")
+            f.write("\n# --- 2.0 GB VRAM Reservation Patch (Tuple-Safe) ---\n")
             f.write("import sys\n")
             f.write("_orig_get_free_memory = get_free_memory\n")
             f.write("def get_free_memory(dev=None, torch_free_too=False):\n")
-            f.write("    free_mem = _orig_get_free_memory(dev, torch_free_too)\n")
+            f.write("    res = _orig_get_free_memory(dev, torch_free_too)\n")
             f.write("    reserve_bytes = 2 * 1024 * 1024 * 1024  # Force strict 2.0 GB Reserve for NVMe mapping safety\n")
-            f.write("    return max(0, free_mem - reserve_bytes)\n")
-        print("✅ Successfully injected 2.0 GB VRAM Reservation into ComfyUI allocator!")
+            f.write("    if isinstance(res, tuple):\n")
+            f.write("        free_mem, torch_free = res\n")
+            f.write("        return (max(0, free_mem - reserve_bytes), torch_free)\n")
+            f.write("    return max(0, res - reserve_bytes)\n")
+        print("✅ Successfully injected 2.0 GB Tuple-Safe VRAM Reservation into ComfyUI allocator!")
 
 final_image = (
     build_image.pip_install(
