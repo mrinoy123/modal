@@ -26,6 +26,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
+# Build image with explicit cache-locked dependencies
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -35,42 +36,50 @@ build_image = base_image.env({
     "CC": "gcc",
     "CXX": "g++"
 }).pip_install(
-    "torch==2.5.1", "torchvision", "torchaudio", 
-    index_url="https://download.pytorch.org/whl/cu124"
-).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
+).pip_install(
+    "pandas", "numexpr", "pytz", "python-dateutil", 
+    "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
+    "decord", "imageio", "scikit-image", "numba", "einops", 
+    "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
-
 
 # ==========================================
 # PART 2: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Clean compilation of required nodes without destructive core rollbacks.
+# Purpose: Clean compilation of required nodes, dependency locks, and SageAttention binaries.
 # ==========================================
 
-# SageAttention source compilation matching your working config
-compiled_image = build_image.run_commands(
-    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
-    "cd /workspace/SageAttention && pip install --no-build-isolation ."
-)
-
-final_image = compiled_image.run_commands(
+# Clone ComfyUI and install required custom nodes (VFI Purged)
+custom_nodes_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
-    "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
-    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
     "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
+    "git clone https://github.com/FizzleDorf/ComfyUI_FizzNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI_FizzNodes",
+    "git clone https://github.com/SquirrelRat/MultiString-Prompts.git /workspace/ComfyUI/custom_nodes/MultiString-Prompts",
+    "git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git /workspace/ComfyUI/custom_nodes/ComfyUI-Custom-Scripts",
+    "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
+    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
+    # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
+    "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
+    # Re-enforce kornia and numpy limits to prevent array mismatches
+    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
+)
+
+# SageAttention source compilation (Placed post-Sledgehammer to compile against the correct PyTorch binary)
+final_image = custom_nodes_image.run_commands(
+    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
+    "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
 
@@ -113,7 +122,8 @@ class LTXEngine:
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "vfi", "checkpoints", "diffusion_models", "gguf", "loras"]
+        # Removed "vfi" from the directory list
+        dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
         for d in dirs:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -124,7 +134,7 @@ class LTXEngine:
                         continue
                         
                     src_path = os.path.join(root_dir, filename)
-                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "vfi", "loras"]:
+                    for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "loras"]:
                         dest = os.path.join(base_models_dir, target_dir, filename)
                         if not os.path.exists(dest):
                             try: os.symlink(src_path, dest)
@@ -138,8 +148,7 @@ class LTXEngine:
             region_name="auto"
         )
 
-        # Lightweight attribute-only monkeypatch to prevent looping sampler raw_conds attribute crashes.
-        # This consumes 0 system memory and is completely safe from host OOM issues.
+        # Lightweight attribute patch to prevent CFGGuider raw_conds AttributeErrors during looping sampling
         init_file_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
         if os.path.exists(init_file_path):
             print("🔗 Injecting CFGGuider attribute patch into ComfyUI-LTXVideo...")
@@ -171,11 +180,12 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Started ComfyUI with the exact successful launcher command of the working script
+        # Configured with lowvram and disable-smart-memory to protect the 24 GB VRAM ceiling on L4
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"        
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
+            "--lowvram", "--disable-smart-memory"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -206,12 +216,18 @@ except Exception as e:
             raise HTTPException(status_code=403, detail="Unauthorized")
         
         body = await request.json()
-        if isinstance(body, dict) and "json" in body:
-            body = body["json"]
+        
+        if isinstance(body, dict):
+            if "json" in body:
+                body = body["json"]
+            elif "body" in body:
+                body = body["body"]
 
-        image_url = body.get("image_url")
-        workflow = body.get("workflow")
-        requested_length = body.get("length")
+        image_url = body.get("image_url") if isinstance(body, dict) else None
+        workflow = body.get("workflow") if isinstance(body, dict) else body
+        requested_length = body.get("length") if isinstance(body, dict) else None
+        prompts_override = body.get("prompts") if isinstance(body, dict) else None
+        prompt_override = body.get("prompt") if isinstance(body, dict) else None
 
         if isinstance(workflow, str):
             try: workflow = json.loads(workflow)
@@ -225,7 +241,6 @@ except Exception as e:
             if "nodes" in workflow and "last_node_id" in workflow:
                 raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
 
-        # Real model file names from weight volume
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
@@ -301,7 +316,7 @@ except Exception as e:
                     tasks.append(download_one(session, url, dest))
                 await asyncio.gather(*tasks)
 
-        # Format exact absolute paths of downloaded images to avoid "Is a directory" errors in DenoMultiImageLoader
+        # Re-resolve dynamic absolute file references to avoid custom image loader directory errors
         downloaded_paths = []
         if urls_to_download:
             for idx in range(len(urls_to_download)):
@@ -326,20 +341,34 @@ except Exception as e:
                         workflow[video_latent_node]["inputs"]["length"] = tgt_len
                     if audio_latent_node:
                         workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
+
+                    batch_prompt_nodes = [k for k, v in workflow.items() if v.get("class_type") == "BatchPromptSchedule"]
+                    for node in batch_prompt_nodes:
+                        workflow[node]["inputs"]["max_frames"] = tgt_len
                 except Exception as e:
                     print(f"⚠️ Dynamic framing error: {e}")
+
+            if prompts_override or prompt_override:
+                multi_string_node = find_node("MultiStringPrompts")
+                if multi_string_node:
+                    if prompts_override:
+                        if isinstance(prompts_override, list):
+                            for idx, p_text in enumerate(prompts_override[:5]):
+                                workflow[multi_string_node]["inputs"][f"multi_prompt_{idx+1}"] = p_text
+                        elif isinstance(prompts_override, dict):
+                            for k, p_text in prompts_override.items():
+                                if k in workflow[multi_string_node]["inputs"]:
+                                    workflow[multi_string_node]["inputs"][k] = p_text
+                    elif prompt_override and isinstance(prompt_override, str):
+                        workflow[multi_string_node]["inputs"]["multi_prompt_1"] = prompt_override
 
             sanitized_workflow = {}
             for node_id, node_data in workflow.items():
                 if isinstance(node_data, dict) and "class_type" in node_data:
-                    class_type = node_data.get("class_type")
-
-                    # Safe Purge: Skip unused text compilation nodes
-                    if class_type in ["MultiStringPrompts", "JoinStringMulti"]:
-                        continue
-
                     if "inputs" not in node_data or node_data["inputs"] is None:
                         node_data["inputs"] = {}
+
+                    class_type = node_data.get("class_type")
 
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
                         if "unet_name" in node_data["inputs"]:
@@ -366,6 +395,7 @@ except Exception as e:
                         if "vae_name" in node_data["inputs"]:
                             node_data["inputs"]["vae_name"] = target_audio_vae
 
+                    # Safe path formatting bypass for multiple image loaders
                     if class_type in ["DenoMultiImageLoader", "MultiImageLoader"]:
                         node_data["inputs"]["image_paths"] = image_paths_str
 
@@ -373,26 +403,36 @@ except Exception as e:
                         node_data["inputs"]["frame_rate"] = 12
 
                     if class_type == "LoraLoader":
-                        lora_input_name = node_data["inputs"].get("lora_name", "")
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
+                        lora_input_name = node_data["inputs"].get("lora_name") or ""
+                        if not lora_input_name and "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                             if len(node_data["widgets_values"]) > 0:
-                                lora_input_name = node_data["widgets_values"][0]
+                                lora_input_name = node_data["widgets_values"][0] or ""
                         
                         resolved_lora = None
-                        if "distilled" in str(lora_input_name).lower():
+                        if "distilled" in str(lora_input_name).lower() or not lora_input_name:
                             resolved_lora = target_distilled_lora
                         elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
                             resolved_lora = target_detailer_lora
                         
                         if resolved_lora:
-                            if "lora_name" in node_data["inputs"]:
-                                node_data["inputs"]["lora_name"] = resolved_lora
+                            node_data["inputs"]["lora_name"] = resolved_lora
                             if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                                 if len(node_data["widgets_values"]) > 0:
                                     node_data["widgets_values"][0] = resolved_lora
 
                     sanitized_workflow[str(node_id)] = node_data
             
+            sage_node_id = find_node("LTX2MemoryEfficientSageAttentionPatch")
+            if sage_node_id:
+                sage_input = sanitized_workflow[sage_node_id]["inputs"].get("model")
+                if sage_input:
+                    for node_id, node_data in sanitized_workflow.items():
+                        if isinstance(node_data, dict) and "inputs" in node_data:
+                            for k, v in node_data["inputs"].items():
+                                if isinstance(v, list) and len(v) > 0 and v[0] == sage_node_id:
+                                    node_data["inputs"][k] = sage_input
+                del sanitized_workflow[sage_node_id]
+
             workflow = sanitized_workflow
 
         out_dir = "/workspace/ComfyUI/output"
@@ -424,7 +464,7 @@ except Exception as e:
                         raise HTTPException(status_code=540, detail="Execution timeout reached.")
                     await asyncio.sleep(5)
 
-            videos = [v for v in os.listdir(out_dir) if v.endswith(".mp4")]
+            videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
             if not videos:
                 raise HTTPException(status_code=500, detail="Output generation target missing.")
                 
