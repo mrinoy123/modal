@@ -59,7 +59,7 @@ final_image = compiled_image.run_commands(
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
     "git clone https://github.com/cubiq/ComfyUI_essentials.git /workspace/ComfyUI/custom_nodes/ComfyUI_essentials",
-    "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"  # ⚡ Restored FDG Guider clone
+    "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
@@ -116,6 +116,24 @@ class LTXEngine:
                         if not os.path.exists(dest):
                             try: os.symlink(src_path, dest)
                             except FileExistsError: pass
+
+        # 🩹 Runtime Looping Sampler compatibility patch
+        # This resolves the attribute crash when CFGGuider is used in Phase 1 (separated generation)
+        try:
+            filepath = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
+            if os.path.exists(filepath):
+                print("🩹 Patching looping_sampler.py to support core CFGGuider...")
+                content = open(filepath, "r").read()
+                old_str = "positive, negative = guider.raw_conds"
+                new_str = "positive, negative = getattr(guider, 'raw_conds', (guider.conds.get('positive'), guider.conds.get('negative')) if hasattr(guider, 'conds') else (None, None))"
+                if old_str in content:
+                    content = content.replace(old_str, new_str)
+                    open(filepath, "w").write(content)
+                    print("✅ Looping Sampler patched successfully!")
+                else:
+                    print("ℹ️ Looping Sampler already patched or clean.")
+        except Exception as patch_err:
+            print(f"⚠️ Warning: CFGGuider compatibility patch failed: {patch_err}")
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -218,10 +236,14 @@ class LTXEngine:
             sanitized_workflow = {}
             for node_id, node_data in workflow.items():
                 if isinstance(node_data, dict) and "class_type" in node_data:
+                    class_type = node_data.get("class_type")
+
+                    # 🧹 Safe Purge: Skip unused text compilation nodes
+                    if class_type in ["MultiStringPrompts", "JoinStringMulti"]:
+                        continue
+
                     if "inputs" not in node_data or node_data["inputs"] is None:
                         node_data["inputs"] = {}
-
-                    class_type = node_data.get("class_type")
 
                     if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
                         if "unet_name" in node_data["inputs"]:
