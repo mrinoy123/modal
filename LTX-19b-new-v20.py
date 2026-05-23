@@ -298,12 +298,20 @@ class LTXEngine:
                                 if len(node_data["widgets_values"]) > 0:
                                     node_data["widgets_values"][0] = resolved_lora
                                     
-                    # ⚡ STG Guider Dynamic Swap Fix
+                    # ⚡ STG Guider Dynamic Swap & Validation Fix
                     if class_type == "CFGGuider":
                         print(f"🔄 Auto-Swapping CFGGuider to STGGuider for LTX Looping Sampler compatibility...")
                         node_data["class_type"] = "STGGuider"
                         if "stg" not in node_data["inputs"]:
                             node_data["inputs"]["stg"] = 1.0
+                        if "rescale" not in node_data["inputs"]:
+                            node_data["inputs"]["rescale"] = 0.75  # Set standard default scale to prevent validation errors
+
+                    elif class_type == "STGGuider":
+                        if "stg" not in node_data["inputs"]:
+                            node_data["inputs"]["stg"] = 1.0
+                        if "rescale" not in node_data["inputs"]:
+                            node_data["inputs"]["rescale"] = 0.75
 
                     sanitized_workflow[str(node_id)] = node_data
             
