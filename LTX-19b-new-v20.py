@@ -174,8 +174,11 @@ def bake_private_workflow_into_image():
             elif cls == "DenoMultiImageLoader":
                 inputs["image_paths"] = "input/dynamic_guides"
             
-            # Hardware-Optimized GPU Decoding Locks
-            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode", "LTXVVAEDecode"]:
+            # Hardware-Optimized Decoding Rules (Dynamic Device Checking)
+            elif cls == "LTXVSpatioTemporalTiledVAEDecode":
+                inputs["working_device"] = "auto"
+                inputs["working_dtype"] = "float16"
+            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
                 inputs["working_device"] = "cuda"
                 inputs["working_dtype"] = "float16"
 
@@ -691,7 +694,6 @@ except Exception as e:
             cls = node.get("class_type", "")
             inputs = node["inputs"]
             
-            # Injection of models and paths (Kept fully native to resolve UNETLoader issues)
             if cls in ["UNETLoader", "UnetLoaderGGUFAdvanced", "CheckpointLoaderSimple", "LowVRAMUNETLoader"]:
                 node["class_type"] = "UNETLoader"
                 inputs["unet_name"] = TARGET_UNET
@@ -722,8 +724,23 @@ except Exception as e:
             elif "LTXVEmptyLatentAudio" in cls:
                 inputs["frames_number"] = tgt_len
             
-            # Hardware Decoding GPU Locks
-            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVSpatioTemporalTiledVAEDecode", "LTXVVAEDecode"]:
+            # ⚡ Fixed Hardware Decoding Rules to prevent working_device validator crashes
+            elif cls == "LTXVSpatioTemporalTiledVAEDecode":
+                inputs["working_device"] = "auto"
+                inputs["working_dtype"] = "float16"
+                if "tile_size" in inputs:
+                    inputs["tile_size"] = 512
+                if "overlap" in inputs:
+                    inputs["overlap"] = 64
+                if "temporal_tile_length" in inputs:
+                    inputs["temporal_tile_length"] = 8
+                if "temporal_overlap" in inputs:
+                    inputs["temporal_overlap"] = 4
+                if "spatial_tiles" in inputs:
+                    inputs["spatial_tiles"] = 8
+                if "spatial_overlap" in inputs:
+                    inputs["spatial_overlap"] = 4
+            elif cls in ["VAEDecodeTiled", "VAEDecode", "LTXVVAEDecode"]:
                 inputs["working_device"] = "cuda"
                 inputs["working_dtype"] = "float16"
                 if "tile_size" in inputs:
@@ -739,7 +756,6 @@ except Exception as e:
                 if "spatial_overlap" in inputs:
                     inputs["spatial_overlap"] = 4
 
-        # Sage attention bypass bypass logic
         sage_node_id = next((k for k, v in wf_data.items() if isinstance(v, dict) and v.get("class_type") == "LTX2MemoryEfficientSageAttentionPatch"), None)
         if sage_node_id:
             sage_input = wf_data[sage_node_id]["inputs"].get("model")
