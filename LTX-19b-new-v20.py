@@ -45,53 +45,8 @@ build_image = base_image.env({
 
 # ==========================================
 # PART 2: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Compiles high-performance kernels, handles Git rollbacks to stable pre-March states, downgrades Kornia, and synchronously injects critical code modifications safely.
+# Purpose: Clean compilation of required nodes without destructive core rollbacks.
 # ==========================================
-
-def apply_synchronous_core_patches():
-    import os
-    import re
-
-    print("🔧 Commencing Synchronous Core Patching for pre-March ComfyUI compatibility...")
-
-    # 1. Patch LTXVideo's looping_sampler to gracefully handle missing raw_conds
-    sampler_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/looping_sampler.py"
-    if os.path.exists(sampler_path):
-        with open(sampler_path, "r") as f:
-            content = f.read()
-        
-        # Fallback cleanly extracts positive/negative from the old 'conds' dictionary if raw_conds is missing
-        fallback_code = "positive, negative = getattr(guider, 'raw_conds', (getattr(guider, 'conds', {}).get('positive', []), getattr(guider, 'conds', {}).get('negative', [])))"
-        
-        # Replace the breaking line
-        new_content = content.replace("positive, negative = guider.raw_conds", fallback_code)
-        
-        if new_content != content:
-            with open(sampler_path, "w") as f:
-                f.write(new_content)
-            print("✅ Synchronous Patch: Applied robust raw_conds fallback to looping_sampler.py")
-
-    # 2. Patch ComfyUI Core (samplers.py / guiders.py) to save raw_conds natively
-    comfy_dir = "/workspace/ComfyUI/comfy"
-    if os.path.exists(comfy_dir):
-        for root, _, files in os.walk(comfy_dir):
-            for file in files:
-                if file.endswith(".py"):
-                    filepath = os.path.join(root, file)
-                    with open(filepath, "r") as f:
-                        original_content = f.read()
-                    
-                    # Regex to find: def set_conds(self, positive, negative): and hard-inject self.raw_conds
-                    patched_content = re.sub(
-                        r'(def set_conds\s*\(\s*self\s*,\s*positive\s*,\s*negative\s*\)\s*:)',
-                        r'\1\n        self.raw_conds = (positive, negative)',
-                        original_content
-                    )
-                    
-                    if patched_content != original_content:
-                        with open(filepath, "w") as f:
-                            f.write(patched_content)
-                        print(f"✅ Synchronous Patch: Hard-injected raw_conds definition into {file}")
 
 # ⚡ SageAttention source compilation matching your working config
 compiled_image = build_image.run_commands(
@@ -101,16 +56,12 @@ compiled_image = build_image.run_commands(
 
 final_image = compiled_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-    # ⚡ ROLLBACK 1: Revert ComfyUI Core to pre-March 2026 to restore old cond formatting
-    "cd /workspace/ComfyUI && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation",
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/requirements-no-cupy.txt",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
-    # ⚡ ROLLBACK 2: Revert LTXVideo to match the pre-March ComfyUI API
-    "cd /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo && git checkout $(git rev-list -n 1 --before=\"2026-03-01\" HEAD)",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
     "git clone https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
@@ -122,14 +73,8 @@ final_image = compiled_image.run_commands(
     "pip uninstall -y torch torchvision torchaudio numpy",
     "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     "pip install --no-cache-dir numpy==1.26.4 kornia==0.6.12",
-    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\"",
-    # ⚡ THE DEFINITIVE PATCH: Bulletproofing ComfyUI's core tensor conversion
-    "python3 -c \"filepath = '/workspace/ComfyUI/comfy/sampler_helpers.py'; code = open(filepath).read(); code = code.replace('def convert_cond(cond):', 'def convert_cond(cond):\\n    import torch\\n    if isinstance(cond, torch.Tensor): return [[cond, {}]]'); code = code.replace('for x in cond:', 'for x in cond:\\n        if isinstance(x, torch.Tensor):\\n            c.append([x, {}])\\n            continue'); code = code.replace('t = x[1].copy()', 't = x[1].copy() if len(x) > 1 and isinstance(x[1], dict) else {}'); code = code.replace('p = x[0]', 'p = x[0] if isinstance(x, (list, tuple)) else x'); open(filepath, 'w').write(code)\""
-).run_function(apply_synchronous_core_patches) # ⚡ EXECUTING THE DETERMINISTIC HARD-DISK PATCH
-
-
-
-
+    "python -c \"import re; file='/workspace/ComfyUI/custom_nodes/ComfyUI-Frame-Interpolation/vfi_models/rife/__init__.py'; data=open(file).read(); data=re.sub(r'torch\\.cat\\(output_frames, dim=0\\)', 'torch.cat([f.to(output_frames[0].device) for f in output_frames], dim=0).cpu()', data); open(file, 'w').write(data)\""
+)
 
 
 # ==========================================
@@ -352,6 +297,13 @@ class LTXEngine:
                             if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
                                 if len(node_data["widgets_values"]) > 0:
                                     node_data["widgets_values"][0] = resolved_lora
+                                    
+                    # ⚡ STG Guider Dynamic Swap Fix
+                    if class_type == "CFGGuider":
+                        print(f"🔄 Auto-Swapping CFGGuider to STGGuider for LTX Looping Sampler compatibility...")
+                        node_data["class_type"] = "STGGuider"
+                        if "stg" not in node_data["inputs"]:
+                            node_data["inputs"]["stg"] = 1.0
 
                     sanitized_workflow[str(node_id)] = node_data
             
