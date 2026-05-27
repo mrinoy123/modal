@@ -1,3 +1,7 @@
+# ==============================================================================
+# IMPORTS & ENVIRONMENT SETUP
+# Purpose: Load all necessary asynchronous and system execution modules.
+# ==============================================================================
 import modal
 import subprocess
 import time
@@ -12,7 +16,11 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# Switched from ubuntu24.04 to the official ubuntu22.04 CUDA tag
+# ==============================================================================
+# CONTAINER IMAGE BUILDER
+# Purpose: Construct the Linux environment, install CUDA compilers, and fetch 
+# all required Python dependencies for PyTorch and ComfyUI.
+# ==============================================================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
     add_python="3.12"
@@ -39,6 +47,11 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
+# ==============================================================================
+# COMFYUI REPOSITORY & CUSTOM NODE INGESTION
+# Purpose: Clone the core ComfyUI engine and all community/custom extensions
+# required for the LTX video generation graphs.
+# ==============================================================================
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -58,14 +71,16 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # 1. Install SageAttention and generic requirements first
     "pip install sageattention",
-    # 2. Re-enforce stable numpy and kornia packages
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    # 3. THE SLEDGEHAMMER (MUST BE LAST): Overwrite any rogue PyTorch/Torchvision installations with clean CUDA 12.4 packages
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124"
 )
 
+# ==============================================================================
+# MODAL APP CONFIGURATION
+# Purpose: Define hardware requirements, attach model weights via Modal volumes,
+# and define the fast L4 container footprint.
+# ==============================================================================
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -74,11 +89,17 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,
+    memory=8192, 
     scaledown_window=30,
     timeout=3600 
 )
 class LTXEngine:
+    
+    # ==========================================================================
+    # BACKGROUND PROCESS MANAGERS
+    # Purpose: Capture stdout logs for the Modal dashboard and aggressively
+    # free host memory to prevent kernel panics.
+    # ==========================================================================
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
@@ -93,6 +114,11 @@ class LTXEngine:
                 except Exception: pass
             await asyncio.sleep(2)
 
+    # ==========================================================================
+    # CONTAINER INITIALIZATION (ENTER)
+    # Purpose: Map the model weights from the Modal volume to ComfyUI, configure 
+    # Cloudflare S3, and boot the local ComfyUI fast-API server.
+    # ==========================================================================
     @modal.enter()
     def start_comfy(self):
         import boto3
@@ -126,35 +152,6 @@ class LTXEngine:
             patch_code = """\ntry:\n    import comfy.samplers\n    _orig_set_conds = comfy.samplers.CFGGuider.set_conds\n    def _patched_set_conds(self, positive, negative):\n        self.raw_conds = (positive, negative)\n        return _orig_set_conds(self, positive, negative)\n    comfy.samplers.CFGGuider.set_conds = _patched_set_conds\nexcept Exception: pass\n"""
             with open(init_file_path, "a") as f: f.write(patch_code)
 
-        # HOT-PATCH: Make conditioning_saver.py compatible with multi-prompt conditioning providers
-        saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
-        if os.path.exists(saver_path):
-            try:
-                with open(saver_path, "r") as f:
-                    code = f.read()
-                
-                old_loop = 'for idx, (cond_tensor, cond_options) in enumerate(conditioning):'
-                new_loop = """for idx, item in enumerate(conditioning):
-            if isinstance(item, (list, tuple)) and len(item) >= 2:
-                cond_tensor, cond_options = item[0], item[1]
-            elif isinstance(item, (list, tuple)) and len(item) == 1:
-                cond_tensor, cond_options = item[0], {}
-            else:
-                cond_tensor, cond_options = item, {}"""
-                
-                if old_loop in code:
-                    code = code.replace(old_loop, new_loop)
-                    # Replace reference to mask properties to ensure dict checks
-                    old_mask = 'if "attention_mask" in cond_options:'
-                    new_mask = 'if isinstance(cond_options, dict) and "attention_mask" in cond_options:'
-                    code = code.replace(old_mask, new_mask)
-                    
-                    with open(saver_path, "w") as f:
-                        f.write(code)
-                    print("⚡ Successfully patched conditioning_saver.py for LTXVMultiPromptProvider compatibility!")
-            except Exception as e:
-                print(f"[Warning] Failed to apply conditioning_saver hot-patch: {e}")
-
         print("🚀 Launching High-Speed Unthrottled LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
@@ -167,7 +164,6 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Aggressive '--gpu-only' flag ensures all active inference is executed strictly on L4 GPU VRAM
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -187,6 +183,11 @@ class LTXEngine:
             except Exception: time.sleep(2)
         os._exit(1)
 
+    # ==========================================================================
+    # MAIN API GENERATION ENDPOINT
+    # Purpose: Receive the n8n payload, download any necessary guidance images,
+    # and execute the 3-phase ComfyUI subgraphs sequentially.
+    # ==========================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
@@ -202,10 +203,8 @@ class LTXEngine:
         prompts_dict = body.get("prompts", {})
         negative_prompt = body.get("negative", "worst quality, blurry, distorted")
 
-        # Format prompt payload map into a clean pipe-separated string timeline for LTXVMultiPromptProvider
         if isinstance(prompts_dict, dict):
             try:
-                # Sort numerically by frame index to keep correct temporal progression
                 sorted_keys = sorted(prompts_dict.keys(), key=lambda x: int(x) if str(x).isdigit() else 0)
                 prompts_list = [str(prompts_dict[k]).strip() for k in sorted_keys if str(prompts_dict[k]).strip()]
                 prompts_timeline_str = "|".join(prompts_list)
@@ -215,7 +214,6 @@ class LTXEngine:
         else:
             prompts_timeline_str = str(prompts_dict)
 
-        # Baseline Target Weights
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
@@ -269,7 +267,6 @@ class LTXEngine:
                 except Exception as e:
                     print(f"[Warning] Unexpected error downloading {url_str}: {e}")
                 
-                # Resiliency fallback: Always write placeholder image if download failed
                 if not os.path.exists(target_dest):
                     from PIL import Image
                     img = Image.new('RGB', (384, 480), color='black')
@@ -288,9 +285,11 @@ class LTXEngine:
 
         try:
             async with aiohttp.ClientSession() as session:
-                # ====================================================
-                # PHASE 1: SUBGRAPH 1 - Language Execution Pass
-                # ====================================================
+                # ==============================================================
+                # PHASE 1 EXECUTION
+                # Purpose: Process text conditioning through Gemma-3, save the 
+                # latent conditions to disk, and purge VRAM completely.
+                # ==============================================================
                 print("🧠 Phase 1 Active: Initializing Subgraph 1...")
                 sg1_raw = body.get("subgraph_1")
                 if sg1_raw:
@@ -299,12 +298,11 @@ class LTXEngine:
                     with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
                         sg1 = json.load(f)
 
-                # Overwrite internal node parameter targets dynamically matching API files
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
                     sg1["243"]["inputs"]["device"] = "default"  
-                if "246" in sg1:  # Overwrite dynamic inputs of LTXVMultiPromptProvider
+                if "246" in sg1:
                     if prompts_timeline_str:
                         sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
                 if "112" in sg1:
@@ -322,7 +320,6 @@ class LTXEngine:
                         if prompt_id1 in history: break
                     await asyncio.sleep(1)
 
-                # WIPE GEMMA FROM VRAM: Clear space for unthrottled UNET sampling loops
                 print("🔀 Phase 1 Complete. Evicting Gemma completely from GPU memory blocks...")
                 async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as free_resp:
                     await free_resp.read()
@@ -331,9 +328,11 @@ class LTXEngine:
                 torch.cuda.empty_cache()
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
 
-                # ====================================================
-                # PHASE 2: SUBGRAPH 2 - Pure Video Sampling Pass
-                # ====================================================
+                # ==============================================================
+                # PHASE 2 EXECUTION
+                # Purpose: Read text conditionings, run UNET sampling loops for 
+                # the raw video format, and drop latents to disk.
+                # ==============================================================
                 print("🎬 Phase 2 Active: Initializing Subgraph 2...")
                 sg2_raw = body.get("subgraph_2")
                 if sg2_raw:
@@ -380,9 +379,11 @@ class LTXEngine:
                         shutil.copy(src_latent, dest_latent)
                         print(f"Copied latent from {src_latent} to {dest_latent} for Subgraph 3 compatibility.")
 
-                # ====================================================
-                # PHASE 3: SUBGRAPH 3 - Audio Synthesis & Final Pack
-                # ====================================================
+                # ==============================================================
+                # PHASE 3 EXECUTION
+                # Purpose: Combine saved text conditionings and video latents to 
+                # run audio synthesis, then package into final MP4 stream.
+                # ==============================================================
                 print("🎵 Phase 3 Active: Initializing Subgraph 3...")
                 sg3_raw = body.get("subgraph_3")
                 if sg3_raw:
@@ -418,7 +419,11 @@ class LTXEngine:
                         if prompt_id3 in history: break
                     await asyncio.sleep(4)
 
-            # Look for video output and respond with binary content streams
+            # ==============================================================
+            # RESPONSE RETURN
+            # Purpose: Buffer the generated MP4 file from disk and return 
+            # it back over the API route as raw binary video.
+            # ==============================================================
             videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
             if not videos: raise HTTPException(status_code=500, detail="Output tracking buffers are empty.")
                 
