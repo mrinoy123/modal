@@ -44,6 +44,35 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
+# ==============================================================================
+# CONTAINER IMAGE BUILDER
+# ==============================================================================
+base_image = modal.Image.from_registry(
+    "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
+    add_python="3.12"
+).apt_install(
+    "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
+    "build-essential", "ninja-build", "cmake", "clang", "llvm"
+)
+
+build_image = base_image.env({
+    "CUDA_HOME": "/usr/local/cuda",
+    "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
+    "FORCE_CUDA": "1",
+    "TORCH_CUDA_ARCH_LIST": "8.9", 
+    "MAX_JOBS": "1",
+    "CC": "gcc",
+    "CXX": "g++"
+}).pip_install(
+    "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
+    "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
+).pip_install(
+    "pandas", "numexpr", "pytz", "python-dateutil", 
+    "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
+    "decord", "imageio", "scikit-image", "numba", "einops", 
+    "transformers", "diffusers", "accelerate", "bitsandbytes"
+)
+
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -63,12 +92,12 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # FIX: Install sageattention first, so any dependencies it pulls in can be overwritten safely.
-    "pip install sageattention",
+    # FIX: Modal Cache Bust - Modified strings to force rebuilding this layer
+    "pip install --no-cache-dir sageattention",
     "pip uninstall -y torch torchvision torchaudio",
-    # FIX: Force install the strict matching ABI versions as the absolute last step.
-    "pip install --no-cache-dir --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
+    # FIX: Explicitly specify +cu124 so pip cannot fetch the wrong binary wheels
+    "pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
+    "pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
