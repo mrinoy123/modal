@@ -74,8 +74,8 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,
-    scaledown_window=60,
+    memory=16384,
+    scaledown_window=30,
     timeout=3600 
 )
 class LTXEngine:
