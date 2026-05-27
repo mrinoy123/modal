@@ -205,15 +205,42 @@ class LTXEngine:
         else:
             async def download_one(session, url_str, target_dest):
                 from urllib.parse import urlparse
-                parsed = urlparse(url_str)
-                if "r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme:
-                    file_key = parsed.path.lstrip('/')
-                    while "//" in file_key: file_key = file_key.replace("//", "/")
-                    await asyncio.get_event_loop().run_in_executor(None, self.s3.download_file, "video-asset-files-storage-workflow", file_key, target_dest)
-                else:
-                    async with session.get(url_str, timeout=120) as r:
-                        if r.status == 200:
-                            with open(target_dest, "wb") as f: f.write(await r.read())
+                import botocore.exceptions
+                try:
+                    parsed = urlparse(url_str)
+                    # Dynamically handles both custom Cloudflare R2 paths and direct URLs
+                    if "r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme:
+                        file_key = parsed.path.lstrip('/')
+                        while "//" in file_key: file_key = file_key.replace("//", "/")
+                        print(f"📥 Downloading dynamic key from R2: {file_key}")
+                        await asyncio.get_event_loop().run_in_executor(
+                            None, 
+                            self.s3.download_file, 
+                            "video-asset-files-storage-workflow", 
+                            file_key, 
+                            target_dest
+                        )
+                    else:
+                        print(f"📥 Downloading dynamic public URL: {url_str}")
+                        async with session.get(url_str, timeout=120) as r:
+                            if r.status == 200:
+                                with open(target_dest, "wb") as f: f.write(await r.read())
+                            else:
+                                print(f"[Warning] HTTP status {r.status} for URL: {url_str}")
+                except botocore.exceptions.ClientError as e:
+                    if e.response['Error']['Code'] == "404":
+                        print(f"[Warning] Key not found in R2: {url_str}")
+                    else:
+                        print(f"[Warning] R2 ClientError downloading {url_str}: {e}")
+                except Exception as e:
+                    print(f"[Warning] Unexpected error downloading {url_str}: {e}")
+                
+                # Resiliency fallback: Always write placeholder image if download failed
+                if not os.path.exists(target_dest):
+                    from PIL import Image
+                    img = Image.new('RGB', (384, 480), color='black')
+                    img.save(target_dest)
+                    print(f"[Fallback] Generated blank placeholder guide image at: {target_dest}")
 
             async with aiohttp.ClientSession() as download_session:
                 tasks = [download_one(download_session, url, os.path.join(dynamic_guides_dir, f"guide_{i}.png")) for i, url in enumerate(urls_to_download)]
