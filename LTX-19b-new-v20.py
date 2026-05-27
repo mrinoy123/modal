@@ -72,11 +72,11 @@ app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
 @app.cls(
-    gpu="L4", # Uses the cost-efficient standard L4 GPU (24GB VRAM)
+    gpu="L4", 
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192, # Reduced CPU system memory allocation to 8GB (8192 MB)
+    memory=24576, 
     scaledown_window=30,
     timeout=3600 
 )
@@ -201,12 +201,10 @@ class LTXVLoadConditioning:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Removed '--normalvram' and replaced legacy '--mmap' with '--mmap-torch-files'
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--use-sage-attention", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc",
-            "--reserve-vram", "2.0"
+            "--bf16-vae", "--use-sage-attention", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -222,7 +220,6 @@ class LTXVLoadConditioning:
         os._exit(1)
 
     async def clear_comfy_memory(self, session):
-        """Actively instructs ComfyUI to release loaded models and triggers PyTorch cache clearing."""
         try:
             async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as r:
                 await r.read()
@@ -239,7 +236,6 @@ class LTXVLoadConditioning:
             pass
 
     async def execute_comfy_workflow(self, session, workflow_json):
-        """Sends a sub-graph payload to the ComfyUI API and blocks until completion."""
         async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow_json}) as r:
             if r.status != 200:
                 err_text = await r.text()
@@ -266,7 +262,6 @@ class LTXVLoadConditioning:
             await asyncio.sleep(1)
 
     def merge_overrides(self, base_graph, override_graph):
-        """Recursively merges dictionary values to safely support incoming n8n dynamic overrides."""
         if not override_graph:
             return base_graph
         if isinstance(override_graph, str):
@@ -311,8 +306,10 @@ class LTXVLoadConditioning:
 
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
+        target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
+        target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
 
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
         if os.path.exists(dynamic_guides_dir): shutil.rmtree(dynamic_guides_dir)
@@ -395,11 +392,22 @@ class LTXVLoadConditioning:
                 
                 sg1 = self.merge_overrides(sg1, body.get("subgraph_1_override"))
 
-                sg1["243"]["inputs"]["ckpt_name"] = target_gemma
-                sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
-                sg1["112"]["inputs"]["text"] = negative_prompt
-                sg1["242"]["inputs"]["filename"] = "(NEGATIVE)conditioning"
-                sg1["244"]["inputs"]["filename"] = "(POSITIVE)conditioning"
+                if "243" in sg1:
+                    sg1["243"]["inputs"]["text_encoder"] = target_gemma
+                    sg1["243"]["inputs"]["ckpt_name"] = target_connector
+                    sg1["243"]["inputs"]["device"] = "default" 
+                    
+                if "246" in sg1:
+                    sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
+                    
+                if "112" in sg1:
+                    sg1["112"]["inputs"]["text"] = negative_prompt
+                    
+                if "242" in sg1:
+                    sg1["242"]["inputs"]["filename"] = "(NEGATIVE)conditioning"
+                    
+                if "244" in sg1:
+                    sg1["244"]["inputs"]["filename"] = "(POSITIVE)conditioning"
 
                 print("🚀 Executing Sub-Graph 1 (Text Conditioning)...")
                 await self.execute_comfy_workflow(session, sg1)
@@ -419,19 +427,23 @@ class LTXVLoadConditioning:
 
                 sg2 = self.merge_overrides(sg2, body.get("subgraph_2_override"))
 
-                # Inject dynamic configurations to match the new sub-graph format
-                sg2["194"]["inputs"]["length"] = requested_length
-                sg2["238"]["inputs"]["unet_name"] = target_unet
-                sg2["238"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
-                sg2["241"]["inputs"]["vae_name"] = target_video_vae
-                sg2["245"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
-                sg2["246"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
-                sg2["237"]["inputs"]["image_paths"] = "\n".join(image_filenames) 
-                sg2["235"]["inputs"]["num_images"] = len(image_filenames)
-
-                # Safety guard for the newly configured LoraLoaderModelOnly node in Sub-Graph 2
-                if "248" in sg2 and "inputs" in sg2["248"] and "lora_name" not in sg2["248"]["inputs"]:
-                    sg2["248"]["inputs"]["lora_name"] = None
+                if "194" in sg2:
+                    sg2["194"]["inputs"]["length"] = requested_length
+                if "238" in sg2:
+                    sg2["238"]["inputs"]["unet_name"] = target_unet
+                    sg2["238"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
+                if "241" in sg2:
+                    sg2["241"]["inputs"]["vae_name"] = target_video_vae
+                if "245" in sg2:
+                    sg2["245"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                if "246" in sg2:
+                    sg2["246"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                if "237" in sg2:
+                    sg2["237"]["inputs"]["image_paths"] = "\n".join(image_filenames) 
+                if "235" in sg2:
+                    sg2["235"]["inputs"]["num_images"] = len(image_filenames)
+                if "248" in sg2:
+                    sg2["248"]["inputs"]["lora_name"] = target_detailer_lora
 
                 print("🚀 Executing Sub-Graph 2 (Main Video Generation)...")
                 await self.execute_comfy_workflow(session, sg2)
@@ -451,29 +463,32 @@ class LTXVLoadConditioning:
 
                 sg3 = self.merge_overrides(sg3, body.get("subgraph_3_override"))
 
-                # Inject dynamic configurations to match the new sub-graph format
-                sg3["232"]["inputs"]["latent"] = "video_latent_output.latent"
-                sg3["278"]["inputs"]["unet_name"] = target_unet
-                sg3["278"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
-                sg3["282"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
-                sg3["283"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
-                sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
-                sg3["296"]["inputs"]["vae_name"] = target_video_vae
-                sg3["290"]["inputs"]["frames_number"] = int(requested_length * 2.02) 
-
-                # Safety guard for the newly configured LoraLoaderModelOnly node in Sub-Graph 3
-                if "302" in sg3 and "inputs" in sg3["302"] and "lora_name" not in sg3["302"]["inputs"]:
-                    sg3["302"]["inputs"]["lora_name"] = None
-
-                sg3["298"]["inputs"]["format"] = "video/h264-mp4"
-                sg3["298"]["inputs"]["frame_rate"] = 24
+                if "232" in sg3:
+                    sg3["232"]["inputs"]["latent"] = "video_latent_output.latent"
+                if "278" in sg3:
+                    sg3["278"]["inputs"]["unet_name"] = target_unet
+                    sg3["278"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
+                if "282" in sg3:
+                    sg3["282"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                if "283" in sg3:
+                    sg3["283"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                if "295" in sg3:
+                    sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
+                if "296" in sg3:
+                    sg3["296"]["inputs"]["vae_name"] = target_video_vae
+                if "290" in sg3:
+                    sg3["290"]["inputs"]["frames_number"] = int(requested_length * 2.02) 
+                if "298" in sg3:
+                    sg3["298"]["inputs"]["format"] = "video/h264-mp4"
+                    sg3["298"]["inputs"]["frame_rate"] = 24
+                if "302" in sg3:
+                    sg3["302"]["inputs"]["lora_name"] = target_detailer_lora
 
                 print("🚀 Executing Sub-Graph 3 (Audio Generation & Combine Decoders)...")
                 await self.execute_comfy_workflow(session, sg3)
                 print("💾 Phase 3 Complete. Unloading VRAM...")
                 await self.clear_comfy_memory(session)
 
-                # Scan output folder
                 output_files = []
                 for root_p, _, filenames in os.walk(out_dir):
                     for name in filenames:
@@ -487,7 +502,6 @@ class LTXVLoadConditioning:
                 target_video_file = output_files[-1]
                 saved_filename = os.path.basename(target_video_file)
 
-                # Upload compiled output video to R2 storage
                 target_key = f"outputs/{int(time.time())}_{saved_filename}"
                 print(f"📤 Uploading compiled video containing audio track to R2: {target_key}")
                 await asyncio.get_event_loop().run_in_executor(
@@ -498,7 +512,6 @@ class LTXVLoadConditioning:
                     target_key
                 )
 
-                # Construct dynamic public asset response
                 public_path_url = f"https://pub-yourdomain.r2.dev/{target_key}" 
                 return {
                     "status": "success",
