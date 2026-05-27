@@ -123,14 +123,15 @@ class LTXEngine:
             region_name="auto"
         )
 
-        helper_node_dir = "/workspace/ComfyUI/custom_nodes/comfyui-conditioning-helper"
-        os.makedirs(helper_node_dir, exist_ok=True)
-        
-        with open(os.path.join(helper_node_dir, "__init__.py"), "w") as f:
-            f.write('from .conditioning_nodes import LTXVSaveConditioning, LTXVLoadConditioning\n\nNODE_CLASS_MAPPINGS = {\n    "LTXVSaveConditioning": LTXVSaveConditioning,\n    "LTXVLoadConditioning": LTXVLoadConditioning\n}\n')
-            
-        with open(os.path.join(helper_node_dir, "conditioning_nodes.py"), "w") as f:
-            f.write('''import torch
+        # =====================================================================
+        # 🔥 THE ULTIMATE HOT-PATCH: NATIVE TORCH SAVING
+        # Overwrites the original LTXVideo custom nodes to prevent conflicts
+        # and unpack errors when saving raw conditioning.
+        # =====================================================================
+        saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
+        if os.path.exists(saver_path):
+            with open(saver_path, "w") as f:
+                f.write('''import torch
 import os
 import folder_paths
 
@@ -154,12 +155,20 @@ class LTXVSaveConditioning:
 
     def execute(self, conditioning, file_name="conditioning.pt", filename="conditioning.pt", dtype="float16"):
         output_dir = folder_paths.get_output_directory()
-        fname = filename if filename else file_name
+        fname = filename if filename != "conditioning.pt" else file_name
         if not fname.endswith(".pt"):
             fname += ".pt"
         file_path = os.path.join(output_dir, fname)
         torch.save(conditioning, file_path)
         return ()
+''')
+                
+        loader_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_loader.py"
+        if os.path.exists(loader_path):
+            with open(loader_path, "w") as f:
+                f.write('''import torch
+import os
+import folder_paths
 
 class LTXVLoadConditioning:
     @classmethod
@@ -188,6 +197,7 @@ class LTXVLoadConditioning:
         conditioning = torch.load(file_path, weights_only=False)
         return (conditioning,)
 ''')
+        # =====================================================================
 
         print("🚀 Launching Hybrid-Memory LTX Server Engine with FP8 and SageAttention configurations...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
