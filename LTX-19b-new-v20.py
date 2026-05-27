@@ -208,7 +208,6 @@ class LTXEngine:
                 import botocore.exceptions
                 try:
                     parsed = urlparse(url_str)
-                    # Dynamically handles both custom Cloudflare R2 paths and direct URLs
                     if "r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme:
                         file_key = parsed.path.lstrip('/')
                         while "//" in file_key: file_key = file_key.replace("//", "/")
@@ -269,6 +268,7 @@ class LTXEngine:
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
+                    sg1["243"]["inputs"]["device"] = "cuda"  # FORCE CUDA FOR SUPER-FAST INFERENCE
                 if "239" in sg1:
                     if prompts_timeline_str:
                         sg1["239"]["inputs"]["text"] = prompts_timeline_str
