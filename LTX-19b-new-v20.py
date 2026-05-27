@@ -72,11 +72,11 @@ app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-2-19b-weights")
 
 @app.cls(
-    gpu="L4", 
+    gpu="L40S", # Upgraded GPU to 48GB VRAM to accommodate 19B model parameters
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=24576,  
+    memory=8192, # Reduced CPU system memory allocation to 8GB (8192 MB)
     scaledown_window=30,
     timeout=3600 
 )
@@ -93,7 +93,7 @@ class LTXEngine:
             except Exception:
                 try: ctypes.CDLL("libc.so.6").malloc_trim(0)
                 except Exception: pass
-            await asyncio.sleep(10) # Reduced execution frequency to avoid CPU jitter
+            await asyncio.sleep(10)
 
     @modal.enter()
     def start_comfy(self):
@@ -123,7 +123,6 @@ class LTXEngine:
             region_name="auto"
         )
 
-        # Create self-contained, robust custom node helpers to manage save/load conditioning states 
         helper_node_dir = "/workspace/ComfyUI/custom_nodes/comfyui-conditioning-helper"
         os.makedirs(helper_node_dir, exist_ok=True)
         
@@ -202,7 +201,6 @@ class LTXVLoadConditioning:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Enforced FP8 loading for the UNet model weight blocks & activated SageAttention to decrease base footprint on L4
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -394,10 +392,8 @@ class LTXVLoadConditioning:
                     with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
                         sg1 = json.load(f)
                 
-                # Apply dynamic structural overrides if received via the n8n request payload
                 sg1 = self.merge_overrides(sg1, body.get("subgraph_1_override"))
 
-                # Inject configurations
                 sg1["243"]["inputs"]["ckpt_name"] = target_gemma
                 sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
                 sg1["112"]["inputs"]["text"] = negative_prompt
@@ -407,7 +403,7 @@ class LTXVLoadConditioning:
                 print("🚀 Executing Sub-Graph 1 (Text Conditioning)...")
                 await self.execute_comfy_workflow(session, sg1)
                 
-                print("💾 Phase 1 Complete. Purging VRAM & System memory allocations...")
+                print("💾 Phase 1 Complete. Purging VRAM...")
                 await self.clear_comfy_memory(session)
 
                 # ==============================================================================
@@ -422,20 +418,19 @@ class LTXVLoadConditioning:
 
                 sg2 = self.merge_overrides(sg2, body.get("subgraph_2_override"))
 
-                # Inject weights and exact comma/newline file list sequences into the loaders
                 sg2["194"]["inputs"]["length"] = requested_length
                 sg2["238"]["inputs"]["unet_name"] = target_unet
-                sg2["238"]["inputs"]["weight_dtype"] = "fp8_e4m3fn"  # Enforces FP8 loader format inside the runtime
+                sg2["238"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
                 sg2["241"]["inputs"]["vae_name"] = target_video_vae
                 sg2["245"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
                 sg2["246"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
-                sg2["237"]["inputs"]["image_paths"] = "\n".join(image_filenames) # Specific files, avoids directory error
+                sg2["237"]["inputs"]["image_paths"] = "\n".join(image_filenames) 
                 sg2["235"]["inputs"]["num_images"] = len(image_filenames)
 
                 print("🚀 Executing Sub-Graph 2 (Main Video Generation)...")
                 await self.execute_comfy_workflow(session, sg2)
 
-                print("💾 Phase 2 Complete. Purging UNET & sampler cache allocations...")
+                print("💾 Phase 2 Complete. Purging VRAM...")
                 await self.clear_comfy_memory(session)
 
                 # ==============================================================================
@@ -450,7 +445,6 @@ class LTXVLoadConditioning:
 
                 sg3 = self.merge_overrides(sg3, body.get("subgraph_3_override"))
 
-                # Populate missing/null loader configurations to resolve Node 298 validation failure
                 sg3["232"]["inputs"]["latent"] = "video_latent_output.latent"
                 sg3["278"]["inputs"]["unet_name"] = target_unet
                 sg3["278"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
@@ -458,9 +452,8 @@ class LTXVLoadConditioning:
                 sg3["283"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
                 sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
                 sg3["296"]["inputs"]["vae_name"] = target_video_vae
-                sg3["290"]["inputs"]["frames_number"] = int(requested_length * 2.02) # Scaled proportionally
+                sg3["290"]["inputs"]["frames_number"] = int(requested_length * 2.02) 
 
-                # Enforce format to h264 MP4 so that output compiled file contains both video and the generated audio track
                 sg3["298"]["inputs"]["format"] = "video/h264-mp4"
                 sg3["298"]["inputs"]["frame_rate"] = 24
 
@@ -469,7 +462,7 @@ class LTXVLoadConditioning:
                 print("💾 Phase 3 Complete. Unloading VRAM...")
                 await self.clear_comfy_memory(session)
 
-                # Scan output folder for compiled media outputs
+                # Scan output folder
                 output_files = []
                 for root_p, _, filenames in os.walk(out_dir):
                     for name in filenames:
