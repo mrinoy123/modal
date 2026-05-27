@@ -63,10 +63,12 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
+    # FIX: Install sageattention first, so any dependencies it pulls in can be overwritten safely.
+    "pip install sageattention",
     "pip uninstall -y torch torchvision torchaudio",
-    "pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    "pip install sageattention"
+    # FIX: Force install the strict matching ABI versions as the absolute last step.
+    "pip install --no-cache-dir --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
+    "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -82,6 +84,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     timeout=3600 
 )
 class LTXEngine:
+    
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
