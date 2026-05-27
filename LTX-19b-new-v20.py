@@ -69,7 +69,7 @@ final_image = build_image.run_commands(
 )
 
 app = modal.App("ltx-2-19b-v20-api")
-weights_volume = modal.Volume.from_name("ltx-2-19b-weights")
+weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
 @app.cls(
     gpu="L4", # Reverted to cost-efficient standard L4 GPU (24GB VRAM)
