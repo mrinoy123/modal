@@ -74,7 +74,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=16384,
+    memory=8192, # Memory successfully set back to 8GB
     scaledown_window=30,
     timeout=3600 
 )
@@ -138,7 +138,7 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # FIXED: Added '--gpu-only' flag to force everything into VRAM and prevent slow CPU offloads
+        # Aggressive '--gpu-only' flag ensures all active inference is executed strictly on L4 GPU VRAM
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -173,12 +173,16 @@ class LTXEngine:
         prompts_dict = body.get("prompts", {})
         negative_prompt = body.get("negative", "worst quality, blurry, distorted")
 
-        # Format prompt payload map into a valid string timeline block for the BatchPromptSchedule node
+        # Format prompt payload map into a clean pipe-separated string timeline for LTXVMultiPromptProvider
         if isinstance(prompts_dict, dict):
-            formatted_timeline_list = []
-            for frame, text in prompts_dict.items():
-                formatted_timeline_list.append(f'"{frame}": "{text}"')
-            prompts_timeline_str = ",\n".join(formatted_timeline_list)
+            try:
+                # Sort numerically by frame index to keep correct temporal progression
+                sorted_keys = sorted(prompts_dict.keys(), key=lambda x: int(x) if str(x).isdigit() else 0)
+                prompts_list = [str(prompts_dict[k]).strip() for k in sorted_keys if str(prompts_dict[k]).strip()]
+                prompts_timeline_str = "|".join(prompts_list)
+            except Exception as e:
+                print(f"[Warning] Failed to parse prompts dict numerically: {e}")
+                prompts_timeline_str = "|".join([str(v).strip() for v in prompts_dict.values()])
         else:
             prompts_timeline_str = str(prompts_dict)
 
@@ -270,12 +274,10 @@ class LTXEngine:
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
-                    sg1["243"]["inputs"]["device"] = "default"  # FIXED: Set back to valid 'default' (relying on server-wide GPU-only flag instead)
-                if "239" in sg1:
+                    sg1["243"]["inputs"]["device"] = "default"  # Validation list only contains ['default', 'cpu']
+                if "246" in sg1:  # FIXED: dynamically overwrites inputs of LTXVMultiPromptProvider (Node 246) with our pipe-separated timeline
                     if prompts_timeline_str:
-                        sg1["239"]["inputs"]["text"] = prompts_timeline_str
-                    sg1["239"]["inputs"]["max_frames"] = int(requested_length)
-                    sg1["239"]["inputs"]["end_frame"] = int(requested_length)
+                        sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
                 if "112" in sg1:
                     if negative_prompt:
                         sg1["112"]["inputs"]["text"] = negative_prompt
