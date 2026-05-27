@@ -12,7 +12,7 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# FIXED: Switched from ubuntu24.04 to the official ubuntu22.04 CUDA tag
+# Switched from ubuntu24.04 to the official ubuntu22.04 CUDA tag
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
     add_python="3.12"
@@ -58,12 +58,12 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # The Sledgehammer: Force overwrite any rogue PyTorch upgrades from the custom nodes.
-    "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    # Re-enforce kornia and numpy limits to prevent array mismatches
+    # 1. Install SageAttention and generic requirements first
+    "pip install sageattention",
+    # 2. Re-enforce stable numpy and kornia packages
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    # ⚡ FIXED: Install pre-compiled SageAttention to completely bypass local CUDA build requirements
-    "pip install sageattention"
+    # 3. THE SLEDGEHAMMER (MUST BE LAST): Overwrite any rogue PyTorch/Torchvision installations with clean CUDA 12.4 packages
+    "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124"
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -284,7 +284,7 @@ class LTXEngine:
 
                 if "238" in sg2:
                     sg2["238"]["inputs"]["unet_name"] = target_unet
-                if "248" in sg2: # FIXED: node index was 242 (does not exist in sg2), corrected to 248
+                if "248" in sg2: 
                     sg2["248"]["inputs"]["lora_name"] = target_detailer_lora
                 if "194" in sg2:
                     sg2["194"]["inputs"]["length"] = int(requested_length)
@@ -293,7 +293,6 @@ class LTXEngine:
                 if "235" in sg2:
                     sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
                 
-                # FIXED: Force load of stored conditionings from Phase 1
                 if "245" in sg2:
                     sg2["245"]["inputs"]["file_name"] = "POSITIVEconditioning.safetensors"
                 if "246" in sg2:
@@ -312,7 +311,6 @@ class LTXEngine:
 
                 print("💾 Phase 2 Complete. Latents cached to disk storage layers.")
 
-                # HELPER: Rename saved latent output if suffix counter was appended (ensuring Phase 3 loads cleanly)
                 latent_files = [f for f in os.listdir(out_dir) if f.endswith(".latent")]
                 if latent_files:
                     latent_files.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
@@ -333,18 +331,17 @@ class LTXEngine:
                     with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
                         sg3 = json.load(f)
 
-                if "278" in sg3: # FIXED: node 279 is LoraLoader, 278 is UNETLoader
+                if "278" in sg3: 
                     sg3["278"]["inputs"]["unet_name"] = target_unet
-                if "279" in sg3: # FIXED: node 299 was nonexistent in sg3, corrected to 279 LoraLoader
+                if "279" in sg3: 
                     sg3["279"]["inputs"]["lora_name"] = target_detailer_lora
                 if "295" in sg3:
                     sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
                 if "296" in sg3:
                     sg3["296"]["inputs"]["vae_name"] = target_video_vae
-                if "290" in sg3: # FIXED: Dynamically sync audio latent duration to requested length
+                if "290" in sg3: 
                     sg3["290"]["inputs"]["frames_number"] = int(requested_length)
                 
-                # FIXED: Overwrite loaded conditionings for the MultimodalGuider
                 if "282" in sg3:
                     sg3["282"]["inputs"]["file_name"] = "POSITIVEconditioning.safetensors"
                 if "283" in sg3:
