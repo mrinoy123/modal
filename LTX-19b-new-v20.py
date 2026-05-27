@@ -12,8 +12,9 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
+# FIXED: Switched from ubuntu24.04 to the official ubuntu22.04 CUDA tag
 base_image = modal.Image.from_registry(
-    "nvidia/cuda:12.4.1-devel-ubuntu24.04", 
+    "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
     add_python="3.12"
 ).apt_install(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
@@ -57,11 +58,11 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
+    # The Sledgehammer: Force overwrite any rogue PyTorch upgrades from the custom nodes.
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
     # Re-enforce kornia and numpy limits to prevent array mismatches
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    # ⚡ Optimized Fast SageAttention Installation using pre-cloned source and build environment locks
+    # Optimized Fast SageAttention Installation using pre-cloned source and build environment locks
     "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
     "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
