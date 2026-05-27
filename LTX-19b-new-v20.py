@@ -1,3 +1,7 @@
+# ==============================================================================
+# IMPORTS & ENVIRONMENT SETUP
+# Purpose: Load all necessary asynchronous and system execution modules.
+# ==============================================================================
 import modal
 import subprocess
 import time
@@ -12,7 +16,11 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# Switched from ubuntu24.04 to the official ubuntu22.04 CUDA tag
+# ==============================================================================
+# CONTAINER IMAGE BUILDER
+# Purpose: Construct the Linux environment, install CUDA compilers, and fetch 
+# all required Python dependencies for PyTorch and ComfyUI.
+# ==============================================================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
     add_python="3.12"
@@ -39,6 +47,11 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
+# ==============================================================================
+# COMFYUI REPOSITORY & CUSTOM NODE INGESTION
+# Purpose: Clone the core ComfyUI engine and all community/custom extensions
+# required for the LTX video generation graphs.
+# ==============================================================================
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -63,6 +76,11 @@ final_image = build_image.run_commands(
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124"
 )
 
+# ==============================================================================
+# MODAL APP CONFIGURATION
+# Purpose: Define hardware requirements, attach model weights via Modal volumes,
+# and define the fast L4 container footprint with an 8GB memory limit.
+# ==============================================================================
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -71,11 +89,17 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192, 
+    memory=8192,  
     scaledown_window=30,
     timeout=3600 
 )
 class LTXEngine:
+    
+    # ==========================================================================
+    # BACKGROUND PROCESS MANAGERS
+    # Purpose: Capture stdout logs for the Modal dashboard and aggressively
+    # free host memory to prevent kernel panics.
+    # ==========================================================================
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
@@ -90,6 +114,11 @@ class LTXEngine:
                 except Exception: pass
             await asyncio.sleep(2)
 
+    # ==========================================================================
+    # CONTAINER INITIALIZATION (ENTER)
+    # Purpose: Map the model weights from the Modal volume to ComfyUI, configure 
+    # Cloudflare S3, inject the .pt saver patch, and boot the fast-API server.
+    # ==========================================================================
     @modal.enter()
     def start_comfy(self):
         import boto3
@@ -119,19 +148,19 @@ class LTXEngine:
         )
 
         # =====================================================================
-        # 🔥 THE ULTIMATE HOT-PATCH: NATIVE TORCH SAVING
-        # completely replace safetensors with native PyTorch .pt formats
-        # to support the complex nested arrays from LTXVMultiPromptProvider
+        # 🔥 THE ULTIMATE HOT-PATCH: NATIVE TORCH SAVING (DEVICE-FREE)
+        # Replaces safetensors with raw PyTorch .pt saving. Strips out the 
+        # "device" requirement so it perfectly validates against the n8n JSON.
         # =====================================================================
         saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
         if os.path.exists(saver_path):
             with open(saver_path, "w") as f:
-                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVSaveConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        return {"required": {"conditioning": ("CONDITIONING",), "file_name": ("STRING", {"default": "conditioning.pt"}), "device": (["default", "float16", "bfloat16", "float32"],)}}\n    RETURN_TYPES = ()\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n    OUTPUT_NODE = True\n\n    def execute(self, conditioning, file_name, device):\n        output_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(output_dir, file_name)\n        def recursive_cast(obj, dtype):\n            if isinstance(obj, torch.Tensor):\n                if obj.is_floating_point(): return obj.to(dtype).contiguous()\n                return obj.contiguous()\n            elif isinstance(obj, dict): return {k: recursive_cast(v, dtype) for k, v in obj.items()}\n            elif isinstance(obj, list): return [recursive_cast(v, dtype) for v in obj]\n            elif isinstance(obj, tuple): return tuple(recursive_cast(v, dtype) for v in obj)\n            return obj\n        target_dtype = torch.bfloat16 if device == "bfloat16" else torch.float16 if device == "float16" else torch.float32\n        converted = conditioning if device == "default" else recursive_cast(conditioning, target_dtype)\n        torch.save(converted, file_path)\n        return ()\n''')
+                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVSaveConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        return {"required": {"conditioning": ("CONDITIONING",), "file_name": ("STRING", {"default": "conditioning.pt"})}}\n    RETURN_TYPES = ()\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n    OUTPUT_NODE = True\n\n    def execute(self, conditioning, file_name):\n        output_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(output_dir, file_name)\n        torch.save(conditioning, file_path)\n        return ()\n''')
                 
         loader_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_loader.py"
         if os.path.exists(loader_path):
             with open(loader_path, "w") as f:
-                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVLoadConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        input_dir = folder_paths.get_output_directory()\n        files = [f for f in os.listdir(input_dir) if f.endswith(".pt") or f.endswith(".safetensors")] if os.path.exists(input_dir) else []\n        return {"required": {"file_name": (files,), "device": (["default", "float16", "bfloat16", "float32"],)}}\n    RETURN_TYPES = ("CONDITIONING",)\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n\n    def execute(self, file_name, device):\n        input_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(input_dir, file_name)\n        conditioning = torch.load(file_path, weights_only=False)\n        def recursive_cast(obj, dtype):\n            if isinstance(obj, torch.Tensor):\n                if obj.is_floating_point(): return obj.to(dtype).contiguous()\n                return obj.contiguous()\n            elif isinstance(obj, dict): return {k: recursive_cast(v, dtype) for k, v in obj.items()}\n            elif isinstance(obj, list): return [recursive_cast(v, dtype) for v in obj]\n            elif isinstance(obj, tuple): return tuple(recursive_cast(v, dtype) for v in obj)\n            return obj\n        target_dtype = torch.bfloat16 if device == "bfloat16" else torch.float16 if device == "float16" else torch.float32\n        if device != "default": conditioning = recursive_cast(conditioning, target_dtype)\n        return (conditioning,)\n''')
+                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVLoadConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        input_dir = folder_paths.get_output_directory()\n        files = [f for f in os.listdir(input_dir) if f.endswith(".pt") or f.endswith(".safetensors")] if os.path.exists(input_dir) else []\n        return {"required": {"file_name": (files,)}}\n    RETURN_TYPES = ("CONDITIONING",)\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n\n    def execute(self, file_name):\n        input_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(input_dir, file_name)\n        conditioning = torch.load(file_path, weights_only=False)\n        return (conditioning,)\n''')
         # =====================================================================
 
         print("🚀 Launching High-Speed Unthrottled LTX Server Engine...")
@@ -165,6 +194,11 @@ class LTXEngine:
             except Exception: time.sleep(2)
         os._exit(1)
 
+    # ==========================================================================
+    # MAIN API GENERATION ENDPOINT
+    # Purpose: Receive the n8n payload, download any necessary guidance images,
+    # and execute the 3-phase ComfyUI subgraphs sequentially.
+    # ==========================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
@@ -393,6 +427,11 @@ class LTXEngine:
                         if prompt_id3 in history: break
                     await asyncio.sleep(4)
 
+            # ==============================================================
+            # RESPONSE RETURN
+            # Purpose: Buffer the generated MP4 file from disk and return 
+            # it back over the API route as raw binary video.
+            # ==============================================================
             videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
             if not videos: raise HTTPException(status_code=500, detail="Output tracking buffers are empty.")
                 
