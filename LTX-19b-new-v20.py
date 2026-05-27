@@ -138,7 +138,6 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Low-VRAM and smart memory throttling completely stripped for maximum native performance
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -231,20 +230,26 @@ class LTXEngine:
                 # ====================================================
                 # PHASE 1: SUBGRAPH 1 - Language Execution Pass
                 # ====================================================
-                print("🧠 Phase 1 Active: Initializing Subgraph 1 (comfyui-ltx-20-subgraph-1(api).json)...")
-                with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
-                    sg1 = json.load(f)
+                print("🧠 Phase 1 Active: Initializing Subgraph 1...")
+                sg1_raw = body.get("subgraph_1")
+                if sg1_raw:
+                    sg1 = json.loads(sg1_raw) if isinstance(sg1_raw, str) else sg1_raw
+                else:
+                    with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
+                        sg1 = json.load(f)
 
                 # Overwrite internal node parameter targets dynamically matching API files
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
                 if "239" in sg1:
-                    sg1["239"]["inputs"]["text"] = prompts_timeline_str
+                    if prompts_timeline_str:
+                        sg1["239"]["inputs"]["text"] = prompts_timeline_str
                     sg1["239"]["inputs"]["max_frames"] = int(requested_length)
                     sg1["239"]["inputs"]["end_frame"] = int(requested_length)
                 if "112" in sg1:
-                    sg1["112"]["inputs"]["text"] = negative_prompt
+                    if negative_prompt:
+                        sg1["112"]["inputs"]["text"] = negative_prompt
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg1}) as resp:
                     r1 = await resp.json()
@@ -269,20 +274,30 @@ class LTXEngine:
                 # ====================================================
                 # PHASE 2: SUBGRAPH 2 - Pure Video Sampling Pass
                 # ====================================================
-                print("🎬 Phase 2 Active: Initializing Subgraph 2 (comfyui-ltx-20-subgraph-2(api).json)...")
-                with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
-                    sg2 = json.load(f)
+                print("🎬 Phase 2 Active: Initializing Subgraph 2...")
+                sg2_raw = body.get("subgraph_2")
+                if sg2_raw:
+                    sg2 = json.loads(sg2_raw) if isinstance(sg2_raw, str) else sg2_raw
+                else:
+                    with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
+                        sg2 = json.load(f)
 
                 if "238" in sg2:
                     sg2["238"]["inputs"]["unet_name"] = target_unet
-                if "242" in sg2:
-                    sg2["242"]["inputs"]["lora_name"] = target_detailer_lora
+                if "248" in sg2: # FIXED: node index was 242 (does not exist in sg2), corrected to 248
+                    sg2["248"]["inputs"]["lora_name"] = target_detailer_lora
                 if "194" in sg2:
                     sg2["194"]["inputs"]["length"] = int(requested_length)
                 if "237" in sg2:
                     sg2["237"]["inputs"]["image_paths"] = dynamic_guides_dir
                 if "235" in sg2:
                     sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
+                
+                # FIXED: Force load of stored conditionings from Phase 1
+                if "245" in sg2:
+                    sg2["245"]["inputs"]["file_name"] = "POSITIVEconditioning.safetensors"
+                if "246" in sg2:
+                    sg2["246"]["inputs"]["file_name"] = "NEGATIVEconditioning.safetensors"
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg2}) as resp:
                     r2 = await resp.json()
@@ -297,23 +312,43 @@ class LTXEngine:
 
                 print("💾 Phase 2 Complete. Latents cached to disk storage layers.")
 
+                # HELPER: Rename saved latent output if suffix counter was appended (ensuring Phase 3 loads cleanly)
+                latent_files = [f for f in os.listdir(out_dir) if f.endswith(".latent")]
+                if latent_files:
+                    latent_files.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
+                    src_latent = os.path.join(out_dir, latent_files[0])
+                    dest_latent = os.path.join(out_dir, "video_latent_output.latent")
+                    if src_latent != dest_latent:
+                        shutil.copy(src_latent, dest_latent)
+                        print(f"Copied latent from {src_latent} to {dest_latent} for Subgraph 3 compatibility.")
+
                 # ====================================================
                 # PHASE 3: SUBGRAPH 3 - Audio Synthesis & Final Pack
                 # ====================================================
-                print("🎵 Phase 3 Active: Initializing Subgraph 3 (comfyui-ltx-20-Subgraph-3(api).json)...")
-                with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
-                    sg3 = json.load(f)
+                print("🎵 Phase 3 Active: Initializing Subgraph 3...")
+                sg3_raw = body.get("subgraph_3")
+                if sg3_raw:
+                    sg3 = json.loads(sg3_raw) if isinstance(sg3_raw, str) else sg3_raw
+                else:
+                    with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
+                        sg3 = json.load(f)
 
-                if "279" in sg3:
-                    sg3["279"]["inputs"]["unet_name"] = target_unet
-                if "299" in sg3:
-                    sg3["299"]["inputs"]["lora_name"] = target_detailer_lora
+                if "278" in sg3: # FIXED: node 279 is LoraLoader, 278 is UNETLoader
+                    sg3["278"]["inputs"]["unet_name"] = target_unet
+                if "279" in sg3: # FIXED: node 299 was nonexistent in sg3, corrected to 279 LoraLoader
+                    sg3["279"]["inputs"]["lora_name"] = target_detailer_lora
                 if "295" in sg3:
                     sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
                 if "296" in sg3:
                     sg3["296"]["inputs"]["vae_name"] = target_video_vae
-                if "289" in sg3:
-                    sg3["289"]["inputs"]["frame_rate"] = 12
+                if "290" in sg3: # FIXED: Dynamically sync audio latent duration to requested length
+                    sg3["290"]["inputs"]["frames_number"] = int(requested_length)
+                
+                # FIXED: Overwrite loaded conditionings for the MultimodalGuider
+                if "282" in sg3:
+                    sg3["282"]["inputs"]["file_name"] = "POSITIVEconditioning.safetensors"
+                if "283" in sg3:
+                    sg3["283"]["inputs"]["file_name"] = "NEGATIVEconditioning.safetensors"
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg3}) as resp:
                     r3 = await resp.json()
