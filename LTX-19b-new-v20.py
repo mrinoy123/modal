@@ -72,7 +72,7 @@ app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-2-19b-weights")
 
 @app.cls(
-    gpu="L40S", # Upgraded GPU to 48GB VRAM to accommodate 19B model parameters
+    gpu="L4", # Reverted to cost-efficient standard L4 GPU (24GB VRAM)
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
@@ -418,6 +418,7 @@ class LTXVLoadConditioning:
 
                 sg2 = self.merge_overrides(sg2, body.get("subgraph_2_override"))
 
+                # Inject dynamic configurations to match the new sub-graph format
                 sg2["194"]["inputs"]["length"] = requested_length
                 sg2["238"]["inputs"]["unet_name"] = target_unet
                 sg2["238"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
@@ -426,6 +427,10 @@ class LTXVLoadConditioning:
                 sg2["246"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
                 sg2["237"]["inputs"]["image_paths"] = "\n".join(image_filenames) 
                 sg2["235"]["inputs"]["num_images"] = len(image_filenames)
+
+                # Safety guard for the newly configured LoraLoaderModelOnly node in Sub-Graph 2
+                if "248" in sg2 and "inputs" in sg2["248"] and "lora_name" not in sg2["248"]["inputs"]:
+                    sg2["248"]["inputs"]["lora_name"] = None
 
                 print("🚀 Executing Sub-Graph 2 (Main Video Generation)...")
                 await self.execute_comfy_workflow(session, sg2)
@@ -445,6 +450,7 @@ class LTXVLoadConditioning:
 
                 sg3 = self.merge_overrides(sg3, body.get("subgraph_3_override"))
 
+                # Inject dynamic configurations to match the new sub-graph format
                 sg3["232"]["inputs"]["latent"] = "video_latent_output.latent"
                 sg3["278"]["inputs"]["unet_name"] = target_unet
                 sg3["278"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
@@ -453,6 +459,10 @@ class LTXVLoadConditioning:
                 sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
                 sg3["296"]["inputs"]["vae_name"] = target_video_vae
                 sg3["290"]["inputs"]["frames_number"] = int(requested_length * 2.02) 
+
+                # Safety guard for the newly configured LoraLoaderModelOnly node in Sub-Graph 3
+                if "302" in sg3 and "inputs" in sg3["302"] and "lora_name" not in sg3["302"]["inputs"]:
+                    sg3["302"]["inputs"]["lora_name"] = None
 
                 sg3["298"]["inputs"]["format"] = "video/h264-mp4"
                 sg3["298"]["inputs"]["frame_rate"] = 24
