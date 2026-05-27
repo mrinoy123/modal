@@ -1,6 +1,5 @@
 # ==============================================================================
 # IMPORTS & ENVIRONMENT SETUP
-# Purpose: Load all necessary asynchronous and system execution modules.
 # ==============================================================================
 import modal
 import subprocess
@@ -18,8 +17,6 @@ from typing import Optional
 
 # ==============================================================================
 # CONTAINER IMAGE BUILDER
-# Purpose: Construct the Linux environment, install CUDA compilers, and fetch 
-# all required Python dependencies for PyTorch and ComfyUI.
 # ==============================================================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
@@ -47,11 +44,6 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# ==============================================================================
-# COMFYUI REPOSITORY & CUSTOM NODE INGESTION
-# Purpose: Clone the core ComfyUI engine and all community/custom extensions
-# required for the LTX video generation graphs.
-# ==============================================================================
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -76,11 +68,6 @@ final_image = build_image.run_commands(
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124"
 )
 
-# ==============================================================================
-# MODAL APP CONFIGURATION
-# Purpose: Define hardware requirements, attach model weights via Modal volumes,
-# and define the fast L4 container footprint with an 8GB memory limit.
-# ==============================================================================
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -89,17 +76,11 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192,  
+    memory=24576,  
     scaledown_window=30,
     timeout=3600 
 )
 class LTXEngine:
-    
-    # ==========================================================================
-    # BACKGROUND PROCESS MANAGERS
-    # Purpose: Capture stdout logs for the Modal dashboard and aggressively
-    # free host memory to prevent kernel panics.
-    # ==========================================================================
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
@@ -114,11 +95,6 @@ class LTXEngine:
                 except Exception: pass
             await asyncio.sleep(2)
 
-    # ==========================================================================
-    # CONTAINER INITIALIZATION (ENTER)
-    # Purpose: Map the model weights from the Modal volume to ComfyUI, configure 
-    # Cloudflare S3, inject the .pt saver patch, and boot the fast-API server.
-    # ==========================================================================
     @modal.enter()
     def start_comfy(self):
         import boto3
@@ -147,11 +123,6 @@ class LTXEngine:
             region_name="auto"
         )
 
-        # =====================================================================
-        # THE HOT-PATCH: NATIVE TORCH SAVING (DEVICE-FREE)
-        # Replaces safetensors with raw PyTorch .pt saving. Strips out the 
-        # "device" requirement so it validates against the n8n JSON.
-        # =====================================================================
         saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
         if os.path.exists(saver_path):
             with open(saver_path, "w") as f:
@@ -161,9 +132,8 @@ class LTXEngine:
         if os.path.exists(loader_path):
             with open(loader_path, "w") as f:
                 f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVLoadConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        input_dir = folder_paths.get_output_directory()\n        files = [f for f in os.listdir(input_dir) if f.endswith(".pt") or f.endswith(".safetensors")] if os.path.exists(input_dir) else []\n        return {"required": {"file_name": (files,)}}\n    RETURN_TYPES = ("CONDITIONING",)\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n\n    def execute(self, file_name):\n        input_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(input_dir, file_name)\n        conditioning = torch.load(file_path, weights_only=False)\n        return (conditioning,)\n''')
-        # =====================================================================
 
-        print("🚀 Launching High-Speed Unthrottled LTX Server Engine...")
+        print("🚀 Launching Hybrid-Memory LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
@@ -178,8 +148,7 @@ class LTXEngine:
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
-            "--gpu-only"
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -194,11 +163,6 @@ class LTXEngine:
             except Exception: time.sleep(2)
         os._exit(1)
 
-    # ==========================================================================
-    # MAIN API GENERATION ENDPOINT
-    # Purpose: Receive the n8n payload, download any necessary guidance images,
-    # and execute the 3-phase ComfyUI subgraphs sequentially.
-    # ==========================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
@@ -297,9 +261,6 @@ class LTXEngine:
         try:
             async with aiohttp.ClientSession() as session:
                 
-                # ====================================================
-                # PRE-FLIGHT: Safeguard Loading & Force .pt Formats
-                # ====================================================
                 sg1_raw = body.get("subgraph_1")
                 if sg1_raw:
                     sg1 = json.loads(sg1_raw) if isinstance(sg1_raw, str) else sg1_raw
@@ -352,7 +313,7 @@ class LTXEngine:
                             node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
 
                 # ====================================================
-                # PHASE 1: SUBGRAPH 1 - Language Execution Pass
+                # PHASE 1
                 # ====================================================
                 print("🧠 Phase 1 Active: Initializing Subgraph 1...")
                 
@@ -387,7 +348,7 @@ class LTXEngine:
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
 
                 # ====================================================
-                # PHASE 2: SUBGRAPH 2 - Pure Video Sampling Pass
+                # PHASE 2
                 # ====================================================
                 print("🎬 Phase 2 Active: Initializing Subgraph 2...")
 
@@ -402,7 +363,6 @@ class LTXEngine:
                 if "235" in sg2:
                     sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
                 
-                # 🔥 FIX: Supply actual Video VAE model instead of mock "pixel_space" loader
                 if "241" in sg2:
                     sg2["241"]["inputs"]["vae_name"] = target_video_vae
 
@@ -418,6 +378,14 @@ class LTXEngine:
                     await asyncio.sleep(4)
 
                 print("💾 Phase 2 Complete. Latents cached to disk storage layers.")
+                
+                # Explicit purge executed directly after Phase 2 completion
+                print("🔀 Phase 2 Cleanup. Purging UNET completely from GPU memory blocks...")
+                async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as free_resp2:
+                    await free_resp2.read()
+                
+                torch.cuda.empty_cache()
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
 
                 latent_files = [f for f in os.listdir(out_dir) if f.endswith(".latent")]
                 if latent_files:
@@ -429,15 +397,13 @@ class LTXEngine:
                         print(f"Copied latent from {src_latent} to {dest_latent} for Subgraph 3 compatibility.")
 
                 # ====================================================
-                # PHASE 3: SUBGRAPH 3 - Audio Synthesis & Final Pack
+                # PHASE 3
                 # ====================================================
                 print("🎵 Phase 3 Active: Initializing Subgraph 3...")
 
                 if "278" in sg3: 
                     sg3["278"]["inputs"]["unet_name"] = target_unet
                 
-                # 🔥 FIX: Standard LoraLoader expects a linked CLIP connection. Since CLIP 
-                # is evicted in Phase 1, we change node 279 to a model-only format.
                 if "279" in sg3: 
                     sg3["279"]["inputs"]["lora_name"] = target_detailer_lora
                     sg3["279"]["class_type"] = "LoraLoaderModelOnly"
@@ -451,7 +417,6 @@ class LTXEngine:
                 if "290" in sg3: 
                     sg3["290"]["inputs"]["frames_number"] = int(requested_length)
 
-                # 🔥 QOL FIX: Align Video Combine Frame Rate directly with the empty audio latent configuration
                 if "298" in sg3:
                     if "290" in sg3:
                         sg3["298"]["inputs"]["frame_rate"] = sg3["290"]["inputs"]["frame_rate"]
@@ -469,11 +434,6 @@ class LTXEngine:
                         if prompt_id3 in history: break
                     await asyncio.sleep(4)
 
-            # ==============================================================
-            # RESPONSE RETURN
-            # Purpose: Buffer the generated MP4 file from disk and return 
-            # it back over the API route as raw binary video.
-            # ==============================================================
             videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
             if not videos: raise HTTPException(status_code=500, detail="Output tracking buffers are empty.")
                 
