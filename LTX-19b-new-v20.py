@@ -148,9 +148,9 @@ class LTXEngine:
         )
 
         # =====================================================================
-        # 🔥 THE ULTIMATE HOT-PATCH: NATIVE TORCH SAVING (DEVICE-FREE)
+        # THE HOT-PATCH: NATIVE TORCH SAVING (DEVICE-FREE)
         # Replaces safetensors with raw PyTorch .pt saving. Strips out the 
-        # "device" requirement so it perfectly validates against the n8n JSON.
+        # "device" requirement so it validates against the n8n JSON.
         # =====================================================================
         saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
         if os.path.exists(saver_path):
@@ -298,10 +298,18 @@ class LTXEngine:
             async with aiohttp.ClientSession() as session:
                 
                 # ====================================================
-                # PRE-FLIGHT: Update Subgraphs to use native .pt format
+                # PRE-FLIGHT: Safeguard Loading & Force .pt Formats
                 # ====================================================
-                sg1 = body.get("subgraph_1", {})
-                if isinstance(sg1, str): sg1 = json.loads(sg1)
+                sg1_raw = body.get("subgraph_1")
+                if sg1_raw:
+                    sg1 = json.loads(sg1_raw) if isinstance(sg1_raw, str) else sg1_raw
+                else:
+                    try:
+                        with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
+                            sg1 = json.load(f)
+                    except Exception:
+                        sg1 = {}
+
                 for node_id, node_data in sg1.items():
                     if node_data.get("class_type") == "LTXVSaveConditioning":
                         if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
@@ -309,8 +317,16 @@ class LTXEngine:
                         else:
                             node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
 
-                sg2 = body.get("subgraph_2", {})
-                if isinstance(sg2, str): sg2 = json.loads(sg2)
+                sg2_raw = body.get("subgraph_2")
+                if sg2_raw:
+                    sg2 = json.loads(sg2_raw) if isinstance(sg2_raw, str) else sg2_raw
+                else:
+                    try:
+                        with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
+                            sg2 = json.load(f)
+                    except Exception:
+                        sg2 = {}
+
                 for node_id, node_data in sg2.items():
                     if node_data.get("class_type") == "LTXVLoadConditioning":
                         if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
@@ -318,8 +334,16 @@ class LTXEngine:
                         else:
                             node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
 
-                sg3 = body.get("subgraph_3", {})
-                if isinstance(sg3, str): sg3 = json.loads(sg3)
+                sg3_raw = body.get("subgraph_3")
+                if sg3_raw:
+                    sg3 = json.loads(sg3_raw) if isinstance(sg3_raw, str) else sg3_raw
+                else:
+                    try:
+                        with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
+                            sg3 = json.load(f)
+                    except Exception:
+                        sg3 = {}
+
                 for node_id, node_data in sg3.items():
                     if node_data.get("class_type") == "LTXVLoadConditioning":
                         if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
@@ -377,6 +401,10 @@ class LTXEngine:
                     sg2["237"]["inputs"]["image_paths"] = dynamic_guides_dir
                 if "235" in sg2:
                     sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
+                
+                # 🔥 FIX: Supply actual Video VAE model instead of mock "pixel_space" loader
+                if "241" in sg2:
+                    sg2["241"]["inputs"]["vae_name"] = target_video_vae
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg2}) as resp:
                     r2 = await resp.json()
@@ -407,14 +435,28 @@ class LTXEngine:
 
                 if "278" in sg3: 
                     sg3["278"]["inputs"]["unet_name"] = target_unet
+                
+                # 🔥 FIX: Standard LoraLoader expects a linked CLIP connection. Since CLIP 
+                # is evicted in Phase 1, we change node 279 to a model-only format.
                 if "279" in sg3: 
                     sg3["279"]["inputs"]["lora_name"] = target_detailer_lora
+                    sg3["279"]["class_type"] = "LoraLoaderModelOnly"
+                    if "strength_clip" in sg3["279"]["inputs"]:
+                        del sg3["279"]["inputs"]["strength_clip"]
+
                 if "295" in sg3:
                     sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
                 if "296" in sg3:
                     sg3["296"]["inputs"]["vae_name"] = target_video_vae
                 if "290" in sg3: 
                     sg3["290"]["inputs"]["frames_number"] = int(requested_length)
+
+                # 🔥 QOL FIX: Align Video Combine Frame Rate directly with the empty audio latent configuration
+                if "298" in sg3:
+                    if "290" in sg3:
+                        sg3["298"]["inputs"]["frame_rate"] = sg3["290"]["inputs"]["frame_rate"]
+                    else:
+                        sg3["298"]["inputs"]["frame_rate"] = 25
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg3}) as resp:
                     r3 = await resp.json()
