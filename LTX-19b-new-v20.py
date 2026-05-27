@@ -69,10 +69,10 @@ final_image = build_image.run_commands(
 )
 
 app = modal.App("ltx-2-19b-v20-api")
-weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
+weights_volume = modal.Volume.from_name("ltx-2-19b-weights")
 
 @app.cls(
-    gpu="L4", # Reverted to cost-efficient standard L4 GPU (24GB VRAM)
+    gpu="L4", # Uses the cost-efficient standard L4 GPU (24GB VRAM)
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
@@ -201,11 +201,12 @@ class LTXVLoadConditioning:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # Removed '--normalvram' and replaced legacy '--mmap' with '--mmap-torch-files'
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
+            "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--use-sage-attention", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc",
-            "--reserve-vram", "2.0", "--normalvram"
+            "--reserve-vram", "2.0"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
