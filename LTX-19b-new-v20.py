@@ -74,7 +74,7 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     image=final_image, 
     volumes={"/mnt/weights": weights_volume},
     secrets=[modal.Secret.from_name("video-generator-workflow")], 
-    memory=8192, # Memory successfully set back to 8GB
+    memory=8192,
     scaledown_window=30,
     timeout=3600 
 )
@@ -125,6 +125,35 @@ class LTXEngine:
         if os.path.exists(init_file_path):
             patch_code = """\ntry:\n    import comfy.samplers\n    _orig_set_conds = comfy.samplers.CFGGuider.set_conds\n    def _patched_set_conds(self, positive, negative):\n        self.raw_conds = (positive, negative)\n        return _orig_set_conds(self, positive, negative)\n    comfy.samplers.CFGGuider.set_conds = _patched_set_conds\nexcept Exception: pass\n"""
             with open(init_file_path, "a") as f: f.write(patch_code)
+
+        # HOT-PATCH: Make conditioning_saver.py compatible with multi-prompt conditioning providers
+        saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
+        if os.path.exists(saver_path):
+            try:
+                with open(saver_path, "r") as f:
+                    code = f.read()
+                
+                old_loop = 'for idx, (cond_tensor, cond_options) in enumerate(conditioning):'
+                new_loop = """for idx, item in enumerate(conditioning):
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                cond_tensor, cond_options = item[0], item[1]
+            elif isinstance(item, (list, tuple)) and len(item) == 1:
+                cond_tensor, cond_options = item[0], {}
+            else:
+                cond_tensor, cond_options = item, {}"""
+                
+                if old_loop in code:
+                    code = code.replace(old_loop, new_loop)
+                    # Replace reference to mask properties to ensure dict checks
+                    old_mask = 'if "attention_mask" in cond_options:'
+                    new_mask = 'if isinstance(cond_options, dict) and "attention_mask" in cond_options:'
+                    code = code.replace(old_mask, new_mask)
+                    
+                    with open(saver_path, "w") as f:
+                        f.write(code)
+                    print("⚡ Successfully patched conditioning_saver.py for LTXVMultiPromptProvider compatibility!")
+            except Exception as e:
+                print(f"[Warning] Failed to apply conditioning_saver hot-patch: {e}")
 
         print("🚀 Launching High-Speed Unthrottled LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
@@ -274,8 +303,8 @@ class LTXEngine:
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
-                    sg1["243"]["inputs"]["device"] = "default"  # Validation list only contains ['default', 'cpu']
-                if "246" in sg1:  # FIXED: dynamically overwrites inputs of LTXVMultiPromptProvider (Node 246) with our pipe-separated timeline
+                    sg1["243"]["inputs"]["device"] = "default"  
+                if "246" in sg1:  # Overwrite dynamic inputs of LTXVMultiPromptProvider
                     if prompts_timeline_str:
                         sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
                 if "112" in sg1:
