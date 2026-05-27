@@ -24,7 +24,9 @@ base_image = modal.Image.from_registry(
 ).apt_install(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
-)
+).env({
+    "CACHE_BUST": "1"  # Increment this value to force a complete rebuild of all layers
+})
 
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
@@ -35,6 +37,10 @@ build_image = base_image.env({
     "CC": "gcc",
     "CXX": "g++"
 }).pip_install(
+    # Install PyTorch with CUDA 12.4 first to block generic PyPI packages from installing different builds
+    "torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1",
+    extra_options="--index-url https://download.pytorch.org/whl/cu124"
+).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
 ).pip_install(
@@ -63,10 +69,7 @@ final_image = build_image.run_commands(
     "python3.12 -m pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install -r {} \;"
 ).run_commands(
-    # Cache bust implementation to force rebuild on clean environment
     "python3.12 -m pip install --no-cache-dir sageattention",
-    "python3.12 -m pip uninstall -y torch torchvision torchaudio",
-    "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
     "python3.12 -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 )
 
