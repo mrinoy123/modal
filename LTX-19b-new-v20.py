@@ -69,7 +69,7 @@ final_image = build_image.run_commands(
 )
 
 app = modal.App("ltx-2-19b-v20-api")
-weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
+weights_volume = modal.Volume.from_name("ltx-2-19b-weights")
 
 @app.cls(
     gpu="L4", 
@@ -93,7 +93,7 @@ class LTXEngine:
             except Exception:
                 try: ctypes.CDLL("libc.so.6").malloc_trim(0)
                 except Exception: pass
-            await asyncio.sleep(2)
+            await asyncio.sleep(10) # Reduced execution frequency to avoid CPU jitter
 
     @modal.enter()
     def start_comfy(self):
@@ -123,17 +123,74 @@ class LTXEngine:
             region_name="auto"
         )
 
-        saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
-        if os.path.exists(saver_path):
-            with open(saver_path, "w") as f:
-                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVSaveConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        return {"required": {"conditioning": ("CONDITIONING",), "file_name": ("STRING", {"default": "conditioning.pt"})}}\n    RETURN_TYPES = ()\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n    OUTPUT_NODE = True\n\n    def execute(self, conditioning, file_name):\n        output_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(output_dir, file_name)\n        torch.save(conditioning, file_path)\n        return ()\n''')
-                
-        loader_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_loader.py"
-        if os.path.exists(loader_path):
-            with open(loader_path, "w") as f:
-                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVLoadConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        input_dir = folder_paths.get_output_directory()\n        files = [f for f in os.listdir(input_dir) if f.endswith(".pt") or f.endswith(".safetensors")] if os.path.exists(input_dir) else []\n        return {"required": {"file_name": (files,)}}\n    RETURN_TYPES = ("CONDITIONING",)\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n\n    def execute(self, file_name):\n        input_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(input_dir, file_name)\n        conditioning = torch.load(file_path, weights_only=False)\n        return (conditioning,)\n''')
+        # Create self-contained, robust custom node helpers to manage save/load conditioning states 
+        helper_node_dir = "/workspace/ComfyUI/custom_nodes/comfyui-conditioning-helper"
+        os.makedirs(helper_node_dir, exist_ok=True)
+        
+        with open(os.path.join(helper_node_dir, "__init__.py"), "w") as f:
+            f.write('from .conditioning_nodes import LTXVSaveConditioning, LTXVLoadConditioning\n\nNODE_CLASS_MAPPINGS = {\n    "LTXVSaveConditioning": LTXVSaveConditioning,\n    "LTXVLoadConditioning": LTXVLoadConditioning\n}\n')
+            
+        with open(os.path.join(helper_node_dir, "conditioning_nodes.py"), "w") as f:
+            f.write('''import torch
+import os
+import folder_paths
 
-        print("🚀 Launching Hybrid-Memory LTX Server Engine...")
+class LTXVSaveConditioning:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+            },
+            "optional": {
+                "file_name": ("STRING", {"default": "conditioning.pt"}),
+                "filename": ("STRING", {"default": "conditioning.pt"}),
+                "dtype": ("STRING", {"default": "float16"}),
+            }
+        }
+    RETURN_TYPES = ()
+    FUNCTION = "execute"
+    CATEGORY = "Lightricks/LTXVideo"
+    OUTPUT_NODE = True
+
+    def execute(self, conditioning, file_name="conditioning.pt", filename="conditioning.pt", dtype="float16"):
+        output_dir = folder_paths.get_output_directory()
+        fname = filename if filename else file_name
+        if not fname.endswith(".pt"):
+            fname += ".pt"
+        file_path = os.path.join(output_dir, fname)
+        torch.save(conditioning, file_path)
+        return ()
+
+class LTXVLoadConditioning:
+    @classmethod
+    def INPUT_TYPES(s):
+        input_dir = folder_paths.get_output_directory()
+        files = [f for f in os.listdir(input_dir) if f.endswith(".pt") or f.endswith(".safetensors")] if os.path.exists(input_dir) else []
+        return {
+            "required": {
+                "file_name": (files + ["(POSITIVE)conditioning.pt", "(NEGATIVE)conditioning.pt"],),
+            },
+            "optional": {
+                "filename": ("STRING", {"default": ""}),
+                "device": ("STRING", {"default": "cpu"}),
+            }
+        }
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "execute"
+    CATEGORY = "Lightricks/LTXVideo"
+
+    def execute(self, file_name, filename="", device="cpu"):
+        input_dir = folder_paths.get_output_directory()
+        fname = filename if filename else file_name
+        if not fname.endswith(".pt"):
+            fname += ".pt"
+        file_path = os.path.join(input_dir, fname)
+        conditioning = torch.load(file_path, weights_only=False)
+        return (conditioning,)
+''')
+
+        print("🚀 Launching Hybrid-Memory LTX Server Engine with FP8 and SageAttention configurations...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
@@ -145,10 +202,12 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # Enforced FP8 loading for the UNet model weight blocks & activated SageAttention to decrease base footprint on L4
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"
+            "--bf16-vae", "--use-sage-attention", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc",
+            "--reserve-vram", "2.0", "--normalvram"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -163,6 +222,68 @@ class LTXEngine:
             except Exception: time.sleep(2)
         os._exit(1)
 
+    async def clear_comfy_memory(self, session):
+        """Actively instructs ComfyUI to release loaded models and triggers PyTorch cache clearing."""
+        try:
+            async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as r:
+                await r.read()
+        except Exception as e:
+            print(f"[Warning] Memory unload endpoint failed to execute: {e}")
+        
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
+
+    async def execute_comfy_workflow(self, session, workflow_json):
+        """Sends a sub-graph payload to the ComfyUI API and blocks until completion."""
+        async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow_json}) as r:
+            if r.status != 200:
+                err_text = await r.text()
+                raise HTTPException(status_code=500, detail=f"Failed to queue sub-graph prompt: {r.status} - {err_text}")
+            res = await r.json()
+            prompt_id = res["prompt_id"]
+
+        print(f"⌛ Queued workflow step. prompt_id: {prompt_id}. Polling state...")
+        while True:
+            async with session.get(f"http://127.0.0.1:8188/history/{prompt_id}") as r:
+                if r.status == 200:
+                    history_data = await r.json()
+                    if prompt_id in history_data:
+                        step_data = history_data[prompt_id]
+                        if "status" in step_data and "messages" in step_data["status"]:
+                            for msg in step_data["status"]["messages"]:
+                                if msg[0] == "execution_error":
+                                    raise HTTPException(status_code=500, detail=f"ComfyUI execution error: {msg[1]}")
+                        return step_data
+            
+            if self.process.poll() is not None:
+                raise HTTPException(status_code=500, detail="ComfyUI server process crashed during workflow execution.")
+                
+            await asyncio.sleep(1)
+
+    def merge_overrides(self, base_graph, override_graph):
+        """Recursively merges dictionary values to safely support incoming n8n dynamic overrides."""
+        if not override_graph:
+            return base_graph
+        if isinstance(override_graph, str):
+            try: override_graph = json.loads(override_graph)
+            except Exception: return base_graph
+        
+        for node_id, node_data in override_graph.items():
+            if node_id in base_graph:
+                if "inputs" in node_data and "inputs" in base_graph[node_id]:
+                    base_graph[node_id]["inputs"].update(node_data["inputs"])
+                else:
+                    base_graph[node_id].update(node_data)
+            else:
+                base_graph[node_id] = node_data
+        return base_graph
+
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
@@ -176,7 +297,7 @@ class LTXEngine:
         incoming_image_urls = body.get("image_url")
         requested_length = body.get("length", 73)
         prompts_dict = body.get("prompts", {})
-        negative_prompt = body.get("negative", "worst quality, blurry, distorted")
+        negative_prompt = body.get("negative", "worst quality, blurry, low resolution, artifacts, watermarks")
 
         if isinstance(prompts_dict, dict):
             try:
@@ -191,10 +312,8 @@ class LTXEngine:
 
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
-        target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
-        target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
 
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
         if os.path.exists(dynamic_guides_dir): shutil.rmtree(dynamic_guides_dir)
@@ -206,10 +325,13 @@ class LTXEngine:
             elif isinstance(incoming_image_urls, str) and incoming_image_urls.strip():
                 urls_to_download = [u.strip() for u in incoming_image_urls.split(",") if u.strip()]
 
+        image_filenames = []
         if not urls_to_download:
+            fallback_path = os.path.join(dynamic_guides_dir, "guide_0.png")
             from PIL import Image
             img = Image.new('RGB', (384, 480), color='black')
-            img.save(os.path.join(dynamic_guides_dir, "guide_0.png"))
+            img.save(fallback_path)
+            image_filenames = ["dynamic_guides/guide_0.png"]
         else:
             async def download_one(session, url_str, target_dest):
                 from urllib.parse import urlparse
@@ -251,6 +373,7 @@ class LTXEngine:
             async with aiohttp.ClientSession() as download_session:
                 tasks = [download_one(download_session, url, os.path.join(dynamic_guides_dir, f"guide_{i}.png")) for i, url in enumerate(urls_to_download)]
                 await asyncio.gather(*tasks)
+            image_filenames = [f"dynamic_guides/guide_{i}.png" for i in range(len(urls_to_download))]
 
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
@@ -261,184 +384,124 @@ class LTXEngine:
         try:
             async with aiohttp.ClientSession() as session:
                 
+                # ==============================================================================
+                # SUB-GRAPH 1: TEXT ENCODING & CONDITIONING
+                # ==============================================================================
                 sg1_raw = body.get("subgraph_1")
                 if sg1_raw:
                     sg1 = json.loads(sg1_raw) if isinstance(sg1_raw, str) else sg1_raw
                 else:
-                    try:
-                        with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
-                            sg1 = json.load(f)
-                    except Exception:
-                        sg1 = {}
+                    with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
+                        sg1 = json.load(f)
+                
+                # Apply dynamic structural overrides if received via the n8n request payload
+                sg1 = self.merge_overrides(sg1, body.get("subgraph_1_override"))
 
-                for node_id, node_data in sg1.items():
-                    if node_data.get("class_type") == "LTXVSaveConditioning":
-                        if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
-                            node_data["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
-                        else:
-                            node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                # Inject configurations
+                sg1["243"]["inputs"]["ckpt_name"] = target_gemma
+                sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
+                sg1["112"]["inputs"]["text"] = negative_prompt
+                sg1["242"]["inputs"]["filename"] = "(NEGATIVE)conditioning"
+                sg1["244"]["inputs"]["filename"] = "(POSITIVE)conditioning"
 
+                print("🚀 Executing Sub-Graph 1 (Text Conditioning)...")
+                await self.execute_comfy_workflow(session, sg1)
+                
+                print("💾 Phase 1 Complete. Purging VRAM & System memory allocations...")
+                await self.clear_comfy_memory(session)
+
+                # ==============================================================================
+                # SUB-GRAPH 2: MAIN LATENT VIDEO INFERENCE
+                # ==============================================================================
                 sg2_raw = body.get("subgraph_2")
                 if sg2_raw:
                     sg2 = json.loads(sg2_raw) if isinstance(sg2_raw, str) else sg2_raw
                 else:
-                    try:
-                        with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
-                            sg2 = json.load(f)
-                    except Exception:
-                        sg2 = {}
+                    with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
+                        sg2 = json.load(f)
 
-                for node_id, node_data in sg2.items():
-                    if node_data.get("class_type") == "LTXVLoadConditioning":
-                        if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
-                            node_data["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
-                        else:
-                            node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                sg2 = self.merge_overrides(sg2, body.get("subgraph_2_override"))
 
+                # Inject weights and exact comma/newline file list sequences into the loaders
+                sg2["194"]["inputs"]["length"] = requested_length
+                sg2["238"]["inputs"]["unet_name"] = target_unet
+                sg2["238"]["inputs"]["weight_dtype"] = "fp8_e4m3fn"  # Enforces FP8 loader format inside the runtime
+                sg2["241"]["inputs"]["vae_name"] = target_video_vae
+                sg2["245"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                sg2["246"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                sg2["237"]["inputs"]["image_paths"] = "\n".join(image_filenames) # Specific files, avoids directory error
+                sg2["235"]["inputs"]["num_images"] = len(image_filenames)
+
+                print("🚀 Executing Sub-Graph 2 (Main Video Generation)...")
+                await self.execute_comfy_workflow(session, sg2)
+
+                print("💾 Phase 2 Complete. Purging UNET & sampler cache allocations...")
+                await self.clear_comfy_memory(session)
+
+                # ==============================================================================
+                # SUB-GRAPH 3: AUDIO CO-GENERATION & DECODING
+                # ==============================================================================
                 sg3_raw = body.get("subgraph_3")
                 if sg3_raw:
                     sg3 = json.loads(sg3_raw) if isinstance(sg3_raw, str) else sg3_raw
                 else:
-                    try:
-                        with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
-                            sg3 = json.load(f)
-                    except Exception:
-                        sg3 = {}
+                    with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
+                        sg3 = json.load(f)
 
-                for node_id, node_data in sg3.items():
-                    if node_data.get("class_type") == "LTXVLoadConditioning":
-                        if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
-                            node_data["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
-                        else:
-                            node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                sg3 = self.merge_overrides(sg3, body.get("subgraph_3_override"))
 
-                # ====================================================
-                # PHASE 1
-                # ====================================================
-                print("🧠 Phase 1 Active: Initializing Subgraph 1...")
+                # Populate missing/null loader configurations to resolve Node 298 validation failure
+                sg3["232"]["inputs"]["latent"] = "video_latent_output.latent"
+                sg3["278"]["inputs"]["unet_name"] = target_unet
+                sg3["278"]["inputs"]["weight_dtype"] = "fp8_e4m3fn" 
+                sg3["282"]["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                sg3["283"]["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+                sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
+                sg3["296"]["inputs"]["vae_name"] = target_video_vae
+                sg3["290"]["inputs"]["frames_number"] = int(requested_length * 2.02) # Scaled proportionally
+
+                # Enforce format to h264 MP4 so that output compiled file contains both video and the generated audio track
+                sg3["298"]["inputs"]["format"] = "video/h264-mp4"
+                sg3["298"]["inputs"]["frame_rate"] = 24
+
+                print("🚀 Executing Sub-Graph 3 (Audio Generation & Combine Decoders)...")
+                await self.execute_comfy_workflow(session, sg3)
+                print("💾 Phase 3 Complete. Unloading VRAM...")
+                await self.clear_comfy_memory(session)
+
+                # Scan output folder for compiled media outputs
+                output_files = []
+                for root_p, _, filenames in os.walk(out_dir):
+                    for name in filenames:
+                        if name.endswith((".mp4", ".gif", ".webm")):
+                            output_files.append(os.path.join(root_p, name))
+
+                if not output_files:
+                    raise HTTPException(status_code=500, detail="Inference finished but no combined output media files were detected in ComfyUI workspace.")
                 
-                if "243" in sg1:
-                    sg1["243"]["inputs"]["text_encoder"] = target_gemma
-                    sg1["243"]["inputs"]["ckpt_name"] = target_connector
-                    sg1["243"]["inputs"]["device"] = "default"  
-                if "246" in sg1: 
-                    if prompts_timeline_str:
-                        sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
-                if "112" in sg1:
-                    if negative_prompt:
-                        sg1["112"]["inputs"]["text"] = negative_prompt
+                output_files.sort(key=os.path.getmtime)
+                target_video_file = output_files[-1]
+                saved_filename = os.path.basename(target_video_file)
 
-                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg1}) as resp:
-                    r1 = await resp.json()
-                    if "error" in r1: raise HTTPException(status_code=400, detail=f"Subgraph 1 Error: {r1['error']}")
-                    prompt_id1 = r1['prompt_id']
+                # Upload compiled output video to R2 storage
+                target_key = f"outputs/{int(time.time())}_{saved_filename}"
+                print(f"📤 Uploading compiled video containing audio track to R2: {target_key}")
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.s3.upload_file,
+                    "video-asset-files-storage-workflow",
+                    target_video_file,
+                    target_key
+                )
 
-                while True:
-                    async with session.get("http://127.0.0.1:8188/history") as h_resp:
-                        history = await h_resp.json()
-                        if prompt_id1 in history: break
-                    await asyncio.sleep(1)
+                # Construct dynamic public asset response
+                public_path_url = f"https://pub-yourdomain.r2.dev/{target_key}" 
+                return {
+                    "status": "success",
+                    "file_key": target_key,
+                    "public_url": public_path_url,
+                    "filename": saved_filename
+                }
 
-                print("🔀 Phase 1 Complete. Evicting Gemma completely from GPU memory blocks...")
-                async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as free_resp:
-                    await free_resp.read()
-                
-                import torch
-                torch.cuda.empty_cache()
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-
-                # ====================================================
-                # PHASE 2
-                # ====================================================
-                print("🎬 Phase 2 Active: Initializing Subgraph 2...")
-
-                if "238" in sg2:
-                    sg2["238"]["inputs"]["unet_name"] = target_unet
-                if "248" in sg2: 
-                    sg2["248"]["inputs"]["lora_name"] = target_detailer_lora
-                if "194" in sg2:
-                    sg2["194"]["inputs"]["length"] = int(requested_length)
-                if "237" in sg2:
-                    sg2["237"]["inputs"]["image_paths"] = dynamic_guides_dir
-                if "235" in sg2:
-                    sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
-                
-                if "241" in sg2:
-                    sg2["241"]["inputs"]["vae_name"] = target_video_vae
-
-                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg2}) as resp:
-                    r2 = await resp.json()
-                    if "error" in r2: raise HTTPException(status_code=400, detail=f"Subgraph 2 Error: {r2['error']}")
-                    prompt_id2 = r2['prompt_id']
-
-                while True:
-                    async with session.get("http://127.0.0.1:8188/history") as h_resp:
-                        history = await h_resp.json()
-                        if prompt_id2 in history: break
-                    await asyncio.sleep(4)
-
-                print("💾 Phase 2 Complete. Latents cached to disk storage layers.")
-                
-                # Explicit purge executed directly after Phase 2 completion
-                print("🔀 Phase 2 Cleanup. Purging UNET completely from GPU memory blocks...")
-                async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as free_resp2:
-                    await free_resp2.read()
-                
-                torch.cuda.empty_cache()
-                ctypes.CDLL("libc.so.6").malloc_trim(0)
-
-                latent_files = [f for f in os.listdir(out_dir) if f.endswith(".latent")]
-                if latent_files:
-                    latent_files.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-                    src_latent = os.path.join(out_dir, latent_files[0])
-                    dest_latent = os.path.join(out_dir, "video_latent_output.latent")
-                    if src_latent != dest_latent:
-                        shutil.copy(src_latent, dest_latent)
-                        print(f"Copied latent from {src_latent} to {dest_latent} for Subgraph 3 compatibility.")
-
-                # ====================================================
-                # PHASE 3
-                # ====================================================
-                print("🎵 Phase 3 Active: Initializing Subgraph 3...")
-
-                if "278" in sg3: 
-                    sg3["278"]["inputs"]["unet_name"] = target_unet
-                
-                if "279" in sg3: 
-                    sg3["279"]["inputs"]["lora_name"] = target_detailer_lora
-                    sg3["279"]["class_type"] = "LoraLoaderModelOnly"
-                    if "strength_clip" in sg3["279"]["inputs"]:
-                        del sg3["279"]["inputs"]["strength_clip"]
-
-                if "295" in sg3:
-                    sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
-                if "296" in sg3:
-                    sg3["296"]["inputs"]["vae_name"] = target_video_vae
-                if "290" in sg3: 
-                    sg3["290"]["inputs"]["frames_number"] = int(requested_length)
-
-                if "298" in sg3:
-                    if "290" in sg3:
-                        sg3["298"]["inputs"]["frame_rate"] = sg3["290"]["inputs"]["frame_rate"]
-                    else:
-                        sg3["298"]["inputs"]["frame_rate"] = 25
-
-                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg3}) as resp:
-                    r3 = await resp.json()
-                    if "error" in r3: raise HTTPException(status_code=400, detail=f"Subgraph 3 Error: {r3['error']}")
-                    prompt_id3 = r3['prompt_id']
-
-                while True:
-                    async with session.get("http://127.0.0.1:8188/history") as h_resp:
-                        history = await h_resp.json()
-                        if prompt_id3 in history: break
-                    await asyncio.sleep(4)
-
-            videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
-            if not videos: raise HTTPException(status_code=500, detail="Output tracking buffers are empty.")
-                
-            videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
-            with open(os.path.join(out_dir, videos[0]), "rb") as f:
-                return Response(content=f.read(), media_type="video/mp4")
         finally:
             ram_task.cancel()
