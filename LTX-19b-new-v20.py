@@ -1,7 +1,3 @@
-# ==============================================================================
-# IMPORTS & ENVIRONMENT SETUP
-# Purpose: Load all necessary asynchronous and system execution modules.
-# ==============================================================================
 import modal
 import subprocess
 import time
@@ -16,11 +12,7 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# ==============================================================================
-# CONTAINER IMAGE BUILDER
-# Purpose: Construct the Linux environment, install CUDA compilers, and fetch 
-# all required Python dependencies for PyTorch and ComfyUI.
-# ==============================================================================
+# Switched from ubuntu24.04 to the official ubuntu22.04 CUDA tag
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
     add_python="3.12"
@@ -47,11 +39,6 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# ==============================================================================
-# COMFYUI REPOSITORY & CUSTOM NODE INGESTION
-# Purpose: Clone the core ComfyUI engine and all community/custom extensions
-# required for the LTX video generation graphs.
-# ==============================================================================
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -76,11 +63,6 @@ final_image = build_image.run_commands(
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124"
 )
 
-# ==============================================================================
-# MODAL APP CONFIGURATION
-# Purpose: Define hardware requirements, attach model weights via Modal volumes,
-# and define the fast L4 container footprint.
-# ==============================================================================
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -94,12 +76,6 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
     timeout=3600 
 )
 class LTXEngine:
-    
-    # ==========================================================================
-    # BACKGROUND PROCESS MANAGERS
-    # Purpose: Capture stdout logs for the Modal dashboard and aggressively
-    # free host memory to prevent kernel panics.
-    # ==========================================================================
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
@@ -114,11 +90,6 @@ class LTXEngine:
                 except Exception: pass
             await asyncio.sleep(2)
 
-    # ==========================================================================
-    # CONTAINER INITIALIZATION (ENTER)
-    # Purpose: Map the model weights from the Modal volume to ComfyUI, configure 
-    # Cloudflare S3, and boot the local ComfyUI fast-API server.
-    # ==========================================================================
     @modal.enter()
     def start_comfy(self):
         import boto3
@@ -147,10 +118,21 @@ class LTXEngine:
             region_name="auto"
         )
 
-        init_file_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
-        if os.path.exists(init_file_path):
-            patch_code = """\ntry:\n    import comfy.samplers\n    _orig_set_conds = comfy.samplers.CFGGuider.set_conds\n    def _patched_set_conds(self, positive, negative):\n        self.raw_conds = (positive, negative)\n        return _orig_set_conds(self, positive, negative)\n    comfy.samplers.CFGGuider.set_conds = _patched_set_conds\nexcept Exception: pass\n"""
-            with open(init_file_path, "a") as f: f.write(patch_code)
+        # =====================================================================
+        # 🔥 THE ULTIMATE HOT-PATCH: NATIVE TORCH SAVING
+        # completely replace safetensors with native PyTorch .pt formats
+        # to support the complex nested arrays from LTXVMultiPromptProvider
+        # =====================================================================
+        saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
+        if os.path.exists(saver_path):
+            with open(saver_path, "w") as f:
+                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVSaveConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        return {"required": {"conditioning": ("CONDITIONING",), "file_name": ("STRING", {"default": "conditioning.pt"}), "device": (["default", "float16", "bfloat16", "float32"],)}}\n    RETURN_TYPES = ()\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n    OUTPUT_NODE = True\n\n    def execute(self, conditioning, file_name, device):\n        output_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(output_dir, file_name)\n        def recursive_cast(obj, dtype):\n            if isinstance(obj, torch.Tensor):\n                if obj.is_floating_point(): return obj.to(dtype).contiguous()\n                return obj.contiguous()\n            elif isinstance(obj, dict): return {k: recursive_cast(v, dtype) for k, v in obj.items()}\n            elif isinstance(obj, list): return [recursive_cast(v, dtype) for v in obj]\n            elif isinstance(obj, tuple): return tuple(recursive_cast(v, dtype) for v in obj)\n            return obj\n        target_dtype = torch.bfloat16 if device == "bfloat16" else torch.float16 if device == "float16" else torch.float32\n        converted = conditioning if device == "default" else recursive_cast(conditioning, target_dtype)\n        torch.save(converted, file_path)\n        return ()\n''')
+                
+        loader_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_loader.py"
+        if os.path.exists(loader_path):
+            with open(loader_path, "w") as f:
+                f.write('''import torch\nimport os\nimport folder_paths\n\nclass LTXVLoadConditioning:\n    @classmethod\n    def INPUT_TYPES(s):\n        input_dir = folder_paths.get_output_directory()\n        files = [f for f in os.listdir(input_dir) if f.endswith(".pt") or f.endswith(".safetensors")] if os.path.exists(input_dir) else []\n        return {"required": {"file_name": (files,), "device": (["default", "float16", "bfloat16", "float32"],)}}\n    RETURN_TYPES = ("CONDITIONING",)\n    FUNCTION = "execute"\n    CATEGORY = "Lightricks/LTXVideo"\n\n    def execute(self, file_name, device):\n        input_dir = folder_paths.get_output_directory()\n        file_path = os.path.join(input_dir, file_name)\n        conditioning = torch.load(file_path, weights_only=False)\n        def recursive_cast(obj, dtype):\n            if isinstance(obj, torch.Tensor):\n                if obj.is_floating_point(): return obj.to(dtype).contiguous()\n                return obj.contiguous()\n            elif isinstance(obj, dict): return {k: recursive_cast(v, dtype) for k, v in obj.items()}\n            elif isinstance(obj, list): return [recursive_cast(v, dtype) for v in obj]\n            elif isinstance(obj, tuple): return tuple(recursive_cast(v, dtype) for v in obj)\n            return obj\n        target_dtype = torch.bfloat16 if device == "bfloat16" else torch.float16 if device == "float16" else torch.float32\n        if device != "default": conditioning = recursive_cast(conditioning, target_dtype)\n        return (conditioning,)\n''')
+        # =====================================================================
 
         print("🚀 Launching High-Speed Unthrottled LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
@@ -183,11 +165,6 @@ class LTXEngine:
             except Exception: time.sleep(2)
         os._exit(1)
 
-    # ==========================================================================
-    # MAIN API GENERATION ENDPOINT
-    # Purpose: Receive the n8n payload, download any necessary guidance images,
-    # and execute the 3-phase ComfyUI subgraphs sequentially.
-    # ==========================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
@@ -285,24 +262,47 @@ class LTXEngine:
 
         try:
             async with aiohttp.ClientSession() as session:
-                # ==============================================================
-                # PHASE 1 EXECUTION
-                # Purpose: Process text conditioning through Gemma-3, save the 
-                # latent conditions to disk, and purge VRAM completely.
-                # ==============================================================
-                print("🧠 Phase 1 Active: Initializing Subgraph 1...")
-                sg1_raw = body.get("subgraph_1")
-                if sg1_raw:
-                    sg1 = json.loads(sg1_raw) if isinstance(sg1_raw, str) else sg1_raw
-                else:
-                    with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
-                        sg1 = json.load(f)
+                
+                # ====================================================
+                # PRE-FLIGHT: Update Subgraphs to use native .pt format
+                # ====================================================
+                sg1 = body.get("subgraph_1", {})
+                if isinstance(sg1, str): sg1 = json.loads(sg1)
+                for node_id, node_data in sg1.items():
+                    if node_data.get("class_type") == "LTXVSaveConditioning":
+                        if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
+                            node_data["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                        else:
+                            node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
 
+                sg2 = body.get("subgraph_2", {})
+                if isinstance(sg2, str): sg2 = json.loads(sg2)
+                for node_id, node_data in sg2.items():
+                    if node_data.get("class_type") == "LTXVLoadConditioning":
+                        if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
+                            node_data["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                        else:
+                            node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+
+                sg3 = body.get("subgraph_3", {})
+                if isinstance(sg3, str): sg3 = json.loads(sg3)
+                for node_id, node_data in sg3.items():
+                    if node_data.get("class_type") == "LTXVLoadConditioning":
+                        if "POSITIVE" in str(node_data.get("inputs", {}).get("file_name", "")).upper():
+                            node_data["inputs"]["file_name"] = "(POSITIVE)conditioning.pt"
+                        else:
+                            node_data["inputs"]["file_name"] = "(NEGATIVE)conditioning.pt"
+
+                # ====================================================
+                # PHASE 1: SUBGRAPH 1 - Language Execution Pass
+                # ====================================================
+                print("🧠 Phase 1 Active: Initializing Subgraph 1...")
+                
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
                     sg1["243"]["inputs"]["device"] = "default"  
-                if "246" in sg1:
+                if "246" in sg1: 
                     if prompts_timeline_str:
                         sg1["246"]["inputs"]["prompts"] = prompts_timeline_str
                 if "112" in sg1:
@@ -328,18 +328,10 @@ class LTXEngine:
                 torch.cuda.empty_cache()
                 ctypes.CDLL("libc.so.6").malloc_trim(0)
 
-                # ==============================================================
-                # PHASE 2 EXECUTION
-                # Purpose: Read text conditionings, run UNET sampling loops for 
-                # the raw video format, and drop latents to disk.
-                # ==============================================================
+                # ====================================================
+                # PHASE 2: SUBGRAPH 2 - Pure Video Sampling Pass
+                # ====================================================
                 print("🎬 Phase 2 Active: Initializing Subgraph 2...")
-                sg2_raw = body.get("subgraph_2")
-                if sg2_raw:
-                    sg2 = json.loads(sg2_raw) if isinstance(sg2_raw, str) else sg2_raw
-                else:
-                    with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
-                        sg2 = json.load(f)
 
                 if "238" in sg2:
                     sg2["238"]["inputs"]["unet_name"] = target_unet
@@ -351,11 +343,6 @@ class LTXEngine:
                     sg2["237"]["inputs"]["image_paths"] = dynamic_guides_dir
                 if "235" in sg2:
                     sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
-                
-                if "245" in sg2:
-                    sg2["245"]["inputs"]["file_name"] = "POSITIVEconditioning.safetensors"
-                if "246" in sg2:
-                    sg2["246"]["inputs"]["file_name"] = "NEGATIVEconditioning.safetensors"
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg2}) as resp:
                     r2 = await resp.json()
@@ -379,18 +366,10 @@ class LTXEngine:
                         shutil.copy(src_latent, dest_latent)
                         print(f"Copied latent from {src_latent} to {dest_latent} for Subgraph 3 compatibility.")
 
-                # ==============================================================
-                # PHASE 3 EXECUTION
-                # Purpose: Combine saved text conditionings and video latents to 
-                # run audio synthesis, then package into final MP4 stream.
-                # ==============================================================
+                # ====================================================
+                # PHASE 3: SUBGRAPH 3 - Audio Synthesis & Final Pack
+                # ====================================================
                 print("🎵 Phase 3 Active: Initializing Subgraph 3...")
-                sg3_raw = body.get("subgraph_3")
-                if sg3_raw:
-                    sg3 = json.loads(sg3_raw) if isinstance(sg3_raw, str) else sg3_raw
-                else:
-                    with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
-                        sg3 = json.load(f)
 
                 if "278" in sg3: 
                     sg3["278"]["inputs"]["unet_name"] = target_unet
@@ -402,11 +381,6 @@ class LTXEngine:
                     sg3["296"]["inputs"]["vae_name"] = target_video_vae
                 if "290" in sg3: 
                     sg3["290"]["inputs"]["frames_number"] = int(requested_length)
-                
-                if "282" in sg3:
-                    sg3["282"]["inputs"]["file_name"] = "POSITIVEconditioning.safetensors"
-                if "283" in sg3:
-                    sg3["283"]["inputs"]["file_name"] = "NEGATIVEconditioning.safetensors"
 
                 async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg3}) as resp:
                     r3 = await resp.json()
@@ -419,11 +393,6 @@ class LTXEngine:
                         if prompt_id3 in history: break
                     await asyncio.sleep(4)
 
-            # ==============================================================
-            # RESPONSE RETURN
-            # Purpose: Buffer the generated MP4 file from disk and return 
-            # it back over the API route as raw binary video.
-            # ==============================================================
             videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
             if not videos: raise HTTPException(status_code=500, detail="Output tracking buffers are empty.")
                 
