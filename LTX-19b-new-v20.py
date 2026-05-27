@@ -57,9 +57,13 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
+    # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
+    # Re-enforce kornia and numpy limits to prevent array mismatches
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    "pip install git+https://github.com/thu-ml/SageAttention.git"
+    # ⚡ Optimized Fast SageAttention Installation using pre-cloned source and build environment locks
+    "git clone https://github.com/thu-ml/SageAttention.git /workspace/SageAttention",
+    "cd /workspace/SageAttention && pip install --no-build-isolation ."
 )
 
 app = modal.App("ltx-2-19b-v20-api")
