@@ -15,6 +15,7 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
+
 # ==============================================================================
 # CONTAINER IMAGE BUILDER
 # ==============================================================================
@@ -25,7 +26,7 @@ base_image = modal.Image.from_registry(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 ).env({
-    "CACHE_BUST": "1"  # Increment this value to force a complete rebuild of all layers
+    "CACHE_BUST": "2"  # Incremented to force Modal to build a fresh layer
 })
 
 build_image = base_image.env({
@@ -37,10 +38,6 @@ build_image = base_image.env({
     "CC": "gcc",
     "CXX": "g++"
 }).pip_install(
-    # Install PyTorch with CUDA 12.4 first to block generic PyPI packages from installing different builds
-    "torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1",
-    extra_options="--index-url https://download.pytorch.org/whl/cu124"
-).pip_install(
     "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
     "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
 ).pip_install(
@@ -70,8 +67,14 @@ final_image = build_image.run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install -r {} \;"
 ).run_commands(
     "python3.12 -m pip install --no-cache-dir sageattention",
-    "python3.12 -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
+    "python3.12 -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
+    # FIX: The PyTorch uninstallation/reinstallation MUST happen here as the very last step.
+    # This overwrites any generic PyTorch 2.12 versions fetched by the custom nodes above.
+    "python3.12 -m pip uninstall -y torch torchvision torchaudio",
+    "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124"
 )
+
+
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
