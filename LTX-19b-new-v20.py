@@ -138,10 +138,12 @@ class LTXEngine:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # FIXED: Added '--gpu-only' flag to force everything into VRAM and prevent slow CPU offloads
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
+            "--gpu-only"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -268,7 +270,7 @@ class LTXEngine:
                 if "243" in sg1:
                     sg1["243"]["inputs"]["text_encoder"] = target_gemma
                     sg1["243"]["inputs"]["ckpt_name"] = target_connector
-                    sg1["243"]["inputs"]["device"] = "cuda"  # FORCE CUDA FOR SUPER-FAST INFERENCE
+                    sg1["243"]["inputs"]["device"] = "default"  # FIXED: Set back to valid 'default' (relying on server-wide GPU-only flag instead)
                 if "239" in sg1:
                     if prompts_timeline_str:
                         sg1["239"]["inputs"]["text"] = prompts_timeline_str
