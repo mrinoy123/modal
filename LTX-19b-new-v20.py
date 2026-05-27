@@ -44,38 +44,9 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# ==============================================================================
-# CONTAINER IMAGE BUILDER
-# ==============================================================================
-base_image = modal.Image.from_registry(
-    "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
-    add_python="3.12"
-).apt_install(
-    "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
-    "build-essential", "ninja-build", "cmake", "clang", "llvm"
-)
-
-build_image = base_image.env({
-    "CUDA_HOME": "/usr/local/cuda",
-    "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
-    "FORCE_CUDA": "1",
-    "TORCH_CUDA_ARCH_LIST": "8.9", 
-    "MAX_JOBS": "1",
-    "CC": "gcc",
-    "CXX": "g++"
-}).pip_install(
-    "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
-    "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
-).pip_install(
-    "pandas", "numexpr", "pytz", "python-dateutil", 
-    "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
-    "decord", "imageio", "scikit-image", "numba", "einops", 
-    "transformers", "diffusers", "accelerate", "bitsandbytes"
-)
-
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-    "pip install -r /workspace/ComfyUI/requirements.txt"
+    "python3.12 -m pip install -r /workspace/ComfyUI/requirements.txt"
 ).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
@@ -89,15 +60,14 @@ final_image = build_image.run_commands(
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
-    "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
-    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
+    "python3.12 -m pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
+    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install -r {} \;"
 ).run_commands(
-    # FIX: Modal Cache Bust - Modified strings to force rebuilding this layer
-    "pip install --no-cache-dir sageattention",
-    "pip uninstall -y torch torchvision torchaudio",
-    # FIX: Explicitly specify +cu124 so pip cannot fetch the wrong binary wheels
-    "pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
-    "pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
+    # Cache bust implementation to force rebuild on clean environment
+    "python3.12 -m pip install --no-cache-dir sageattention",
+    "python3.12 -m pip uninstall -y torch torchvision torchaudio",
+    "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
+    "python3.12 -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\""
 )
 
 app = modal.App("ltx-2-19b-v20-api")
@@ -244,8 +214,9 @@ class LTXVLoadConditioning:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
+        # Explicit python3.12 target prevents mapping to system python profiles
         self.process = subprocess.Popen([
-            "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
+            "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--use-sage-attention", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
@@ -332,7 +303,7 @@ class LTXVLoadConditioning:
             elif "body" in body: body = body["body"]
 
         incoming_image_urls = body.get("image_url")
-        requested_length = body.get("length", 73)
+        requested_length = int(body.get("length", 73))
         prompts_dict = body.get("prompts", {})
         negative_prompt = body.get("negative", "worst quality, blurry, low resolution, artifacts, watermarks")
 
