@@ -12,12 +12,6 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-# ==========================================
-# PART 1: Infrastructure Configuration & Base Image
-# Purpose: Defines the core operating system, environment variables, system-level dependencies, and the base python libraries needed for video processing and AI model inference.
-# ==========================================
-
-# Setup optimized development container image (Aligned to CUDA 12.4.1 to match PyTorch cu124 compilation)
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.4.1-devel-ubuntu24.04", 
     add_python="3.12"
@@ -26,7 +20,6 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 )
 
-# Build image with explicit cache-locked dependencies
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -45,12 +38,7 @@ build_image = base_image.env({
     "transformers", "diffusers", "accelerate", "bitsandbytes"
 )
 
-# ==========================================
-# PART 2: Advanced Optimization Patches & Custom Node Installation
-# Purpose: Clean compilation of required nodes, dependency locks, and SageAttention binaries.
-# ==========================================
 
-# Clone ComfyUI and install required custom nodes (VFI Purged)
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "pip install -r /workspace/ComfyUI/requirements.txt"
@@ -70,19 +58,10 @@ final_image = build_image.run_commands(
     "pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec pip install -r {} \;"
 ).run_commands(
-    # 🔥 THE SLEDGEHAMMER: Force overwrite any rogue PyTorch upgrades from the custom nodes.
     "pip install --force-reinstall torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124",
-    # Re-enforce kornia and numpy limits to prevent array mismatches
     "pip install --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    # ⚡ Install SageAttention via the native default GitHub installation as requested
     "pip install git+https://github.com/thu-ml/SageAttention.git"
 )
-
-
-# ==========================================
-# PART 3: Production Class Definition & Engine Initialization
-# Purpose: Defines the Modal application resources, handles the pre-execution model symlinking, and launches the ComfyUI subprocess.
-# ==========================================
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
@@ -102,7 +81,6 @@ class LTXEngine:
             if line: print(f"[ComfyUI] {line.strip()}")
 
     async def _ram_squeezer(self):
-        print("🛡️ RAM Watchdog Active. Forcing Linux to drop page cache...")
         while True:
             try:
                 with open('/proc/sys/vm/drop_caches', 'w') as f:
@@ -118,17 +96,13 @@ class LTXEngine:
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
         
-        # Removed "vfi" from the directory list
         dirs = ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "gguf", "loras"]
-        for d in dirs:
-            os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
+        for d in dirs: os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         if os.path.exists("/mnt/weights"):
             for root_dir, _, files in os.walk("/mnt/weights"):
                 for filename in files:
-                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")):
-                        continue
-                        
+                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")): continue
                     src_path = os.path.join(root_dir, filename)
                     for target_dir in ["unet", "vae", "clip", "text_encoders", "text_encoder", "checkpoints", "diffusion_models", "loras"]:
                         dest = os.path.join(base_models_dir, target_dir, filename)
@@ -144,27 +118,12 @@ class LTXEngine:
             region_name="auto"
         )
 
-        # Lightweight attribute patch to prevent CFGGuider raw_conds AttributeErrors during looping sampling
         init_file_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/__init__.py"
         if os.path.exists(init_file_path):
-            print("🔗 Injecting CFGGuider attribute patch into ComfyUI-LTXVideo...")
-            patch_code = """
-# Monkeypatch comfy.samplers.CFGGuider to support raw_conds
-try:
-    import comfy.samplers
-    _orig_set_conds = comfy.samplers.CFGGuider.set_conds
-    def _patched_set_conds(self, positive, negative):
-        self.raw_conds = (positive, negative)
-        return _orig_set_conds(self, positive, negative)
-    comfy.samplers.CFGGuider.set_conds = _patched_set_conds
-    print("Successfully monkeypatched comfy.samplers.CFGGuider to support raw_conds attribute!")
-except Exception as e:
-    print("Failed to monkeypatch comfy.samplers.CFGGuider:", e)
-"""
-            with open(init_file_path, "a") as f:
-                f.write(patch_code)
+            patch_code = """\ntry:\n    import comfy.samplers\n    _orig_set_conds = comfy.samplers.CFGGuider.set_conds\n    def _patched_set_conds(self, positive, negative):\n        self.raw_conds = (positive, negative)\n        return _orig_set_conds(self, positive, negative)\n    comfy.samplers.CFGGuider.set_conds = _patched_set_conds\nexcept Exception: pass\n"""
+            with open(init_file_path, "a") as f: f.write(patch_code)
 
-        print("🚀 Launching Clean LTX Server Engine...")
+        print("🚀 Launching High-Speed Unthrottled LTX Server Engine...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
         os.makedirs("/tmp/hf_offload", exist_ok=True)
 
@@ -176,12 +135,11 @@ except Exception as e:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Configured with lowvram and disable-smart-memory to protect the 24 GB VRAM ceiling on L4
+        # Low-VRAM and smart memory throttling completely stripped for maximum native performance
         self.process = subprocess.Popen([
             "python", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc",
-            "--lowvram", "--disable-smart-memory"
+            "--bf16-vae", "--disable-xformers", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -189,247 +147,77 @@ except Exception as e:
 
         start_time = time.time()
         while time.time() - start_time < 300:
-            if self.process.poll() is not None:
-                print("❌ Startup Crash!")
-                os._exit(1)
+            if self.process.poll() is not None: os._exit(1)
             try:
                 with urllib.request.urlopen("http://127.0.0.1:8188/", timeout=1) as response:
-                    if response.status == 200:
-                        print("⚡ LTX-2 API ONLINE!")
-                        return
-            except Exception:
-                time.sleep(2)
+                    if response.status == 200: return
+            except Exception: time.sleep(2)
         os._exit(1)
 
-# ==========================================
-# PART 4: Hybrid Endpoint Handler & Execution Process
-# Purpose: Exposes a FastAPI endpoint to process incoming requests, handle dynamic JSON injection, download assets, and render output.
-# ==========================================
 
-    @modal.fastapi_endpoint(method="POST")
+
+@modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
             raise HTTPException(status_code=403, detail="Unauthorized")
         
         body = await request.json()
-        
         if isinstance(body, dict):
-            if "json" in body:
-                body = body["json"]
-            elif "body" in body:
-                body = body["body"]
+            if "json" in body: body = body["json"]
+            elif "body" in body: body = body["body"]
 
-        image_url = body.get("image_url") if isinstance(body, dict) else None
-        workflow = body.get("workflow") if isinstance(body, dict) else body
-        requested_length = body.get("length") if isinstance(body, dict) else None
-        prompts_override = body.get("prompts") if isinstance(body, dict) else None
-        prompt_override = body.get("prompt") if isinstance(body, dict) else None
+        incoming_image_urls = body.get("image_url")
+        requested_length = body.get("length", 73)
+        prompts_dict = body.get("prompts", {})
+        negative_prompt = body.get("negative", "worst quality, blurry, distorted")
 
-        if isinstance(workflow, str):
-            try: workflow = json.loads(workflow)
-            except Exception: pass
+        # Format prompt payload map into a valid string timeline block for the BatchPromptSchedule node
+        if isinstance(prompts_dict, dict):
+            formatted_timeline_list = []
+            for frame, text in prompts_dict.items():
+                formatted_timeline_list.append(f'"{frame}": "{text}"')
+            prompts_timeline_str = ",\n".join(formatted_timeline_list)
+        else:
+            prompts_timeline_str = str(prompts_dict)
 
-        if isinstance(workflow, dict) and "workflow" in workflow:
-            if not any("class_type" in v for v in workflow.values() if isinstance(v, dict)):
-                workflow = workflow["workflow"]
-
-        if isinstance(workflow, dict):
-            if "nodes" in workflow and "last_node_id" in workflow:
-                raise HTTPException(status_code=400, detail="Format Mismatch: Passed Canvas UI instead of API layout.")
-
+        # Baseline Target Weights
         target_unet = "ltx-2-19b-distilled-fp8.safetensors"
         target_gemma = "gemma-3-12b-it-FP8.safetensors"
         target_connector = "ltx-2-19b-embeddings_connector_dev_bf16.safetensors"
         target_video_vae = "ltx-2-19b-dev_video_vae.safetensors"
         target_audio_vae = "ltx-2-19b-dev_audio_vae.safetensors"
-        target_distilled_lora = "ltx-2-19b-distilled-lora-384.safetensors"
         target_detailer_lora = "ltx-2-19b-ic-lora-detailer.safetensors"
 
-        def find_node(cls_name):
-            return next((k for k, v in workflow.items() if v.get("class_type") == cls_name), None)
-
         dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
-        if os.path.exists(dynamic_guides_dir):
-            shutil.rmtree(dynamic_guides_dir)
+        if os.path.exists(dynamic_guides_dir): shutil.rmtree(dynamic_guides_dir)
         os.makedirs(dynamic_guides_dir, exist_ok=True)
 
         urls_to_download = []
-        if image_url:
-            if isinstance(image_url, list):
-                urls_to_download = [str(u).strip() for u in image_url if str(u).strip()]
-            elif isinstance(image_url, str) and image_url.strip():
-                if "," in image_url:
-                    urls_to_download = [u.strip() for u in image_url.split(",") if u.strip()]
-                else:
-                    urls_to_download = [image_url.strip()]
+        if incoming_image_urls:
+            if isinstance(incoming_image_urls, list): urls_to_download = [str(u).strip() for u in incoming_image_urls if str(u).strip()]
+            elif isinstance(incoming_image_urls, str) and incoming_image_urls.strip():
+                urls_to_download = [u.strip() for u in incoming_image_urls.split(",") if u.strip()]
 
         if not urls_to_download:
             from PIL import Image
-            img = Image.new('RGB', (1024, 1024), color='black')
+            img = Image.new('RGB', (384, 480), color='black')
             img.save(os.path.join(dynamic_guides_dir, "guide_0.png"))
-            print("Creating black canvas fallback guide.")
         else:
             async def download_one(session, url_str, target_dest):
                 from urllib.parse import urlparse
                 parsed = urlparse(url_str)
-                is_r2_storage = ("r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme)
-                
-                if is_r2_storage:
+                if "r2.cloudflarestorage.com" in url_str or "pub-" in url_str or parsed.netloc == "" or not parsed.scheme:
                     file_key = parsed.path.lstrip('/')
-                    while "//" in file_key:
-                        file_key = file_key.replace("//", "/")
-                    print(f"📥 Fetching R2 file: {file_key}")
-                    await asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        self.s3.download_file, 
-                        "video-asset-files-storage-workflow", 
-                        file_key, 
-                        target_dest
-                    )
+                    while "//" in file_key: file_key = file_key.replace("//", "/")
+                    await asyncio.get_event_loop().run_in_executor(None, self.s3.download_file, "video-asset-files-storage-workflow", file_key, target_dest)
                 else:
-                    print(f"📥 Downloading HTTP file: {url_str}")
-                    try:
-                        async with session.get(url_str, timeout=120) as r:
-                            if r.status == 200:
-                                f_content = await r.read()
-                                with open(target_dest, "wb") as f:
-                                    f.write(f_content)
-                            else:
-                                raise Exception(f"HTTP code {r.status}")
-                    except Exception as err:
-                        print(f"HTTP direct download failed, falling back to urllib: {err}")
-                        await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            urllib.request.urlretrieve,
-                            url_str,
-                            target_dest
-                        )
+                    async with session.get(url_str, timeout=120) as r:
+                        if r.status == 200:
+                            with open(target_dest, "wb") as f: f.write(await r.read())
 
-            async with aiohttp.ClientSession() as session:
-                tasks = []
-                for idx, url in enumerate(urls_to_download):
-                    dest = os.path.join(dynamic_guides_dir, f"guide_{idx}.png")
-                    tasks.append(download_one(session, url, dest))
+            async with aiohttp.ClientSession() as download_session:
+                tasks = [download_one(download_session, url, os.path.join(dynamic_guides_dir, f"guide_{i}.png")) for i, url in enumerate(urls_to_download)]
                 await asyncio.gather(*tasks)
-
-        # Re-resolve dynamic absolute file references to avoid custom image loader directory errors
-        downloaded_paths = []
-        if urls_to_download:
-            for idx in range(len(urls_to_download)):
-                downloaded_paths.append(os.path.join(dynamic_guides_dir, f"guide_{idx}.png"))
-        else:
-            downloaded_paths.append(os.path.join(dynamic_guides_dir, "guide_0.png"))
-        
-        image_paths_str = "\n".join(downloaded_paths)
-
-        if isinstance(workflow, dict):
-            if requested_length is not None:
-                try:
-                    tgt_len = int(requested_length)
-                    if (tgt_len - 1) % 8 != 0:
-                        tgt_len = ((tgt_len - 1) // 8) * 8 + 1
-                        if tgt_len < 9: tgt_len = 9
-                    
-                    video_latent_node = find_node("EmptyLTXVLatentVideo")
-                    audio_latent_node = find_node("LTXVEmptyLatentAudio")
-                    
-                    if video_latent_node:
-                        workflow[video_latent_node]["inputs"]["length"] = tgt_len
-                    if audio_latent_node:
-                        workflow[audio_latent_node]["inputs"]["frames_number"] = tgt_len
-
-                    batch_prompt_nodes = [k for k, v in workflow.items() if v.get("class_type") == "BatchPromptSchedule"]
-                    for node in batch_prompt_nodes:
-                        workflow[node]["inputs"]["max_frames"] = tgt_len
-                except Exception as e:
-                    print(f"⚠️ Dynamic framing error: {e}")
-
-            if prompts_override or prompt_override:
-                multi_string_node = find_node("MultiStringPrompts")
-                if multi_string_node:
-                    if prompts_override:
-                        if isinstance(prompts_override, list):
-                            for idx, p_text in enumerate(prompts_override[:5]):
-                                workflow[multi_string_node]["inputs"][f"multi_prompt_{idx+1}"] = p_text
-                        elif isinstance(prompts_override, dict):
-                            for k, p_text in prompts_override.items():
-                                if k in workflow[multi_string_node]["inputs"]:
-                                    workflow[multi_string_node]["inputs"][k] = p_text
-                    elif prompt_override and isinstance(prompt_override, str):
-                        workflow[multi_string_node]["inputs"]["multi_prompt_1"] = prompt_override
-
-            sanitized_workflow = {}
-            for node_id, node_data in workflow.items():
-                if isinstance(node_data, dict) and "class_type" in node_data:
-                    if "inputs" not in node_data or node_data["inputs"] is None:
-                        node_data["inputs"] = {}
-
-                    class_type = node_data.get("class_type")
-
-                    if class_type in ["UNETLoader", "UnetLoaderGGUFAdvanced"]:
-                        if "unet_name" in node_data["inputs"]:
-                            node_data["inputs"]["unet_name"] = target_unet
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_unet
-                        if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                node_data["widgets_values"][0] = target_unet
-
-                    if class_type == "LTXAVTextEncoderLoader":
-                        node_data["inputs"]["text_encoder"] = target_gemma
-                        node_data["inputs"]["ckpt_name"] = target_connector
-
-                    if class_type in ["VAELoaderKJ", "VAELoader"]:
-                        if "vae_name" in node_data["inputs"]:
-                            node_data["inputs"]["vae_name"] = target_video_vae
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_video_vae
-
-                    if class_type == "LTXVAudioVAELoader":
-                        if "ckpt_name" in node_data["inputs"]:
-                            node_data["inputs"]["ckpt_name"] = target_audio_vae
-                        if "vae_name" in node_data["inputs"]:
-                            node_data["inputs"]["vae_name"] = target_audio_vae
-
-                    # Safe path formatting bypass for multiple image loaders
-                    if class_type in ["DenoMultiImageLoader", "MultiImageLoader"]:
-                        node_data["inputs"]["image_paths"] = image_paths_str
-
-                    if class_type == "LTXVEmptyLatentAudio":
-                        node_data["inputs"]["frame_rate"] = 12
-
-                    if class_type == "LoraLoader":
-                        lora_input_name = node_data["inputs"].get("lora_name") or ""
-                        if not lora_input_name and "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                            if len(node_data["widgets_values"]) > 0:
-                                lora_input_name = node_data["widgets_values"][0] or ""
-                        
-                        resolved_lora = None
-                        if "distilled" in str(lora_input_name).lower() or not lora_input_name:
-                            resolved_lora = target_distilled_lora
-                        elif "detail" in str(lora_input_name).lower() or "ic-lora" in str(lora_input_name).lower():
-                            resolved_lora = target_detailer_lora
-                        
-                        if resolved_lora:
-                            node_data["inputs"]["lora_name"] = resolved_lora
-                            if "widgets_values" in node_data and isinstance(node_data["widgets_values"], list):
-                                if len(node_data["widgets_values"]) > 0:
-                                    node_data["widgets_values"][0] = resolved_lora
-
-                    sanitized_workflow[str(node_id)] = node_data
-            
-            sage_node_id = find_node("LTX2MemoryEfficientSageAttentionPatch")
-            if sage_node_id:
-                sage_input = sanitized_workflow[sage_node_id]["inputs"].get("model")
-                if sage_input:
-                    for node_id, node_data in sanitized_workflow.items():
-                        if isinstance(node_data, dict) and "inputs" in node_data:
-                            for k, v in node_data["inputs"].items():
-                                if isinstance(v, list) and len(v) > 0 and v[0] == sage_node_id:
-                                    node_data["inputs"][k] = sage_input
-                del sanitized_workflow[sage_node_id]
-
-            workflow = sanitized_workflow
 
         out_dir = "/workspace/ComfyUI/output"
         if os.path.exists(out_dir): shutil.rmtree(out_dir)
@@ -439,30 +227,107 @@ except Exception as e:
 
         try:
             async with aiohttp.ClientSession() as session:
-                print("🎨 Running Pipeline...")
-                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": workflow}) as resp:
-                    res_json = await resp.json()
-                    if "error" in res_json or "prompt_id" not in res_json:
-                        error_msg = res_json.get("error", res_json)
-                        raise HTTPException(status_code=400, detail=f"Invalid JSON: {error_msg}")
-                    prompt_id = res_json['prompt_id']
+                # ====================================================
+                # PHASE 1: SUBGRAPH 1 - Language Execution Pass
+                # ====================================================
+                print("🧠 Phase 1 Active: Initializing Subgraph 1 (comfyui-ltx-20-subgraph-1(api).json)...")
+                with open("comfyui-ltx-20-subgraph-1(api).json", "r") as f:
+                    sg1 = json.load(f)
 
-                start_time = time.time()
+                # Overwrite internal node parameter targets dynamically matching API files
+                if "243" in sg1:
+                    sg1["243"]["inputs"]["text_encoder"] = target_gemma
+                    sg1["243"]["inputs"]["ckpt_name"] = target_connector
+                if "239" in sg1:
+                    sg1["239"]["inputs"]["text"] = prompts_timeline_str
+                    sg1["239"]["inputs"]["max_frames"] = int(requested_length)
+                    sg1["239"]["inputs"]["end_frame"] = int(requested_length)
+                if "112" in sg1:
+                    sg1["112"]["inputs"]["text"] = negative_prompt
+
+                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg1}) as resp:
+                    r1 = await resp.json()
+                    if "error" in r1: raise HTTPException(status_code=400, detail=f"Subgraph 1 Error: {r1['error']}")
+                    prompt_id1 = r1['prompt_id']
+
                 while True:
-                    if self.process.poll() is not None:
-                        raise HTTPException(status_code=500, detail="Backend server execution failure.")
-                    async with session.get("http://127.0.0.1:8188/history") as hist_resp:
-                        if hist_resp.status == 200:
-                            history = await hist_resp.json()
-                            if prompt_id in history:
-                                break
-                    if time.time() - start_time > 2400:
-                        raise HTTPException(status_code=540, detail="Execution timeout reached.")
-                    await asyncio.sleep(5)
+                    async with session.get("http://127.0.0.1:8188/history") as h_resp:
+                        history = await h_resp.json()
+                        if prompt_id1 in history: break
+                    await asyncio.sleep(1)
 
+                # WIPE GEMMA FROM VRAM: Clear space for unthrottled UNET sampling loops
+                print("🔀 Phase 1 Complete. Evicting Gemma completely from GPU memory blocks...")
+                async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as free_resp:
+                    await free_resp.read()
+                
+                import torch
+                torch.cuda.empty_cache()
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+                # ====================================================
+                # PHASE 2: SUBGRAPH 2 - Pure Video Sampling Pass
+                # ====================================================
+                print("🎬 Phase 2 Active: Initializing Subgraph 2 (comfyui-ltx-20-subgraph-2(api).json)...")
+                with open("comfyui-ltx-20-subgraph-2(api).json", "r") as f:
+                    sg2 = json.load(f)
+
+                if "238" in sg2:
+                    sg2["238"]["inputs"]["unet_name"] = target_unet
+                if "242" in sg2:
+                    sg2["242"]["inputs"]["lora_name"] = target_detailer_lora
+                if "194" in sg2:
+                    sg2["194"]["inputs"]["length"] = int(requested_length)
+                if "237" in sg2:
+                    sg2["237"]["inputs"]["image_paths"] = dynamic_guides_dir
+                if "235" in sg2:
+                    sg2["235"]["inputs"]["num_images"] = len(urls_to_download) if urls_to_download else 1
+
+                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg2}) as resp:
+                    r2 = await resp.json()
+                    if "error" in r2: raise HTTPException(status_code=400, detail=f"Subgraph 2 Error: {r2['error']}")
+                    prompt_id2 = r2['prompt_id']
+
+                while True:
+                    async with session.get("http://127.0.0.1:8188/history") as h_resp:
+                        history = await h_resp.json()
+                        if prompt_id2 in history: break
+                    await asyncio.sleep(4)
+
+                print("💾 Phase 2 Complete. Latents cached to disk storage layers.")
+
+                # ====================================================
+                # PHASE 3: SUBGRAPH 3 - Audio Synthesis & Final Pack
+                # ====================================================
+                print("🎵 Phase 3 Active: Initializing Subgraph 3 (comfyui-ltx-20-Subgraph-3(api).json)...")
+                with open("comfyui-ltx-20-Subgraph-3(api).json", "r") as f:
+                    sg3 = json.load(f)
+
+                if "279" in sg3:
+                    sg3["279"]["inputs"]["unet_name"] = target_unet
+                if "299" in sg3:
+                    sg3["299"]["inputs"]["lora_name"] = target_detailer_lora
+                if "295" in sg3:
+                    sg3["295"]["inputs"]["ckpt_name"] = target_audio_vae
+                if "296" in sg3:
+                    sg3["296"]["inputs"]["vae_name"] = target_video_vae
+                if "289" in sg3:
+                    sg3["289"]["inputs"]["frame_rate"] = 12
+
+                async with session.post("http://127.0.0.1:8188/prompt", json={"prompt": sg3}) as resp:
+                    r3 = await resp.json()
+                    if "error" in r3: raise HTTPException(status_code=400, detail=f"Subgraph 3 Error: {r3['error']}")
+                    prompt_id3 = r3['prompt_id']
+
+                while True:
+                    async with session.get("http://127.0.0.1:8188/history") as h_resp:
+                        history = await h_resp.json()
+                        if prompt_id3 in history: break
+                    await asyncio.sleep(4)
+
+            # Look for video output and respond with binary content streams
             videos = [v for v in os.listdir(out_dir) if v.endswith((".mp4", ".mkv", ".webm"))]
-            if not videos:
-                raise HTTPException(status_code=500, detail="Output generation target missing.")
+            if not videos: raise HTTPException(status_code=500, detail="Output tracking buffers are empty.")
                 
             videos.sort(key=lambda x: os.path.getmtime(os.path.join(out_dir, x)), reverse=True)
             with open(os.path.join(out_dir, videos[0]), "rb") as f:
