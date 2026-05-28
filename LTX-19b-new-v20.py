@@ -27,7 +27,7 @@ base_image = modal.Image.from_registry(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 ).env({
-    "FORCE_REBUILD_INDEX": "110"  # Forces Modal to ignore old corrupted caches and build fresh
+    "FORCE_REBUILD_INDEX": "111"  # Incremented to fully flush previous broken layers from Modal cache
 })
 
 # Globally locked compiler environment flags (as used in your working setup)
@@ -65,10 +65,11 @@ final_image = build_image.run_commands(
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install --no-cache-dir -r {} \;"
 ).run_commands(
     # Uninstalls old environments completely to avoid any pollution
-    "python3.12 -m pip uninstall -y torch torchvision torchaudio numpy kornia sageattention",
-    # Secures your exact compatible PyTorch architecture stack + tensor math requirements
+    "python3.12 -m pip uninstall -y torch torchvision torchaudio numpy kornia sageattention torchsde",
+    # Secures your exact compatible PyTorch architecture stack
     "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
-    "python3.12 -m pip install --no-cache-dir diffusers accelerate transformers numpy==1.26.4 kornia==0.7.3"
+    # FIX: Explicitly bundle torchsde into the structural dependency installation loop
+    "python3.12 -m pip install --no-cache-dir diffusers accelerate transformers torchsde numpy==1.26.4 kornia==0.7.3"
 ).run_commands(
     # Compiles SageAttention explicitly targeting your L4 (8.9) runtime platform variables
     "python3.12 -m pip install --no-cache-dir sageattention",
@@ -79,6 +80,7 @@ final_image = build_image.run_commands(
         "TORCH_CUDA_ARCH_LIST": "8.9"
     }
 )
+
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
