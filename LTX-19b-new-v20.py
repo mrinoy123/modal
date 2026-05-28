@@ -26,7 +26,7 @@ base_image = modal.Image.from_registry(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 ).env({
-    "CACHE_BUST": "2"  # Incremented to force Modal to build a fresh layer
+    "FORCE_REBUILD_INDEX": "108"  # Forces Modal to discard old corrupted layers
 })
 
 build_image = base_image.env({
@@ -37,20 +37,13 @@ build_image = base_image.env({
     "MAX_JOBS": "1",
     "CC": "gcc",
     "CXX": "g++"
-}).pip_install(
-    "fastapi", "aiohttp", "boto3", "triton>=3.1.0", 
-    "ninja", "setuptools>=70.0.0", "wheel", "pip>=24.0"
-).pip_install(
-    "pandas", "numexpr", "pytz", "python-dateutil", 
-    "scipy", "matplotlib", "colorama", "librosa", "soundfile", 
-    "decord", "imageio", "scikit-image", "numba", "einops", 
-    "transformers", "diffusers", "accelerate", "bitsandbytes"
+}).run_commands(
+    "python3.12 -m pip install --no-cache-dir fastapi aiohttp boto3 triton>=3.1.0 ninja setuptools>=70.0.0 wheel pip>=24.0",
+    "python3.12 -m pip install --no-cache-dir pandas numexpr pytz python-dateutil scipy matplotlib colorama librosa soundfile decord imageio scikit-image numba einops transformers diffusers accelerate bitsandbytes"
 )
 
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
-    "python3.12 -m pip install -r /workspace/ComfyUI/requirements.txt"
-).run_commands(
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
     "git clone https://github.com/Lightricks/ComfyUI-LTXVideo.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo",
     "git clone https://github.com/kijai/ComfyUI-KJNodes.git /workspace/ComfyUI/custom_nodes/ComfyUI-KJNodes",
@@ -63,17 +56,26 @@ final_image = build_image.run_commands(
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
-    "python3.12 -m pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/requirements.txt",
-    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install -r {} \;"
+    # Strip any dynamic torch requests so custom nodes don't break the environment
+    "sed -i '/torch/d' /workspace/ComfyUI/requirements.txt",
+    "python3.12 -m pip install --no-cache-dir -r /workspace/ComfyUI/requirements.txt",
+    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec sed -i '/torch/d' {} \;",
+    r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install --no-cache-dir -r {} \;"
 ).run_commands(
+    # Uninstall anything conflicting and install exact CUDA 12.4 binaries
+    "python3.12 -m pip uninstall -y torch torchvision torchaudio numpy kornia sageattention",
+    "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
+    "python3.12 -m pip install --no-cache-dir numpy==1.26.4 kornia==0.7.3"
+).run_commands(
+    # FIX: Isolate SageAttention with strict GPU environmental flags so it compiles the L4 kernels
     "python3.12 -m pip install --no-cache-dir sageattention",
-    "python3.12 -m pip install --no-cache-dir --force-reinstall numpy==1.26.4 \"kornia<=0.7.3\"",
-    # FIX: The PyTorch uninstallation/reinstallation MUST happen here as the very last step.
-    # This overwrites any generic PyTorch 2.12 versions fetched by the custom nodes above.
-    "python3.12 -m pip uninstall -y torch torchvision torchaudio",
-    "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124"
+    env={
+        "CUDA_HOME": "/usr/local/cuda",
+        "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
+        "FORCE_CUDA": "1",
+        "TORCH_CUDA_ARCH_LIST": "8.9"
+    }
 )
-
 
 
 app = modal.App("ltx-2-19b-v20-api")
