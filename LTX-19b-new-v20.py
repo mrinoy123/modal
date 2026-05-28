@@ -1,5 +1,7 @@
 # ==============================================================================
-# IMPORTS & ENVIRONMENT SETUP
+# PART 1: IMPORTS & ENVIRONMENT SETUP
+# Purpose: Import required libraries for Modal serverless execution, async 
+# processing, HTTP server handling, and system-level operations.
 # ==============================================================================
 import modal
 import subprocess
@@ -15,11 +17,11 @@ import ctypes
 from fastapi import Request, Response, HTTPException, Header
 from typing import Optional
 
-
 # ==============================================================================
-# CONTAINER IMAGE BUILDER
+# PART 2: BASE IMAGE & OS CONFIGURATION
+# Purpose: Initialize the foundation Docker image using Ubuntu 24.04 and 
+# CUDA 12.5.1. Installs core OS-level dependencies (git, compilers, ffmpeg).
 # ==============================================================================
-# Reverted to your working Ubuntu 24.04 + CUDA 12.5.1 base image blueprint
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
     add_python="3.12"
@@ -27,10 +29,14 @@ base_image = modal.Image.from_registry(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 ).env({
-    "FORCE_REBUILD_INDEX": "111"  # Incremented to fully flush previous broken layers from Modal cache
+    "FORCE_REBUILD_INDEX": "112"  # Incremented to flush Modal cache and apply the sageattention pin
 })
 
-# Globally locked compiler environment flags (as used in your working setup)
+# ==============================================================================
+# PART 3: CORE PYTHON DEPENDENCIES & ENVIRONMENT VARIABLES
+# Purpose: Lock CUDA compiler variables globally and install foundational 
+# Python packages like standard math, data manipulation, and web libraries.
+# ==============================================================================
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -44,6 +50,12 @@ build_image = base_image.env({
     "python3.12 -m pip install --no-cache-dir pandas numexpr pytz python-dateutil scipy matplotlib colorama librosa soundfile decord imageio scikit-image numba einops bitsandbytes"
 )
 
+# ==============================================================================
+# PART 4: COMFYUI & CUSTOM NODES CLONING + DEPENDENCY ISOLATION
+# Purpose: Clone the main ComfyUI repository along with all necessary custom 
+# nodes. Purges open-ended torch dependencies to prevent environment overriding,
+# then locks the exact PyTorch + cu124 stack, and pins sageattention==1.0.6.
+# ==============================================================================
 final_image = build_image.run_commands(
     "git clone https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI",
     "git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git /workspace/ComfyUI/custom_nodes/ComfyUI-VideoHelperSuite",
@@ -58,21 +70,17 @@ final_image = build_image.run_commands(
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
-    # Strip open-ended torch requirements from custom node setup files before they can run
     "sed -i '/torch/d' /workspace/ComfyUI/requirements.txt",
     "python3.12 -m pip install --no-cache-dir -r /workspace/ComfyUI/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec sed -i '/torch/d' {} \;",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install --no-cache-dir -r {} \;"
 ).run_commands(
-    # Uninstalls old environments completely to avoid any pollution
     "python3.12 -m pip uninstall -y torch torchvision torchaudio numpy kornia sageattention torchsde",
-    # Secures your exact compatible PyTorch architecture stack
     "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
-    # FIX: Explicitly bundle torchsde into the structural dependency installation loop
     "python3.12 -m pip install --no-cache-dir diffusers accelerate transformers torchsde numpy==1.26.4 kornia==0.7.3"
 ).run_commands(
-    # Compiles SageAttention explicitly targeting your L4 (8.9) runtime platform variables
-    "python3.12 -m pip install --no-cache-dir sageattention",
+    # FIX: Pinned sageattention to version 1.0.6 to retain the older Triton API used by KJNodes
+    "python3.12 -m pip install --no-cache-dir sageattention==1.0.6",
     env={
         "CUDA_HOME": "/usr/local/cuda",
         "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -81,7 +89,11 @@ final_image = build_image.run_commands(
     }
 )
 
-
+# ==============================================================================
+# PART 5: MODAL APP CONFIGURATION
+# Purpose: Define the Modal App, attach the Volume containing model weights, 
+# and define the deployment specifications (L4 GPU, memory, scaledown).
+# ==============================================================================
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 
@@ -96,6 +108,11 @@ weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
 )
 class LTXEngine:
     
+    # ==============================================================================
+    # PART 6: HELPER METHODS (LOGGING & RAM OPTIMIZATION)
+    # Purpose: Stream ComfyUI terminal logs to Modal and continuously squeeze RAM 
+    # using cache dropping to prevent out-of-memory errors on large workflows.
+    # ==============================================================================
     def _log_reader(self):
         for line in iter(self.process.stdout.readline, ""):
             if line: print(f"[ComfyUI] {line.strip()}")
@@ -110,6 +127,11 @@ class LTXEngine:
                 except Exception: pass
             await asyncio.sleep(10)
 
+    # ==============================================================================
+    # PART 7: SERVER INITIALIZATION (@modal.enter)
+    # Purpose: Symlinks model weights into ComfyUI directories, sets up AWS S3/R2 
+    # clients, hot-patches LTX nodes for stable saving, and launches the server.
+    # ==============================================================================
     @modal.enter()
     def start_comfy(self):
         import boto3
@@ -138,11 +160,6 @@ class LTXEngine:
             region_name="auto"
         )
 
-        # =====================================================================
-        # 🔥 THE ULTIMATE HOT-PATCH: NATIVE TORCH SAVING
-        # Overwrites the original LTXVideo custom nodes to prevent conflicts
-        # and unpack errors when saving raw conditioning.
-        # =====================================================================
         saver_path = "/workspace/ComfyUI/custom_nodes/ComfyUI-LTXVideo/conditioning_saver.py"
         if os.path.exists(saver_path):
             with open(saver_path, "w") as f:
@@ -212,7 +229,6 @@ class LTXVLoadConditioning:
         conditioning = torch.load(file_path, weights_only=False)
         return (conditioning,)
 ''')
-        # =====================================================================
 
         print("🚀 Launching Hybrid-Memory LTX Server Engine with FP8 and SageAttention configurations...")
         os.makedirs("/tmp/comfy_swap", exist_ok=True)
@@ -226,7 +242,6 @@ class LTXVLoadConditioning:
         env_vars["MALLOC_TRIM_THRESHOLD_"] = "65536" 
         env_vars["HF_HUB_OFFLOAD_DIR"] = "/tmp/hf_offload"
         
-        # Explicit python3.12 target prevents mapping to system python profiles
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -245,6 +260,11 @@ class LTXVLoadConditioning:
             except Exception: time.sleep(2)
         os._exit(1)
 
+    # ==============================================================================
+    # PART 8: INFERENCE EXECUTION & MEMORY CLEARING UTILITIES
+    # Purpose: Handlers to free VRAM between graphs, poll workflow execution status,
+    # and merge dynamic payload overrides into base graph JSONs.
+    # ==============================================================================
     async def clear_comfy_memory(self, session):
         try:
             async with session.post("http://127.0.0.1:8188/free", json={"unload_models": True, "free_memory": True}) as r:
@@ -304,6 +324,12 @@ class LTXVLoadConditioning:
                 base_graph[node_id] = node_data
         return base_graph
 
+    # ==============================================================================
+    # PART 9: MAIN FASTAPI ENDPOINT
+    # Purpose: The public inference route. Parses payload, fetches dynamic guide 
+    # images via Cloudflare R2, executes Sub-Graphs sequentially (Text -> Video -> Audio)
+    # uploads the result, and returns the URL.
+    # ==============================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
         if x_api_key != os.environ.get("API_KEY"): 
