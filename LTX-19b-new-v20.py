@@ -19,16 +19,18 @@ from typing import Optional
 # ==============================================================================
 # CONTAINER IMAGE BUILDER
 # ==============================================================================
+# Reverted to your working Ubuntu 24.04 + CUDA 12.5.1 base image blueprint
 base_image = modal.Image.from_registry(
-    "nvidia/cuda:12.4.1-devel-ubuntu22.04", 
+    "nvidia/cuda:12.5.1-devel-ubuntu24.04", 
     add_python="3.12"
 ).apt_install(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0", 
     "build-essential", "ninja-build", "cmake", "clang", "llvm"
 ).env({
-    "FORCE_REBUILD_INDEX": "108"  # Forces Modal to discard old corrupted layers
+    "FORCE_REBUILD_INDEX": "110"  # Forces Modal to ignore old corrupted caches and build fresh
 })
 
+# Globally locked compiler environment flags (as used in your working setup)
 build_image = base_image.env({
     "CUDA_HOME": "/usr/local/cuda",
     "PATH": "/usr/local/cuda/bin:" + os.environ.get("PATH", ""),
@@ -39,7 +41,7 @@ build_image = base_image.env({
     "CXX": "g++"
 }).run_commands(
     "python3.12 -m pip install --no-cache-dir fastapi aiohttp boto3 triton>=3.1.0 ninja setuptools>=70.0.0 wheel pip>=24.0",
-    "python3.12 -m pip install --no-cache-dir pandas numexpr pytz python-dateutil scipy matplotlib colorama librosa soundfile decord imageio scikit-image numba einops transformers diffusers accelerate bitsandbytes"
+    "python3.12 -m pip install --no-cache-dir pandas numexpr pytz python-dateutil scipy matplotlib colorama librosa soundfile decord imageio scikit-image numba einops bitsandbytes"
 )
 
 final_image = build_image.run_commands(
@@ -56,18 +58,19 @@ final_image = build_image.run_commands(
     "git clone https://github.com/IvanRybakov/comfyui-node-int-to-string-convertor.git /workspace/ComfyUI/custom_nodes/comfyui-node-int-to-string-convertor",
     "git clone https://github.com/siraxe/ComfyUI-LTX-FDG.git /workspace/ComfyUI/custom_nodes/ComfyUI-LTX-FDG"
 ).run_commands(
-    # Strip any dynamic torch requests so custom nodes don't break the environment
+    # Strip open-ended torch requirements from custom node setup files before they can run
     "sed -i '/torch/d' /workspace/ComfyUI/requirements.txt",
     "python3.12 -m pip install --no-cache-dir -r /workspace/ComfyUI/requirements.txt",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec sed -i '/torch/d' {} \;",
     r"find /workspace/ComfyUI/custom_nodes -name 'requirements.txt' -exec python3.12 -m pip install --no-cache-dir -r {} \;"
 ).run_commands(
-    # Uninstall anything conflicting and install exact CUDA 12.4 binaries
+    # Uninstalls old environments completely to avoid any pollution
     "python3.12 -m pip uninstall -y torch torchvision torchaudio numpy kornia sageattention",
+    # Secures your exact compatible PyTorch architecture stack + tensor math requirements
     "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
-    "python3.12 -m pip install --no-cache-dir numpy==1.26.4 kornia==0.7.3"
+    "python3.12 -m pip install --no-cache-dir diffusers accelerate transformers numpy==1.26.4 kornia==0.7.3"
 ).run_commands(
-    # FIX: Isolate SageAttention with strict GPU environmental flags so it compiles the L4 kernels
+    # Compiles SageAttention explicitly targeting your L4 (8.9) runtime platform variables
     "python3.12 -m pip install --no-cache-dir sageattention",
     env={
         "CUDA_HOME": "/usr/local/cuda",
@@ -76,7 +79,6 @@ final_image = build_image.run_commands(
         "TORCH_CUDA_ARCH_LIST": "8.9"
     }
 )
-
 
 app = modal.App("ltx-2-19b-v20-api")
 weights_volume = modal.Volume.from_name("ltx-20-19b-weights")
