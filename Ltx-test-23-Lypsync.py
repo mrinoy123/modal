@@ -230,22 +230,30 @@ modal_weights:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         # ==============================================================================
-        # FIX 1: Direct & Explicit Qwen3-TTS Symlinking to stop HF Redownload
+        # FIX 1: Foolproof Qwen3-TTS Symlinking (Multiple Path Variants)
         # ==============================================================================
         print("🔗 Mapping HuggingFace Qwen structure dynamically...")
-        qwen_dest_base = os.path.join(base_models_dir, "qwen3_tts", "Qwen")
-        os.makedirs(qwen_dest_base, exist_ok=True)
-        
         qwen_src_dir = "/mnt/weights/qwen3tts"
         if os.path.exists(qwen_src_dir):
             for d in os.listdir(qwen_src_dir):
                 src = os.path.join(qwen_src_dir, d)
-                dst = os.path.join(qwen_dest_base, d)
-                if os.path.isdir(src) and not os.path.exists(dst):
-                    try:
-                        os.symlink(src, dst)
-                        print(f"[Linker] Successfully linked Qwen directory: {d}")
-                    except Exception as e: pass
+                if not os.path.isdir(src): continue
+                
+                # Link to all potential folder names the custom node might use to bypass downloading
+                for pb in ["qwen3_tts", "Qwen3-TTS", "qwen_tts"]:
+                    # Direct link: models/qwen3_tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+                    dst1 = os.path.join(base_models_dir, pb, d)
+                    os.makedirs(os.path.dirname(dst1), exist_ok=True)
+                    if not os.path.exists(dst1):
+                        try: os.symlink(src, dst1)
+                        except Exception: pass
+                        
+                    # Prefixed link: models/qwen3_tts/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+                    dst2 = os.path.join(base_models_dir, pb, "Qwen", d)
+                    os.makedirs(os.path.dirname(dst2), exist_ok=True)
+                    if not os.path.exists(dst2):
+                        try: os.symlink(src, dst2)
+                        except Exception: pass
 
         if os.path.exists("/mnt/weights/canonical_storage"):
             for root_dir, _, files in os.walk("/mnt/weights/canonical_storage"):
@@ -275,8 +283,7 @@ modal_weights:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
-        # Enforce HF Offline Mode to completely block Qwen re-downloads
-        env_vars["HF_HUB_OFFLINE"] = "1"
+        # We removed the HF_HUB_OFFLINE flag so snapshot_download can quietly validate our local files instead of violently crashing
         
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
@@ -529,9 +536,6 @@ modal_weights:
                             
                             img_target = img2_path if (spk_id == "B" and os.path.exists(img2_path)) else img1_path
                             
-                            # ==============================================================================
-                            # FIX 2: Modified 'prompt' to 'prompts' as an array for LTXDirector Schema validation
-                            # ==============================================================================
                             segments_timeline.append({
                                 "id": f"shot_{line_idx}",
                                 "start": total_frames_tracked,
