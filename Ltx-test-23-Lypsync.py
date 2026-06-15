@@ -652,11 +652,7 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
-                        # --- GRAPH HEALING: FIX SUBGRAPH 2 STATIC NOISE CAUSE ---
-                        cond_id = next((k for k, v in sg2.items() if v.get("class_type") == "LTXVConditioning"), None)
-                        for node_id, node_data in sg2.items():
-                            if node_data.get("class_type") == "MemoryCacheWriter" and cond_id:
-                                node_data["inputs"]["negative"] = [cond_id, 1]
+                        # Graph Healing removed for Subgraph 2 as well
 
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene, session_id)
                         
@@ -672,31 +668,7 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg3 = json.loads(json.dumps(subgraph_3))
 
-                        # --- GRAPH HEALING: FIX SUBGRAPH 3 STATIC NOISE CAUSE ---
-                        stage1_sep_id = None
-                        for n_id, n_data in sg3.items():
-                            if n_data.get("class_type") == "LTXVSeparateAVLatent":
-                                av_input = n_data.get("inputs", {}).get("av_latent", [])
-                                if isinstance(av_input, list):
-                                    sampler_node = sg3.get(str(av_input[0]), {})
-                                    sigmas_link = sampler_node.get("inputs", {}).get("sigmas", [])
-                                    if isinstance(sigmas_link, list):
-                                        scheduler_node = sg3.get(str(sigmas_link[0]), {})
-                                        if float(scheduler_node.get("inputs", {}).get("denoise", 1.0)) == 1.0:
-                                            stage1_sep_id = n_id
-                                            
-                        if not stage1_sep_id: stage1_sep_id = "108" # Safety fallback
-                        
-                        for node_id, node_data in sg3.items():
-                            c_type = node_data.get("class_type")
-                            if c_type == "LTXVConcatAVLatent":
-                                vid_link = node_data.get("inputs", {}).get("video_latent", [])
-                                if isinstance(vid_link, list) and str(vid_link[0]) in sg3:
-                                    if sg3[str(vid_link[0])].get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
-                                        node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
-                                        
-                            if c_type == "LTXVAudioVAEDecode":
-                                node_data["inputs"]["samples"] = [stage1_sep_id, 1]
+                        # Graph Healing logic completely removed here as requested.
 
                         sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene, session_id)
 
