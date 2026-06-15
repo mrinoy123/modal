@@ -412,7 +412,11 @@ modal_weights:
                         
                         if c_type == "LTXDirector":
                             set_val("img_compression", None, 100)
-                            set_val("divisible_by", None, 256)
+                            # ==============================================================================
+                            # RESOLUTION FIXED: divisor set to native 32 instead of 256. 
+                            # This locks the latent size at 448x768 to perfectly align with guide images.
+                            # ==============================================================================
+                            set_val("divisible_by", None, 32)
                         
                         if total_frames > 0:  
                             set_val("duration_frames", None, total_frames)
@@ -420,8 +424,8 @@ modal_weights:
                             set_val("duration_seconds", None, exact_audio_duration)
                         
                         # ==============================================================================
-                        # CRITICAL FIX: Explicitly populate local_prompts & segment_lengths strings 
-                        # to replace the missing JS frontend behavior in API mode.
+                        # CRITICAL TIMELINE & MULTI-PROMPT INJECTIONS FIXED:
+                        # Direct backend string mapping to satisfy PromptRelay requirements in API mode.
                         # ==============================================================================
                         if c_type in ["LTXDirector", "LTXDirectorGuide"] and "timeline_payload" in scene_data:
                             payload_str = json.dumps(scene_data["timeline_payload"])
@@ -429,7 +433,7 @@ modal_weights:
                             set_val("timeline_ui", None, payload_str)
                             set_val("timeline", None, payload_str)
                             
-                            # Inject exact hidden string lists that the Python Node requires
+                            # API JSON workflows strictly require these hidden backend fields populated
                             if "local_prompts_str" in scene_data:
                                 set_val("local_prompts", None, scene_data["local_prompts_str"])
                                 set_val("segment_lengths", None, scene_data["segment_lengths_str"])
@@ -550,17 +554,30 @@ modal_weights:
                             duration_seconds = len(data) / samplerate
                             frames_for_line = math.ceil(duration_seconds * 25)
                             
-                            img_target = img2_path if (spk_id == "B" and os.path.exists(img2_path)) else img1_path
-                            
+                            img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
+
+                            # ==============================================================================
+                            # FIX 1: Generate parallel tracks (image track + text track)
+                            # Image track provides the guide frames; text track provides the prompts.
+                            # Also fixed paths to be relative to the input folder.
+                            # ==============================================================================
                             segments_timeline.append({
-                                "id": f"shot_{line_idx}",
+                                "id": f"image_{line_idx}",
                                 "start": total_frames_tracked,
                                 "length": frames_for_line,
+                                "type": "image",
+                                "imageFile": img_relative_target,
+                                "guideStrength": 1.0
+                            })
+                            
+                            segments_timeline.append({
+                                "id": f"text_{line_idx}",
+                                "start": total_frames_tracked,
+                                "length": frames_for_line,
+                                "type": "text",
                                 "text": visual_action,          
                                 "prompt": visual_action,        
-                                "prompts": [visual_action],     
-                                "type": "image",
-                                "imageFile": img_target
+                                "prompts": [visual_action]
                             })
                             
                             total_frames_tracked += frames_for_line
@@ -574,38 +591,46 @@ modal_weights:
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
                         if padded_frames > 257: padded_frames = 257 
                         
-                        current_total_frames = sum(s["length"] for s in segments_timeline)
+                        # Apply identical padding/trimming to both the text and image tracks
+                        last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
+                        last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
                         
-                        if current_total_frames < padded_frames and segments_timeline:
-                            segments_timeline[-1]["length"] += (padded_frames - current_total_frames)
-                        elif current_total_frames > padded_frames:
-                            diff = current_total_frames - padded_frames
-                            for s in reversed(segments_timeline):
-                                if s["length"] > diff:
-                                    s["length"] -= diff
-                                    break
-                                else:
-                                    diff -= s["length"]
-                                    s["length"] = 0
-                            segments_timeline = [s for s in segments_timeline if s["length"] > 0]
+                        text_total_frames = sum(s["length"] for s in segments_timeline if s["type"] == "text")
                         
-                        # ==============================================================================
-                        # CRITICAL FIX 2: Generate literal backend string representations 
-                        # to replace the missing JS frontend behavior in API mode.
-                        # ==============================================================================
-                        local_prompts_str = "\n".join([s["prompt"] for s in segments_timeline])
-                        segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline])
-                        guide_strength_str = ",".join(["1.0"] * len(segments_timeline))
-                        global_prompt_str = segments_timeline[0]["prompt"] if segments_timeline else "A cinematic shot, stable camera, talking."
+                        if text_total_frames < padded_frames:
+                            diff = padded_frames - text_total_frames
+                            if last_text_seg: last_text_seg["length"] += diff
+                            if last_image_seg: last_image_seg["length"] += diff
+                        elif text_total_frames > padded_frames:
+                            diff = text_total_frames - padded_frames
+                            for s_type in ["text", "image"]:
+                                d_diff = diff
+                                for s in reversed(segments_timeline):
+                                    if s["type"] != s_type: continue
+                                    if s["length"] > d_diff:
+                                        s["length"] -= d_diff
+                                        break
+                                    else:
+                                        d_diff -= s["length"]
+                                        s["length"] = 0
+                                        
+                        segments_timeline = [s for s in segments_timeline if s["length"] > 0]
+                        
+                        # Generate relative target paths for clean backend node loading
+                        local_prompts_str = "\n".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
+                        segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
+                        guide_strength_str = ",".join(["1.0"] * len([s for s in segments_timeline if s["type"] == "image"]))
+                        global_prompt_str = segments_timeline[1]["prompt"] if len(segments_timeline) > 1 else "A cinematic shot, stable camera, talking."
+                        audio_relative_path = f"dynamic_guides/perfect_dialog_{idx}.wav"
 
                         scene["exact_audio_duration"] = float(padded_frames - 1) / 25.0
                         scene["total_frames"] = padded_frames
                         scene["timeline_payload"] = {
                             "segments": segments_timeline,
-                            "audioSegments": [{"audioFile": perfect_audio_path, "start": 0}]
+                            "audioSegments": [{"audioFile": audio_relative_path, "start": 0}]
                         }
                         
-                        # Bundle the strings to be injected directly into the API kwargs
+                        # Save calculated string configs inside the scene object
                         scene["local_prompts_str"] = local_prompts_str
                         scene["segment_lengths_str"] = segment_lengths_str
                         scene["guide_strength_str"] = guide_strength_str
