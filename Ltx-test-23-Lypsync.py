@@ -119,26 +119,18 @@ class LTX23DirectorLypsyncEngine:
     def start_comfy(self):
         import boto3
         
-        print("🎨 Building Strictly CPU-Bound Pointer-Pass Memory Nodes...")
+        print("🎨 Building Disk-Backed Pointer-Pass Memory Nodes for Infinite Batching...")
         os.makedirs("/workspace/ComfyUI/custom_nodes/LTXCustomPipeline", exist_ok=True)
         custom_nodes_path = "/workspace/ComfyUI/custom_nodes/LTXCustomPipeline/__init__.py"
         with open(custom_nodes_path, "w") as f:
             f.write("""
 import torch
 import nodes
+import os
 
 LTX_CACHE = {}
-
-def move_to_device(item, device="cpu"):
-    if isinstance(item, torch.Tensor): 
-        return item.to(device)
-    elif isinstance(item, dict): 
-        return {k: move_to_device(v, device) for k, v in item.items()}
-    elif isinstance(item, list): 
-        return [move_to_device(v, device) for v in item]
-    elif isinstance(item, tuple): 
-        return tuple(move_to_device(v, device) for v in item)
-    return item
+CACHE_DIR = "/tmp/comfy_swap/ltx_tensors"
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 class MemoryCacheWriter:
     @classmethod
@@ -161,16 +153,26 @@ class MemoryCacheWriter:
 
     def write_cache(self, model, positive, negative, video_latent, audio_latent, guide_data, frame_rate, scene_id="0"):
         global LTX_CACHE
+        
+        # 1. Store ONLY the lightweight Model reference in RAM
         LTX_CACHE[str(scene_id)] = {
             "model": model,
-            "positive": move_to_device(positive, "cpu"),
-            "negative": move_to_device(negative, "cpu"),
-            "video_latent": move_to_device(video_latent, "cpu"),
-            "audio_latent": move_to_device(audio_latent, "cpu"),
-            "guide_data": move_to_device(guide_data, "cpu"),
             "frame_rate": frame_rate
         }
-        print(f"[LTX Cache] 💾 Saved Scene {scene_id} pointers securely on CPU.", flush=True)
+        
+        # 2. Serialize the massive tensor dictionaries to DISK (Prevents OOM)
+        tensor_data = {
+            "positive": positive,
+            "negative": negative,
+            "video_latent": video_latent,
+            "audio_latent": audio_latent,
+            "guide_data": guide_data
+        }
+        
+        target_path = os.path.join(CACHE_DIR, f"scene_{scene_id}.pt")
+        torch.save(tensor_data, target_path)
+        
+        print(f"[LTX Cache] 💾 Saved Scene {scene_id}. Model in RAM, Tensors stored safely on Disk.", flush=True)
         return ()
 
 class MemoryCacheReader:
@@ -182,19 +184,35 @@ class MemoryCacheReader:
     FUNCTION = "read_cache"
     CATEGORY = "LTXBatch"
 
+    @classmethod
+    def IS_CHANGED(s, **kwargs):
+        # Force ComfyUI to NEVER use an execution cache for this node
+        return float("NaN")
+
     def read_cache(self, scene_id="0"):
         global LTX_CACHE
-        data = LTX_CACHE.get(str(scene_id))
-        if data is None: raise ValueError(f"Cache for Scene {scene_id} not found in RAM!")
-        print(f"[LTX Cache] 📂 Loaded Scene {scene_id} from CPU storage.", flush=True)
+        ram_data = LTX_CACHE.get(str(scene_id))
+        if ram_data is None: 
+            raise ValueError(f"Model Cache for Scene {scene_id} not found in RAM!")
+            
+        target_path = os.path.join(CACHE_DIR, f"scene_{scene_id}.pt")
+        if not os.path.exists(target_path):
+            raise ValueError(f"Tensor Cache for Scene {scene_id} not found on Disk!")
+            
+        # 3. Load fresh tensors from disk. This creates pristine, deep-cloned copies 
+        # so the Sampler does not mutate them, completely fixing the Static Noise.
+        tensor_data = torch.load(target_path, map_location="cpu", weights_only=False)
+        
+        print(f"[LTX Cache] 📂 Loaded Scene {scene_id}. Model mapped from RAM, Tensors imported from Disk.", flush=True)
+        
         return (
-            data["model"], 
-            data["positive"], 
-            data["negative"], 
-            data["video_latent"], 
-            data["audio_latent"],
-            data["guide_data"],
-            data["frame_rate"]
+            ram_data["model"], 
+            tensor_data["positive"], 
+            tensor_data["negative"], 
+            tensor_data["video_latent"], 
+            tensor_data["audio_latent"],
+            tensor_data["guide_data"],
+            ram_data["frame_rate"]
         )
 
 NODE_CLASS_MAPPINGS = {
@@ -357,6 +375,9 @@ modal_weights:
             subgraph_1 = body.get("subgraph_1")
             subgraph_2 = body.get("subgraph_2")
             subgraph_3 = body.get("subgraph_3")
+            
+            # Create a globally unique session ID to map Phase 2 and Phase 3 perfectly
+            session_id = int(time.time())
 
             if not batch_scenes: raise HTTPException(status_code=400, detail="Missing batch_scenes array.")
             if not subgraph_1 or not subgraph_2 or not subgraph_3: raise HTTPException(status_code=400, detail="Missing Subgraph definitions.")
@@ -368,7 +389,7 @@ modal_weights:
             ram_task = asyncio.create_task(self._ram_squeezer())
             generated_outputs = []
 
-            def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
+            def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data, s_id):
                 for node_id, node_data in list(sg.items()):
                     c_type = node_data.get("class_type", "")
                     if "inputs" not in node_data: node_data["inputs"] = {}
@@ -401,10 +422,11 @@ modal_weights:
                         set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
                         set_val("enabled_1", 1, True)
                         set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
-                        set_val("enabled_2", 6, True)  # FIXED: Ensure LoRA is forcefully enabled
+                        set_val("enabled_2", 6, True)  
 
+                    # INJECT THE UNIQUE SESSION ID
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
-                        set_val("scene_id", None, str(idx))
+                        set_val("scene_id", None, f"{s_id}_{idx}")
 
                     elif c_type in ["LTXDirector", "LTXDirectorGuide", "PromptRelayEncode"]:
                         set_val("custom_width", None, custom_w)
@@ -626,24 +648,23 @@ modal_weights:
                     print("\n🧹 Phase 1 Complete. Purging Audio Engines...", flush=True)
                     await self.clear_comfy_memory(session, unload_models=True)
 
-                    print(f"\n[Lypsync API] 🎬 STARTING PHASE 2: DIRECTOR WORKFLOW CACHING", flush=True)
+                    print(f"\n[Lypsync API] 🎬 STARTING PHASE 2: BATCH DIRECTOR WORKFLOW CACHING", flush=True)
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
                         # --- GRAPH HEALING: FIX SUBGRAPH 2 STATIC NOISE CAUSE ---
-                        # Prevent negative conditioning bleed into the cache writer
                         cond_id = next((k for k, v in sg2.items() if v.get("class_type") == "LTXVConditioning"), None)
                         for node_id, node_data in sg2.items():
                             if node_data.get("class_type") == "MemoryCacheWriter" and cond_id:
                                 node_data["inputs"]["negative"] = [cond_id, 1]
 
-                        sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
+                        sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene, session_id)
                         
-                        print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx}...", flush=True)
+                        print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx} to Disk...", flush=True)
                         await self.execute_comfy_workflow(session, sg2)
                         await self.clear_comfy_memory(session, unload_models=False)
 
-                    print(f"\n[Lypsync API] 🎞️ STARTING PHASE 3: FINAL COMBINE & RENDER", flush=True)
+                    print(f"\n[Lypsync API] 🎞️ STARTING PHASE 3: BATCH FINAL COMBINE & RENDER", flush=True)
                     out_dir = "/workspace/ComfyUI/output"
                     if os.path.exists(out_dir): shutil.rmtree(out_dir)
                     os.makedirs(out_dir)
@@ -652,7 +673,6 @@ modal_weights:
                         sg3 = json.loads(json.dumps(subgraph_3))
 
                         # --- GRAPH HEALING: FIX SUBGRAPH 3 STATIC NOISE CAUSE ---
-                        # Identify Stage 1 Denoised Audio Separator automatically
                         stage1_sep_id = None
                         for n_id, n_data in sg3.items():
                             if n_data.get("class_type") == "LTXVSeparateAVLatent":
@@ -669,20 +689,18 @@ modal_weights:
                         
                         for node_id, node_data in sg3.items():
                             c_type = node_data.get("class_type")
-                            # Force Stage 2 Concatenator to utilize clean Stage 1 Audio (Prevents static noise)
                             if c_type == "LTXVConcatAVLatent":
                                 vid_link = node_data.get("inputs", {}).get("video_latent", [])
                                 if isinstance(vid_link, list) and str(vid_link[0]) in sg3:
                                     if sg3[str(vid_link[0])].get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
                                         node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
                                         
-                            # Force VAE Audio Decoder to decode pristine Stage 1 Audio (Prevents metallic audio)
                             if c_type == "LTXVAudioVAEDecode":
                                 node_data["inputs"]["samples"] = [stage1_sep_id, 1]
 
-                        sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
+                        sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene, session_id)
 
-                        print(f"🚀 Diffusing & Rendering Video for Scene {idx}...", flush=True)
+                        print(f"🚀 Diffusing & Rendering Video for Scene {idx} from Disk Cache...", flush=True)
                         await self.execute_comfy_workflow(session, sg3)
                         await self.clear_comfy_memory(session, unload_models=False)
 
