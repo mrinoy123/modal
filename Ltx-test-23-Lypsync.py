@@ -277,9 +277,10 @@ modal_weights:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
+        # NOTE: Removed --cache-none to fix static noise from unmapped VRAM dropping
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
+            "--mmap-torch-files", "--temp-directory", "/tmp/comfy_swap", 
             "--bf16-vae", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
@@ -413,8 +414,9 @@ modal_weights:
                         set_val("height", None, custom_h)
                         
                         if c_type == "LTXDirector":
-                            set_val("img_compression", None, 100)
-                            set_val("divisible_by", None, 32)
+                            # Fix: Properly map the width/height to avoid 32x100 resolution collapse
+                            set_val("img_compression", None, custom_h)
+                            set_val("divisible_by", None, custom_w)
                         
                         if total_frames > 0:  
                             set_val("duration_frames", None, total_frames)
@@ -577,7 +579,9 @@ modal_weights:
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
-                        if padded_frames > 257: padded_frames = 257 
+                        
+                        # Fix: Scaled the frame ceiling up to support 20-second generations cleanly
+                        if padded_frames > 501: padded_frames = 501 
                         
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
@@ -630,12 +634,7 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
-                        # --- GRAPH HEALING: FIX SUBGRAPH 2 STATIC NOISE CAUSE ---
-                        cond_id = next((k for k, v in sg2.items() if v.get("class_type") == "LTXVConditioning"), None)
-                        for node_id, node_data in sg2.items():
-                            if node_data.get("class_type") == "MemoryCacheWriter" and cond_id:
-                                node_data["inputs"]["negative"] = [cond_id, 1]
-
+                        # Fix: Graph healing block removed here to stop sending dead inputs to MemoryCacheWriter
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
                         
                         print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx}...", flush=True)
@@ -650,42 +649,7 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg3 = json.loads(json.dumps(subgraph_3))
 
-                        # --- GRAPH HEALING: FIX SUBGRAPH 3 STATIC NOISE CAUSE ---
-                        stage1_sep_id = None
-                        for n_id, n_data in sg3.items():
-                            if n_data.get("class_type") == "LTXVSeparateAVLatent":
-                                av_input = n_data.get("inputs", {}).get("av_latent", [])
-                                if isinstance(av_input, list):
-                                    sampler_node = sg3.get(str(av_input[0]), {})
-                                    sigmas_link = sampler_node.get("inputs", {}).get("sigmas", [])
-                                    if isinstance(sigmas_link, list):
-                                        scheduler_node = sg3.get(str(sigmas_link[0]), {})
-                                        if float(scheduler_node.get("inputs", {}).get("denoise", 1.0)) == 1.0:
-                                            stage1_sep_id = n_id
-                                            
-                        if not stage1_sep_id: stage1_sep_id = "108"
-                        
-                        for node_id, node_data in sg3.items():
-                            c_type = node_data.get("class_type")
-                            
-                            # Safely isolate Stage 2 Concatenator (Traces back to Upsampler, not Cache)
-                            if c_type == "LTXVConcatAVLatent":
-                                vid_link = node_data.get("inputs", {}).get("video_latent", [])
-                                if isinstance(vid_link, list) and str(vid_link[0]) in sg3:
-                                    vid_node = sg3[str(vid_link[0])]
-                                    if vid_node.get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
-                                        latent_src = vid_node.get("inputs", {}).get("latent", [])
-                                        is_stage1 = False
-                                        if isinstance(latent_src, list) and str(latent_src[0]) in sg3:
-                                            if sg3[str(latent_src[0])].get("class_type") == "MemoryCacheReader":
-                                                is_stage1 = True
-                                        
-                                        if not is_stage1:
-                                            node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
-                                            
-                            if c_type == "LTXVAudioVAEDecode":
-                                node_data["inputs"]["samples"] = [stage1_sep_id, 1]
-
+                        # Fix: Graph healing block removed here to stop scrambling Audio/Video Latent mappings
                         sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
 
                         print(f"🚀 Diffusing & Rendering Video for Scene {idx}...", flush=True)
