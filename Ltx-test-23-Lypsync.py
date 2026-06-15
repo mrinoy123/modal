@@ -394,7 +394,7 @@ except Exception: pass
                         cleaned_parts.append(line_strip)
                 return " ".join(cleaned_parts)
 
-            def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
+def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
                 audio_node_counter = 0
                 image_node_counter = 0
 
@@ -403,15 +403,18 @@ except Exception: pass
                     inputs = node_data.get("inputs", {})
                     
                     if c_type == "DiffusionModelLoaderKJ":
-                        # CRITICAL FIX: Use the dev-fp8 checkpoint to prevent mathematical collision with the ID LoRA
+                        # CRITICAL FIX 1: Load pre-quantized FP8 model as 'default' dtype to prevent double-casting corruption.
+                        # CRITICAL FIX 2: Force 'sdpa' attention to avoid SageAttention NaNs on L40S.
                         inputs["model_name"] = "ltx-2.3-22b-dev-fp8.safetensors"
+                        inputs["weight_dtype"] = "default" 
+                        inputs["sage_attention"] = "sdpa"
                         
                     elif c_type == "DenoLTXMultiLoraLoader":
-                        # Map accurate LoRA names from your storage 
+                        # CRITICAL FIX 3: ID LoRA strength must be 0.45, NOT 1.0. 1.0 destroys the manifold geometry.
                         inputs["lora_1"] = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors" 
-                        inputs["strength_1"] = 0.5   # Distilled LoRA strength
+                        inputs["strength_1"] = 0.45
                         inputs["lora_2"] = "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors" 
-                        inputs["strength_2"] = 1.0   # ID LoRA strength
+                        inputs["strength_2"] = 0.45
                         for i in range(3, 9):
                             k = f"lora_{i}"
                             if k in inputs: inputs[k] = "__none__"
@@ -477,7 +480,6 @@ except Exception: pass
                             })
 
                         if c_type == "LTXDirector":
-                            # CRITICAL FIX: Inject the perfectly synced audio dynamically into the timeline string
                             inputs["timeline_data"] = json.dumps({
                                 "segments": segments, 
                                 "audioSegments": [{"audioFile": f"dynamic_guides/perfect_dialog_{idx}.wav", "start": 0}]
