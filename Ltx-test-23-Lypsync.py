@@ -33,7 +33,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm",
     "libgoogle-perftools-dev", "sox", "libsox-fmt-all"
 ).env({
-    "FORCE_REBUILD_INDEX": "521"  
+    "FORCE_REBUILD_INDEX": "522"  
 })
 
 build_image = base_image.env({
@@ -254,7 +254,7 @@ modal_weights:
                 for filename in files:
                     if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")): continue
                     src_path = os.path.join(root_dir, filename)
-                    for dest in ["checkpoints", "unet", "diffusion_models", "clip", "vae", "loras", "latent_upscale_models", "audio_vae", "text_encoders"]:
+                    for dest in ["checkpoints", "unet", "diffusion_models", "clip", "vae", "loras", "latent_upscale_models", "audio_vae", "text encoders"]:
                         symlink_dest = os.path.join(base_models_dir, dest, filename)
                         if not os.path.exists(symlink_dest):
                             try: os.symlink(src_path, symlink_dest)
@@ -399,7 +399,9 @@ modal_weights:
 
                     elif c_type == "DenoLTXMultiLoraLoader":
                         set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
+                        set_val("enabled_1", 1, True)
                         set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
+                        set_val("enabled_2", 6, True)  # FIXED: Ensure LoRA is forcefully enabled
 
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         set_val("scene_id", None, str(idx))
@@ -412,10 +414,6 @@ modal_weights:
                         
                         if c_type == "LTXDirector":
                             set_val("img_compression", None, 100)
-                            # ==============================================================================
-                            # RESOLUTION FIXED: divisor set to native 32 instead of 256. 
-                            # This locks the latent size at 448x768 to perfectly align with guide images.
-                            # ==============================================================================
                             set_val("divisible_by", None, 32)
                         
                         if total_frames > 0:  
@@ -423,17 +421,12 @@ modal_weights:
                             set_val("length", None, total_frames)
                             set_val("duration_seconds", None, exact_audio_duration)
                         
-                        # ==============================================================================
-                        # CRITICAL TIMELINE & MULTI-PROMPT INJECTIONS FIXED:
-                        # Direct backend string mapping to satisfy PromptRelay requirements in API mode.
-                        # ==============================================================================
                         if c_type in ["LTXDirector", "LTXDirectorGuide"] and "timeline_payload" in scene_data:
                             payload_str = json.dumps(scene_data["timeline_payload"])
                             set_val("timeline_data", None, payload_str)
                             set_val("timeline_ui", None, payload_str)
                             set_val("timeline", None, payload_str)
                             
-                            # API JSON workflows strictly require these hidden backend fields populated
                             if "local_prompts_str" in scene_data:
                                 set_val("local_prompts", None, scene_data["local_prompts_str"])
                                 set_val("segment_lengths", None, scene_data["segment_lengths_str"])
@@ -556,11 +549,6 @@ modal_weights:
                             
                             img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
 
-                            # ==============================================================================
-                            # FIX 1: Generate parallel tracks (image track + text track)
-                            # Image track provides the guide frames; text track provides the prompts.
-                            # Also fixed paths to be relative to the input folder.
-                            # ==============================================================================
                             segments_timeline.append({
                                 "id": f"image_{line_idx}",
                                 "start": total_frames_tracked,
@@ -591,7 +579,6 @@ modal_weights:
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
                         if padded_frames > 257: padded_frames = 257 
                         
-                        # Apply identical padding/trimming to both the text and image tracks
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
                         
@@ -616,7 +603,6 @@ modal_weights:
                                         
                         segments_timeline = [s for s in segments_timeline if s["length"] > 0]
                         
-                        # Generate relative target paths for clean backend node loading
                         local_prompts_str = "\n".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
                         segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
                         guide_strength_str = ",".join(["1.0"] * len([s for s in segments_timeline if s["type"] == "image"]))
@@ -630,7 +616,6 @@ modal_weights:
                             "audioSegments": [{"audioFile": audio_relative_path, "start": 0}]
                         }
                         
-                        # Save calculated string configs inside the scene object
                         scene["local_prompts_str"] = local_prompts_str
                         scene["segment_lengths_str"] = segment_lengths_str
                         scene["guide_strength_str"] = guide_strength_str
@@ -644,6 +629,14 @@ modal_weights:
                     print(f"\n[Lypsync API] 🎬 STARTING PHASE 2: DIRECTOR WORKFLOW CACHING", flush=True)
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
+                        
+                        # --- GRAPH HEALING: FIX SUBGRAPH 2 STATIC NOISE CAUSE ---
+                        # Prevent negative conditioning bleed into the cache writer
+                        cond_id = next((k for k, v in sg2.items() if v.get("class_type") == "LTXVConditioning"), None)
+                        for node_id, node_data in sg2.items():
+                            if node_data.get("class_type") == "MemoryCacheWriter" and cond_id:
+                                node_data["inputs"]["negative"] = [cond_id, 1]
+
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
                         
                         print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx}...", flush=True)
@@ -657,6 +650,36 @@ modal_weights:
 
                     for idx, scene in enumerate(batch_scenes):
                         sg3 = json.loads(json.dumps(subgraph_3))
+
+                        # --- GRAPH HEALING: FIX SUBGRAPH 3 STATIC NOISE CAUSE ---
+                        # Identify Stage 1 Denoised Audio Separator automatically
+                        stage1_sep_id = None
+                        for n_id, n_data in sg3.items():
+                            if n_data.get("class_type") == "LTXVSeparateAVLatent":
+                                av_input = n_data.get("inputs", {}).get("av_latent", [])
+                                if isinstance(av_input, list):
+                                    sampler_node = sg3.get(str(av_input[0]), {})
+                                    sigmas_link = sampler_node.get("inputs", {}).get("sigmas", [])
+                                    if isinstance(sigmas_link, list):
+                                        scheduler_node = sg3.get(str(sigmas_link[0]), {})
+                                        if float(scheduler_node.get("inputs", {}).get("denoise", 1.0)) == 1.0:
+                                            stage1_sep_id = n_id
+                                            
+                        if not stage1_sep_id: stage1_sep_id = "108" # Safety fallback
+                        
+                        for node_id, node_data in sg3.items():
+                            c_type = node_data.get("class_type")
+                            # Force Stage 2 Concatenator to utilize clean Stage 1 Audio (Prevents static noise)
+                            if c_type == "LTXVConcatAVLatent":
+                                vid_link = node_data.get("inputs", {}).get("video_latent", [])
+                                if isinstance(vid_link, list) and str(vid_link[0]) in sg3:
+                                    if sg3[str(vid_link[0])].get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
+                                        node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
+                                        
+                            # Force VAE Audio Decoder to decode pristine Stage 1 Audio (Prevents metallic audio)
+                            if c_type == "LTXVAudioVAEDecode":
+                                node_data["inputs"]["samples"] = [stage1_sep_id, 1]
+
                         sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
 
                         print(f"🚀 Diffusing & Rendering Video for Scene {idx}...", flush=True)
