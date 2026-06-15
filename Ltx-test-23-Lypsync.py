@@ -92,13 +92,14 @@ final_image = deps_image.run_commands(
 # PART 5: MODAL APP CONFIGURATION & CLOUD VOLUMES 
 # ==============================================================================
 app = modal.App("media-worker-ltx23-director-lypsync")
-weights_volume = modal.Volume.from_name("Ltx-23-model-weights-new", create_if_missing=False)
+# UPDATED: Pointing directly to the new consolidated storage volume
+weights_volume = modal.Volume.from_name("ltx-2-3-all-model-weights", create_if_missing=False)
 
 @app.cls(
     gpu="L40S", 
     image=final_image,
     volumes={"/mnt/weights": weights_volume},
-    secrets=[modal.Secret.from_name("custom-secret")],
+    secrets=[modal.Secret.from_name("video-generator-workflow")],
     memory=8192, 
     scaledown_window=8,
     timeout=3600
