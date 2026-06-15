@@ -230,6 +230,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         dest = "loras"
                     elif "audio_vae" in name_lower:
                         dest = "audio_vae"
+                        # FIX: LTX Custom Node specifically looks in 'checkpoints' as a fallback
+                        alt_dest = os.path.join(base_models_dir, "checkpoints", filename)
+                        if not os.path.exists(alt_dest): os.symlink(src_path, alt_dest)
                     elif "video_vae" in name_lower or "taeltx" in name_lower:
                         dest = "vae"
                     elif "gemma" in name_lower or "text_projection" in name_lower or "clip" in name_lower:
@@ -237,7 +240,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         # Mirror to text_encoders for universal compatibility
                         alt_dest = os.path.join(base_models_dir, "text_encoders", filename)
                         if not os.path.exists(alt_dest): os.symlink(src_path, alt_dest)
-
+                        # FIX: LTX text_projection Custom Node specifically looks in 'checkpoints'
+                        alt_dest2 = os.path.join(base_models_dir, "checkpoints", filename)
+                        if not os.path.exists(alt_dest2): os.symlink(src_path, alt_dest2)
                     elif "qwen3-tts" in root_dir.lower():
                         qwen_model_folder = os.path.basename(root_dir)
                         os.makedirs(os.path.join(base_models_dir, "qwen3_tts", qwen_model_folder), exist_ok=True)
@@ -370,9 +375,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         if widgets is not None and widx is not None and len(widgets) > widx: widgets[widx] = v
 
                     if c_type == "DiffusionModelLoaderKJ":
-                        set_val("unet_name", 0, "ltx-2.3-22b-distilled-fp8.safetensors")
+                        # FIX: Corrected input name from unet_name to model_name and patched sage_attention correctly
+                        set_val("model_name", 0, "ltx-2.3-22b-distilled-fp8.safetensors")
                         set_val("weight_dtype", 1, "default") 
-                        set_val("use_sage_attention", 3, False) 
+                        set_val("sage_attention", None, "auto") 
                         
                     elif c_type == "LTXAVTextEncoderLoader":
                         set_val("text_encoder", 0, "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors")
@@ -399,6 +405,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         set_val("width", None, custom_w)
                         set_val("custom_height", None, custom_h)
                         set_val("height", None, custom_h)
+                        
+                        # FIX: Clamp Director parameters perfectly to avoid Validation Error
+                        if c_type == "LTXDirector":
+                            set_val("img_compression", None, 100)
+                            set_val("divisible_by", None, 256)
                         
                         if total_frames > 0:  
                             set_val("duration_frames", None, total_frames)
