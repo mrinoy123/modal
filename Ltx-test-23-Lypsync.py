@@ -405,7 +405,7 @@ except Exception: pass
                     if c_type == "DiffusionModelLoaderKJ":
                         inputs["model_name"] = "ltx-2.3-22b-dev-fp8.safetensors"
                         inputs["weight_dtype"] = "default" 
-                        inputs["sage_attention"] = "sdpa"
+                        inputs["sage_attention"] = "auto"
                         
                     elif c_type == "DenoLTXMultiLoraLoader":
                         inputs["lora_1"] = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors" 
