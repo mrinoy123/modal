@@ -1,7 +1,5 @@
 # ==============================================================================
 # PART 1: IMPORTS & ENVIRONMENT SETUP
-# Purpose: Initializes necessary Python libraries and environment variables 
-# for the Modal application, including async orchestration and HTTP client handling.
 # ==============================================================================
 import modal
 import subprocess
@@ -26,8 +24,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="numba")
 
 # ==============================================================================
 # PART 2 & 3: BASE IMAGE & OS CONFIGURATION
-# Purpose: Sets up the raw CUDA 12.5 container, required Linux libraries (ffmpeg, build-essential),
-# and foundational Python ML dependencies required for LTX inference.
 # ==============================================================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04",
@@ -37,7 +33,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm",
     "libgoogle-perftools-dev", "sox", "libsox-fmt-all"
 ).env({
-    "FORCE_REBUILD_INDEX": "522"  
+    "FORCE_REBUILD_INDEX": "523"  
 })
 
 build_image = base_image.env({
@@ -55,8 +51,6 @@ build_image = base_image.env({
 
 # ==============================================================================
 # PART 4: COMFYUI & CUSTOM NODES CLONING
-# Purpose: Pulls the ComfyUI core alongside specifically required audio-visual nodes 
-# (VideoHelperSuite, LTXVideo, WhatDreamsCost, Qwen-TTS) and applies non-conflicting dependencies.
 # ==============================================================================
 torch_image = build_image.run_commands(
     "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
@@ -94,8 +88,6 @@ final_image = deps_image.run_commands(
 
 # ==============================================================================
 # PART 5: MODAL APP CONFIGURATION & CLOUD VOLUMES 
-# Purpose: Defines the GPU scaling limits, mounts the external model weight volume, 
-# injects CPU-based pointer cache nodes for multi-subgraph healing, and starts the internal ComfyUI server.
 # ==============================================================================
 app = modal.App("media-worker-ltx23-director-lypsync-v3")
 weights_volume = modal.Volume.from_name("ltx-2-3-all-model-weights", create_if_missing=False)
@@ -285,11 +277,10 @@ modal_weights:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
-        # NOTE: Removed --cache-none to fix static noise from unmapped VRAM dropping
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
-            "--mmap-torch-files", "--temp-directory", "/tmp/comfy_swap", 
-           "--cache-none", --bf16-vae", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
+            "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
+            "--bf16-vae", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -349,9 +340,6 @@ modal_weights:
 
     # ==============================================================================
     # PART 6: LYPSYNC 3-SUBGRAPH ORCHESTRATION & BATCHING
-    # Purpose: Exposes the primary API endpoint to accept n8n payloads, orchestrates the audio generation, 
-    # safely configures the LTX Director JSON workflow (now without divisible_by limits crashing), 
-    # and synchronizes the final rendered MP4s back to Cloudflare R2.
     # ==============================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
@@ -413,7 +401,7 @@ modal_weights:
                         set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
                         set_val("enabled_1", 1, True)
                         set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
-                        set_val("enabled_2", 6, True)
+                        set_val("enabled_2", 6, True)  # FIXED: Ensure LoRA is forcefully enabled
 
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         set_val("scene_id", None, str(idx))
@@ -423,6 +411,10 @@ modal_weights:
                         set_val("width", None, custom_w)
                         set_val("custom_height", None, custom_h)
                         set_val("height", None, custom_h)
+                        
+                        if c_type == "LTXDirector":
+                            set_val("img_compression", None, 100)
+                            set_val("divisible_by", None, 32)
                         
                         if total_frames > 0:  
                             set_val("duration_frames", None, total_frames)
@@ -585,9 +577,7 @@ modal_weights:
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
-                        
-                        # Fix: Scaled the frame ceiling up to support 20-second generations cleanly
-                        if padded_frames > 501: padded_frames = 501 
+                        if padded_frames > 257: padded_frames = 257 
                         
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
@@ -640,7 +630,13 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
-                        # Fix: Graph healing block removed here to stop sending dead inputs to MemoryCacheWriter
+                        # --- GRAPH HEALING: FIX SUBGRAPH 2 STATIC NOISE CAUSE ---
+                        # Prevent negative conditioning bleed into the cache writer
+                        cond_id = next((k for k, v in sg2.items() if v.get("class_type") == "LTXVConditioning"), None)
+                        for node_id, node_data in sg2.items():
+                            if node_data.get("class_type") == "MemoryCacheWriter" and cond_id:
+                                node_data["inputs"]["negative"] = [cond_id, 1]
+
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
                         
                         print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx}...", flush=True)
@@ -655,7 +651,35 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg3 = json.loads(json.dumps(subgraph_3))
 
-                        # Fix: Graph healing block removed here to stop scrambling Audio/Video Latent mappings
+                        # --- GRAPH HEALING: FIX SUBGRAPH 3 STATIC NOISE CAUSE ---
+                        # Identify Stage 1 Denoised Audio Separator automatically
+                        stage1_sep_id = None
+                        for n_id, n_data in sg3.items():
+                            if n_data.get("class_type") == "LTXVSeparateAVLatent":
+                                av_input = n_data.get("inputs", {}).get("av_latent", [])
+                                if isinstance(av_input, list):
+                                    sampler_node = sg3.get(str(av_input[0]), {})
+                                    sigmas_link = sampler_node.get("inputs", {}).get("sigmas", [])
+                                    if isinstance(sigmas_link, list):
+                                        scheduler_node = sg3.get(str(sigmas_link[0]), {})
+                                        if float(scheduler_node.get("inputs", {}).get("denoise", 1.0)) == 1.0:
+                                            stage1_sep_id = n_id
+                                            
+                        if not stage1_sep_id: stage1_sep_id = "108" # Safety fallback
+                        
+                        for node_id, node_data in sg3.items():
+                            c_type = node_data.get("class_type")
+                            # Force Stage 2 Concatenator to utilize clean Stage 1 Audio (Prevents static noise)
+                            if c_type == "LTXVConcatAVLatent":
+                                vid_link = node_data.get("inputs", {}).get("video_latent", [])
+                                if isinstance(vid_link, list) and str(vid_link[0]) in sg3:
+                                    if sg3[str(vid_link[0])].get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
+                                        node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
+                                        
+                            # Force VAE Audio Decoder to decode pristine Stage 1 Audio (Prevents metallic audio)
+                            if c_type == "LTXVAudioVAEDecode":
+                                node_data["inputs"]["samples"] = [stage1_sep_id, 1]
+
                         sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
 
                         print(f"🚀 Diffusing & Rendering Video for Scene {idx}...", flush=True)
