@@ -11,11 +11,17 @@ on:
         options:
           - both
           - ltx-v2-3
+          - ltx-test-23-lypsync
           - sonic-lypsync
           - LTX-19b-new-v20
 
 jobs:
-  deploy-modal:
+  # ============================================================================
+  # JOB 1: LTX V2.3 VIDEO ENGINE
+  # ============================================================================
+  deploy-ltx-v2-3:
+    name: 🎬 Deploy LTX v2.3 Engine
+    if: github.event.inputs.target == 'both' || github.event.inputs.target == 'ltx-v2-3'
     runs-on: ubuntu-latest
     steps:
       - name: 🛰️ Checkout Repository
@@ -30,28 +36,90 @@ jobs:
         run: pip install modal fastapi
 
       - name: 🚀 Deploy LTX v2.3 Engine
-        if: github.event.inputs.target == 'both' || github.event.inputs.target == 'ltx-v2-3'
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          echo "Deploying LTX v2.3 Video API..."
+          echo "Deploying LTX v2.3 Video API on isolated instance..."
           modal deploy ltx-v2-3-video-generator-deploy.py
 
-      - name: 🚀 Deploy LTX-19b New v20 Engine
-        if: github.event.inputs.target == 'both' || github.event.inputs.target == 'LTX-19b-new-v20'
+  # ============================================================================
+  # JOB 2: LTX TEST 2.3 LYPSYNC ENGINE (NEW TARGET)
+  # ============================================================================
+  deploy-ltx-test-23-lypsync:
+    name: 🎙️ Deploy LTX Test 2.3 Lypsync
+    if: github.event.inputs.target == 'both' || github.event.inputs.target == 'ltx-test-23-lypsync'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛰️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install Modal & Dependencies
+        run: pip install modal fastapi
+
+      - name: 🚀 Deploy LTX Test 2.3 Lypsync Engine
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          echo "Deploying LTX-19b-new-v20 Video API..."
+          echo "Deploying Ltx-test-23-Lypsync API on isolated instance..."
+          modal deploy Ltx-test-23-Lypsync.py
+
+  # ============================================================================
+  # JOB 3: LTX-19B NEW V20 ENGINE
+  # ============================================================================
+  deploy-ltx-19b-new-v20:
+    name: 🚀 Deploy LTX-19b New v20
+    if: github.event.inputs.target == 'both' || github.event.inputs.target == 'LTX-19b-new-v20'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛰️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install Modal & Dependencies
+        run: pip install modal fastapi
+
+      - name: 🚀 Deploy LTX-19b New v20 Engine
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          echo "Deploying LTX-19b-new-v20 Video API on isolated instance..."
           modal deploy LTX-19b-new-v20.py
 
-      - name: 🗣️ Deploy Sonic Lip-Sync Engine
-        if: github.event.inputs.target == 'both' || github.event.inputs.target == 'sonic-lypsync'
+  # ============================================================================
+  # JOB 4: SONIC LIP-SYNC ENGINE
+  # ============================================================================
+  deploy-sonic-lypsync:
+    name: 🗣️ Deploy Sonic Lip-Sync
+    if: github.event.inputs.target == 'both' || github.event.inputs.target == 'sonic-lypsync'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛰️ Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install Modal & Dependencies
+        run: pip install modal fastapi
+
+      - name: 🚀 Deploy Sonic Lip-Sync Engine
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: |
-          echo "Deploying Sonic Lip-Sync API..."
+          echo "Deploying Sonic Lip-Sync API on isolated instance..."
           modal deploy sonic-lypsync-deploy.py
