@@ -12,15 +12,13 @@ import aiohttp
 import urllib.request
 import asyncio
 import ctypes
-import base64
 import math
-import re
-import warnings
 import glob
 from urllib.parse import urlparse
 from fastapi import Request, Response, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from typing import Optional
+import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="numba")
 
@@ -35,7 +33,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm",
     "libgoogle-perftools-dev" 
 ).env({
-    "FORCE_REBUILD_INDEX": "512"  
+    "FORCE_REBUILD_INDEX": "515"  
 })
 
 build_image = base_image.env({
@@ -69,7 +67,7 @@ clone_image = torch_image.run_commands(
     "git clone --depth 1 https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone --depth 1 https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
     "git clone --depth 1 https://github.com/kijai/ComfyUI-MelBandRoFormer.git /workspace/ComfyUI/custom_nodes/ComfyUI-MelBandRoFormer",
-    "git clone --depth 1 https://github.com/filliptm/ComfyUI_FL-CosyVoice3.git /workspace/ComfyUI/custom_nodes/ComfyUI_FL-CosyVoice3",
+    "git clone --depth 1 https://github.com/StartHua/ComfyUI-Qwen3-TTS.git /workspace/ComfyUI/custom_nodes/ComfyUI-Qwen3-TTS",
     "git clone --depth 1 https://github.com/kijai/ComfyUI-PromptRelay.git /workspace/ComfyUI/custom_nodes/ComfyUI-PromptRelay"
 )
 
@@ -81,7 +79,7 @@ deps_image = clone_image.run_commands(
 )
 
 final_image = deps_image.run_commands(
-    "python3.12 -m pip install --no-cache-dir transformers>=4.49.0",
+    "python3.12 -m pip install --no-cache-dir transformers>=4.49.0 pydub",
     "echo '' >> /usr/local/lib/python3.12/site-packages/sageattention/__init__.py",
     "echo 'sageattn_qk_int8_pv_fp16_triton = sageattn' >> /usr/local/lib/python3.12/site-packages/sageattention/__init__.py",
     "echo 'import sys; sys.modules[\"torch\"].float8_e8m0fnu = getattr(sys.modules[\"torch\"], \"float8_e8m0fnu\", sys.modules[\"torch\"].float32)' >> /usr/local/lib/python3.12/site-packages/torch/__init__.py",
@@ -91,7 +89,7 @@ final_image = deps_image.run_commands(
 # ==============================================================================
 # PART 5: MODAL APP CONFIGURATION & CLOUD VOLUMES 
 # ==============================================================================
-app = modal.App("media-worker-ltx23-director-lypsync")
+app = modal.App("media-worker-ltx23-director-lypsync-v3")
 weights_volume = modal.Volume.from_name("ltx-2-3-all-model-weights", create_if_missing=False)
 
 @app.cls(
@@ -207,66 +205,51 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MemoryCacheWriter": "Memory Cache Writer",
     "MemoryCacheReader": "Memory Cache Reader"
 }
-
-try:
-    import comfy.ldm.lightricks.vae.causal_audio_autoencoder
-    _orig_encode = comfy.ldm.lightricks.vae.causal_audio_autoencoder.CausalAudioAutoencoder.encode
-    def _patched_encode(self, x, **kwargs):
-        return _orig_encode(self, x.to(next(self.parameters()).dtype), **kwargs)
-    comfy.ldm.lightricks.vae.causal_audio_autoencoder.CausalAudioAutoencoder.encode = _patched_encode
-
-    _orig_decode = comfy.ldm.lightricks.vae.causal_audio_autoencoder.CausalAudioAutoencoder.decode
-    def _patched_decode(self, z, **kwargs):
-        return _orig_decode(self, z.to(next(self.parameters()).dtype), **kwargs)
-    comfy.ldm.lightricks.vae.causal_audio_autoencoder.CausalAudioAutoencoder.decode = _patched_decode
-except Exception: pass
 """)
 
-        print("🔗 Running Atomic Model Folder Linker for ALL LTX 2.3 Dependencies...")
+        print("🔗 Running Atomic Model Folder Linker for LTX 2.3 & Qwen3-TTS...")
         base_models_dir = "/workspace/ComfyUI/models"
         
         dirs = [
             "unet", "vae", "clip", "text_encoders", "checkpoints", "loras", 
-            "upscale_models", "latent_upscale_models", "cosyvoice", 
-            "melbandroformer", "diffusion_models", "audio_separators", 
-            "audio_vae", "audio_checkpoints"
+            "upscale_models", "latent_upscale_models", "diffusion_models", 
+            "audio_separators", "audio_vae", "audio_checkpoints", "qwen3_tts"
         ]
         for d in dirs: os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         if os.path.exists("/mnt/weights/canonical_storage"):
             for root_dir, _, files in os.walk("/mnt/weights/canonical_storage"):
-                if "cosyvoice3" in root_dir.split(os.sep): continue 
                 for filename in files:
                     if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin", ".onnx", ".yaml", ".json")): continue
                     src_path = os.path.join(root_dir, filename)
+                    name_lower = filename.lower()
                     
-                    if "spatial-upscaler" in filename.lower():
-                        dest = os.path.join(base_models_dir, "latent_upscale_models", filename)
-                    elif "lora" in filename.lower() or "talking_head" in filename.lower():
-                        dest = os.path.join(base_models_dir, "loras", filename)
+                    if "spatial-upscaler" in name_lower:
+                        dest = "latent_upscale_models"
+                    elif any(x in name_lower for x in ["lora", "talking_head", "transition", "hardcut", "camera-control"]):
+                        dest = "loras"
+                    elif "audio_vae" in name_lower:
+                        dest = "audio_vae"
+                    elif "video_vae" in name_lower or "taeltx" in name_lower:
+                        dest = "vae"
+                    elif "gemma" in name_lower or "text_projection" in name_lower or "clip" in name_lower:
+                        dest = "clip"
+                        # Mirror to text_encoders for universal compatibility
+                        alt_dest = os.path.join(base_models_dir, "text_encoders", filename)
+                        if not os.path.exists(alt_dest): os.symlink(src_path, alt_dest)
+                    elif "melband" in name_lower:
+                        dest = "melbandroformer"
+                    elif "qwen3-tts" in root_dir.lower():
+                        qwen_model_folder = os.path.basename(root_dir)
+                        os.makedirs(os.path.join(base_models_dir, "qwen3_tts", qwen_model_folder), exist_ok=True)
+                        dest = os.path.join("qwen3_tts", qwen_model_folder)
                     else:
-                        dest = os.path.join(base_models_dir, "checkpoints", filename) 
+                        dest = "checkpoints" # Default unet location
                         
-                    for target_dir in dirs:
-                        if target_dir == "cosyvoice": continue 
-                        symlink_dest = os.path.join(base_models_dir, target_dir, filename)
-                        if not os.path.exists(symlink_dest):
-                            try: os.symlink(src_path, symlink_dest)
-                            except FileExistsError: pass
-
-        cosy_src_1 = "/mnt/weights/cosyvoice3"
-        cosy_src_2 = "/mnt/weights/canonical_storage/cosyvoice3"
-        active_cosy_src = cosy_src_1 if os.path.exists(cosy_src_1) else (cosy_src_2 if os.path.exists(cosy_src_2) else None)
-        
-        if active_cosy_src:
-            dest_cosy = os.path.join(base_models_dir, "cosyvoice", "Fun-CosyVoice3-0.5B")
-            if not os.path.exists(dest_cosy):
-                try:
-                    os.makedirs(os.path.dirname(dest_cosy), exist_ok=True)
-                    os.symlink(active_cosy_src, dest_cosy)
-                    print(f"🔗 Mapped local CosyVoice3 folder successfully from {active_cosy_src}")
-                except Exception as e:
-                    print(f"⚠️ Failed to link CosyVoice folder: {e}")
+                    symlink_dest = os.path.join(base_models_dir, dest, filename)
+                    if not os.path.exists(symlink_dest):
+                        try: os.symlink(src_path, symlink_dest)
+                        except FileExistsError: pass
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -306,7 +289,7 @@ except Exception: pass
             except Exception: time.sleep(2)
                 
         if not comfy_ready: os._exit(1)
-        print("✅ Base pipeline active. Awaiting Dual-Subgraph Triggers.")
+        print("✅ Base pipeline active. Awaiting 3-Subgraph Triggers.")
 
     async def clear_comfy_memory(self, session, unload_models=False):
         try:
@@ -328,10 +311,8 @@ except Exception: pass
                 raise HTTPException(status_code=500, detail=f"Failed to queue prompt: {r.status} - {err_text}")
             res = await r.json()
             
-            if "error" in res:
-                raise HTTPException(status_code=500, detail=f"Validation Error: {res['error']}")
-            if "node_errors" in res and res["node_errors"]:
-                raise HTTPException(status_code=500, detail=f"Node Errors: {res['node_errors']}")
+            if "error" in res: raise HTTPException(status_code=500, detail=f"Validation Error: {res['error']}")
+            if "node_errors" in res and res["node_errors"]: raise HTTPException(status_code=500, detail=f"Node Errors: {res['node_errors']}")
                 
             prompt_id = res["prompt_id"]
 
@@ -349,7 +330,7 @@ except Exception: pass
             await asyncio.sleep(1)
 
     # ==============================================================================
-    # PART 6: LYPSYNC FAST-BATCH ENDPOINT
+    # PART 6: LYPSYNC 3-SUBGRAPH ORCHESTRATION & BATCHING
     # ==============================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
@@ -366,9 +347,10 @@ except Exception: pass
             batch_scenes = body.get("batch_scenes", [])
             subgraph_1 = body.get("subgraph_1")
             subgraph_2 = body.get("subgraph_2")
+            subgraph_3 = body.get("subgraph_3")
 
             if not batch_scenes: raise HTTPException(status_code=400, detail="Missing batch_scenes array.")
-            if not subgraph_1 or not subgraph_2: raise HTTPException(status_code=400, detail="Missing Subgraph definitions.")
+            if not subgraph_1 or not subgraph_2 or not subgraph_3: raise HTTPException(status_code=400, detail="Missing Subgraph definitions.")
 
             dynamic_guides_dir = "/workspace/ComfyUI/input/dynamic_guides"
             if os.path.exists(dynamic_guides_dir): shutil.rmtree(dynamic_guides_dir)
@@ -377,50 +359,24 @@ except Exception: pass
             ram_task = asyncio.create_task(self._ram_squeezer())
             generated_outputs = []
 
-            def clean_dialog_prompt(dialog_str: str) -> str:
-                lines = dialog_str.split("\n")
-                cleaned_parts = []
-                for line in lines:
-                    line_strip = line.strip()
-                    if not line_strip: 
-                        continue
-                    if line_strip.startswith(("[Scene]", "[Characters]", "[Characters]")):
-                        line_strip = line_strip.replace("[Scene]", "").replace("[Characters]", "").strip()
-                    if ":" in line_strip:
-                        parts = line_strip.split(":", 1)
-                        if parts[0].strip().lower() in ["speaker a", "speaker b", "speaker", "characters"]:
-                            line_strip = parts[1].strip()
-                    if line_strip:
-                        cleaned_parts.append(line_strip)
-                return " ".join(cleaned_parts)
-
+            # ---- CORE FUNCTION: GLOBAL NODE WEIGHT INJECTOR ----
             def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
-                audio_node_counter = 0
-                image_node_counter = 0
-
                 for node_id, node_data in list(sg.items()):
                     c_type = node_data.get("class_type", "")
-                    
                     if "inputs" not in node_data: node_data["inputs"] = {}
                     inputs = node_data["inputs"]
                     widgets = node_data.get("widgets_values", [])
 
                     def set_val(k, widx, v):
                         inputs[k] = v
-                        if widgets is not None and widx is not None and len(widgets) > widx:
-                            widgets[widx] = v
+                        if widgets is not None and widx is not None and len(widgets) > widx: widgets[widx] = v
 
+                    # Explicit Weight & Loader Overrides
                     if c_type == "DiffusionModelLoaderKJ":
+                        set_val("unet_name", 0, "ltx-2.3-22b-distilled-fp8.safetensors")
                         set_val("weight_dtype", 1, "default") 
-                        # CORRECT FIX: Turn OFF Sage Attention boolean to trigger default PyTorch SDPA
                         set_val("use_sage_attention", 3, False) 
                         
-                    elif c_type == "DenoLTXMultiLoraLoader":
-                        set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
-                        set_val("strength_1", 3, 1.0) 
-                        set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
-                        set_val("strength_2", 8, 0.45)
-                            
                     elif c_type == "LTXAVTextEncoderLoader":
                         set_val("text_encoder", 0, "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors")
                         set_val("ckpt_name", 1, "ltx-2.3_text_projection_bf16.safetensors")
@@ -436,18 +392,16 @@ except Exception: pass
                         
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
                         set_val("model_name", 0, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
-                        
-                    elif c_type == "FL_CosyVoice3_ModelLoader":
-                        set_val("model_version", 0, "Fun-CosyVoice3-0.5B")
-                        set_val("download_source", 1, "HuggingFace")
-                        
+
+                    elif c_type == "DenoLTXMultiLoraLoader":
+                        set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
+                        set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
+
+                    # Global Cache & Sync Overrides
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         set_val("scene_id", None, str(idx))
-                        
-                    elif c_type == "BasicScheduler":
-                        if str(node_id) == "307":
-                            set_val("denoise", 2, 1.0) 
 
+                    # Director Core Overrides
                     elif c_type in ["LTXDirector", "LTXDirectorGuide", "PromptRelayEncode"]:
                         set_val("custom_width", None, custom_w)
                         set_val("width", None, custom_w)
@@ -458,75 +412,7 @@ except Exception: pass
                             set_val("duration_frames", None, total_frames)
                             set_val("length", None, total_frames)
                             set_val("duration_seconds", None, exact_audio_duration)
-
-                        spk1 = scene_data.get("speaker1_text", "").strip() or "Speaking naturally."
-                        spk2 = scene_data.get("speaker2_text", "").strip() or "Responding."
-                        dialog = scene_data.get("dialog_text", "").strip() or spk1
-                        visual_prompt = clean_dialog_prompt(dialog)
-
-                        has_char_2 = bool(scene_data.get("image2_url"))
-                        segments = []
-
-                        if has_char_2:
-                            frames_1 = int(total_frames / 2)
-                            frames_2 = total_frames - frames_1
-                            segments.append({
-                                "id": "shot_1", "start": 0, "length": frames_1,
-                                "prompt": spk1, "type": "image", "imageFile": f"dynamic_guides/char1_{idx}.png"
-                            })
-                            segments.append({
-                                "id": "shot_2", "start": frames_1, "length": frames_2,
-                                "prompt": spk2, "type": "image", "imageFile": f"dynamic_guides/char2_{idx}.png"
-                            })
-                        else:
-                            segments.append({
-                                "id": "shot_1", "start": 0, "length": total_frames,
-                                "prompt": visual_prompt, "type": "image", "imageFile": f"dynamic_guides/char1_{idx}.png"
-                            })
-
-                        if c_type == "LTXDirector":
-                            set_val("timeline_data", None, json.dumps({
-                                "segments": segments, 
-                                "audioSegments": [{"audioFile": f"dynamic_guides/perfect_dialog_{idx}.wav", "start": 0}]
-                            }))
-                        
-                        formatted_prompt = f"[Scene] Cinematic visual.\n[Characters]\nSpeaker: {dialog}"
-                        set_val("local_prompts", None, formatted_prompt)
-                        set_val("global_prompts", None, formatted_prompt)
-                        set_val("global_prompt", None, formatted_prompt)
-                        set_val("text", None, formatted_prompt)
-                                
-                    elif c_type == "FL_CosyVoice3_Dialog":
-                        set_val("dialog_text", 0, scene_data.get("dialog_text", "SPEAKER A: Hello."))
-                        set_val("seed", 3, scene_data.get("seed", int(time.time() * 1000) % 1000000))
-                        
-                    elif c_type == "LoadAudio":
-                        audio_node_counter += 1
-                        target_aud = f"dynamic_guides/spk1_{idx}.wav" if audio_node_counter == 1 else f"dynamic_guides/spk2_{idx}.wav"
-                        set_val("audio_path", None, target_aud)
-                        set_val("audio", None, target_aud)
                             
-                    elif c_type == "LoadImage":
-                        image_node_counter += 1
-                        target_img = f"dynamic_guides/char1_{idx}.png" if image_node_counter == 1 else f"dynamic_guides/char2_{idx}.png"
-                        set_val("image_path", None, target_img)
-                        set_val("image", None, target_img)
-                        set_val("image_url", None, target_img)
-                            
-                    elif c_type == "RandomNoise":
-                        set_val("noise_seed", 0, scene_data.get("seed", int(time.time() * 1000) % 1000000))
-                        
-                    elif c_type == "VHS_VideoCombine":
-                        set_val("save_output", None, True)
-
-                    elif c_type == "VAEDecode" and str(node_id) == "301":
-                        if total_frames > 97 and "109" in sg:
-                            inputs["samples"] = ["109", 2]
-                            
-                    elif c_type == "LTXVAudioVAEDecode" and str(node_id) == "302":
-                        if total_frames > 97 and "108" in sg:
-                            inputs["samples"] = ["108", 1]
-
                 return sg
 
             try:
@@ -553,130 +439,141 @@ except Exception: pass
                         except Exception: pass
                         return False
 
-                    print(f"\n[Lypsync API] 🎙️ STARTING PHASE 0: INDEPENDENT AUDIO GENERATION FOR {len(batch_scenes)} SCENES", flush=True)
+                    print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
+                    
+                    import soundfile as sf
+                    import numpy as np 
+                    from PIL import Image
                     
                     for idx, scene in enumerate(batch_scenes):
-                        spk1_path = os.path.join(dynamic_guides_dir, f"spk1_{idx}.wav")
-                        spk2_path = os.path.join(dynamic_guides_dir, f"spk2_{idx}.wav")
-                        img1_path = os.path.join(dynamic_guides_dir, f"char1_{idx}.png")
-                        img2_path = os.path.join(dynamic_guides_dir, f"char2_{idx}.png")
-
-                        await download_asset(scene.get("speaker1_audio_url"), spk1_path)
-                        await download_asset(scene.get("speaker2_audio_url"), spk2_path)
+                        # Safely auto-parse 1-person vs 2-person configurations
+                        speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
+                        script_array = scene.get("script", [{"speaker": "A", "text": "Testing audio.", "visual_action": "Stable camera."}])
+                        
+                        img1_path = os.path.join(dynamic_guides_dir, f"master_shot_1_{idx}.png")
+                        img2_path = os.path.join(dynamic_guides_dir, f"master_shot_2_{idx}.png")
+                        
                         await download_asset(scene.get("image1_url"), img1_path)
                         await download_asset(scene.get("image2_url"), img2_path)
-                        
-                        import soundfile as sf
-                        import numpy as np 
-                        for aud_p in [spk1_path, spk2_path]:
-                            if not os.path.exists(aud_p): sf.write(aud_p, np.zeros(16000, dtype=np.float32), 16000)
 
-                        from PIL import Image
-                        if not os.path.exists(img1_path):
-                            Image.new('RGB', (custom_w, custom_h), color='black').save(img1_path)
-                        else:
-                            try: Image.open(img1_path).convert("RGB").resize((custom_w, custom_h), Image.Resampling.LANCZOS).save(img1_path)
-                            except Exception: Image.new('RGB', (custom_w, custom_h), color='black').save(img1_path)
-                            
-                        if os.path.exists(img2_path):
-                            try: Image.open(img2_path).convert("RGB").resize((custom_w, custom_h), Image.Resampling.LANCZOS).save(img2_path)
-                            except Exception: Image.new('RGB', (custom_w, custom_h), color='black').save(img2_path)
-                        else:
-                            Image.new('RGB', (custom_w, custom_h), color='black').save(img2_path)
-                            
-                        audio_script = f"SPEAKER A: {scene.get('speaker1_text', '')}\nSPEAKER B: {scene.get('speaker2_text', '.')}".strip()
+                        if not os.path.exists(img1_path): Image.new('RGB', (custom_w, custom_h), color='black').save(img1_path)
+                        else: Image.open(img1_path).convert("RGB").resize((custom_w, custom_h), Image.Resampling.LANCZOS).save(img1_path)
+                        if os.path.exists(img2_path): Image.open(img2_path).convert("RGB").resize((custom_w, custom_h), Image.Resampling.LANCZOS).save(img2_path)
+
+                        master_audio_arrays = []
+                        total_frames_tracked = 0
+                        segments_timeline = []
+                        target_samplerate = 24000
                         
-                        phase0_wf = {
-                          "4": { "class_type": "FL_CosyVoice3_ModelLoader", "inputs": { "model_version": "Fun-CosyVoice3-0.5B", "download_source": "HuggingFace", "device": "auto" } },
-                          "20": { "class_type": "LoadAudio", "inputs": {"audio": f"dynamic_guides/spk1_{idx}.wav"} },
-                          "21": { "class_type": "LoadAudio", "inputs": {"audio": f"dynamic_guides/spk2_{idx}.wav"} },
-                          "6": { "class_type": "FL_CosyVoice3_Dialog", "inputs": { "dialog_text": audio_script, "speed": 1, "seed": scene.get("seed", 42), "model": ["4", 0], "speaker_A_Audio": ["20", 0], "speaker_B_Audio": ["21", 0] } },
-                          "99": { "class_type": "SaveAudio", "inputs": { "audio": ["6", 0], "filename_prefix": f"raw_dialog_{idx}" } }
+                        # Sequential Batch Processing Loop
+                        for line_idx, line in enumerate(script_array):
+                            spk_id = line.get("speaker", "A")
+                            spk_conf = speakers_conf.get(spk_id, {"mode": "design", "prompt": "A default voice."})
+                            line_text = line.get("text", "")
+                            visual_action = line.get("visual_action", "Stable camera.")
+
+                            sg1 = json.loads(json.dumps(subgraph_1))
+                            
+                            # Safely extract dynamic Qwen3 Node Map
+                            qwen_design_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceDesign"), None)
+                            qwen_clone_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceClonePrompt"), None)
+                            qwen_dialogue_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSDialogueInference"), None)
+                            save_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "SaveAudio"), None)
+                            load_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "LoadAudio"), None)
+
+                            # Dynamic Graph Wiring Overrides
+                            sg1[save_audio_id]["inputs"]["filename_prefix"] = f"raw_line_{idx}_{line_idx}"
+                            sg1[qwen_dialogue_id]["inputs"]["text"] = f"Speaker {spk_id}: {line_text}"
+                            
+                            # BYPASS SWITCH LOGIC: Directly route designated voice engine into dialogue node
+                            if spk_conf.get("mode") == "clone":
+                                ref_path = os.path.join(dynamic_guides_dir, f"ref_spk_{spk_id}.wav")
+                                if not os.path.exists(ref_path): await download_asset(spk_conf.get("ref_url"), ref_path)
+                                sg1[load_audio_id]["inputs"]["audio"] = ref_path
+                                sg1[qwen_dialogue_id]["inputs"]["role_bank"] = [str(qwen_clone_id), 0]
+                            else:
+                                sg1[qwen_design_id]["inputs"]["instruct"] = spk_conf.get("prompt", "")
+                                sg1[qwen_dialogue_id]["inputs"]["role_bank"] = [str(qwen_design_id), 0]
+
+                            print(f"🎤 Synthesizing Audio Slice: Speaker {spk_id} - Line {line_idx}...", flush=True)
+                            await self.execute_comfy_workflow(session, sg1)
+
+                            output_files = glob.glob(f"/workspace/ComfyUI/output/raw_line_{idx}_{line_idx}_*.*")
+                            if not output_files: raise Exception(f"Failed to generate audio for Line {line_idx}.")
+                            output_files.sort(key=os.path.getmtime)
+                            raw_slice_path = output_files[-1]
+
+                            # Millisecond Measurement & Math
+                            data, samplerate = sf.read(raw_slice_path)
+                            target_samplerate = samplerate
+                            duration_seconds = len(data) / samplerate
+                            frames_for_line = math.ceil(duration_seconds * 25)
+                            
+                            # Auto map correct focus image if running a 2-person split shot
+                            img_target = img2_path if (spk_id == "B" and os.path.exists(img2_path)) else img1_path
+                            segments_timeline.append({
+                                "id": f"shot_{line_idx}",
+                                "start": total_frames_tracked,
+                                "length": frames_for_line,
+                                "prompt": visual_action,
+                                "type": "image",
+                                "imageFile": img_target
+                            })
+                            
+                            total_frames_tracked += frames_for_line
+                            master_audio_arrays.append(data)
+                            os.remove(raw_slice_path)
+
+                        # Assemble final unified timeline
+                        master_audio = np.concatenate(master_audio_arrays)
+                        perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
+                        sf.write(perfect_audio_path, master_audio, target_samplerate)
+                        
+                        total_frames_tracked = (math.ceil(total_frames_tracked / 8) * 8) + 1
+                        if total_frames_tracked > 257: total_frames_tracked = 257 
+                        
+                        scene["exact_audio_duration"] = float(total_frames_tracked - 1) / 25.0
+                        scene["total_frames"] = total_frames_tracked
+                        scene["timeline_payload"] = {
+                            "segments": segments_timeline,
+                            "audioSegments": [{"audioFile": perfect_audio_path, "start": 0}]
                         }
                         
-                        print(f"🎤 Running Isolated TTS pass for Scene {idx}...", flush=True)
-                        await self.execute_comfy_workflow(session, phase0_wf)
-                        
-                        output_files = glob.glob(f"/workspace/ComfyUI/output/raw_dialog_{idx}_*.*")
-                        if not output_files: raise Exception("Phase 0 failed to generate Audio.")
-                        output_files.sort(key=os.path.getmtime)
-                        raw_audio_path = output_files[-1]
+                        print(f"✅ Scene {idx} Calculated: {total_frames_tracked} Frames. Timeline Built.", flush=True)
 
-                        data, samplerate = sf.read(raw_audio_path)
-                        actual_audio_duration = len(data) / samplerate
-
-                        total_frames = (math.ceil(int(actual_audio_duration * 25) / 8) * 8) + 1
-                        if total_frames > 257: total_frames = 257 
-                        exact_audio_duration = float(total_frames - 1) / 25.0
-                        
-                        target_samples = int(exact_audio_duration * samplerate)
-                        if len(data) > target_samples:
-                            data = data[:target_samples]
-                        elif len(data) < target_samples:
-                            pad_width = target_samples - len(data)
-                            if data.ndim == 1: data = np.pad(data, (0, pad_width), mode='constant')
-                            else: data = np.pad(data, ((0, pad_width), (0,0)), mode='constant')
-
-                        perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
-                        sf.write(perfect_audio_path, data, samplerate)
-                        
-                        scene["exact_audio_duration"] = exact_audio_duration
-                        scene["total_frames"] = total_frames
-
-                    print("\n[Lypsync API] 🎬 STARTING PHASE 1: DIRECTING & ENCODING", flush=True)
-                    for idx, scene in enumerate(batch_scenes):
-                        exact_audio_duration = scene["exact_audio_duration"]
-                        total_frames = scene["total_frames"]
-                        
-                        sg1 = json.loads(json.dumps(subgraph_1))
-                        
-                        dialog_node_id = None
-                        writer_node_id = None
-                        director_node_id = None
-                        
-                        for nid, ndata in sg1.items():
-                            c_type = ndata.get("class_type")
-                            if c_type == "FL_CosyVoice3_Dialog":
-                                dialog_node_id = nid
-                            elif c_type == "MemoryCacheWriter":
-                                writer_node_id = nid
-                            elif c_type == "LTXDirector":
-                                director_node_id = nid
-                                
-                        if dialog_node_id:
-                            sg1["999"] = {"class_type": "LoadAudio", "inputs": {"audio": f"dynamic_guides/perfect_dialog_{idx}.wav"}}
-                            for nid, ndata in sg1.items():
-                                for k, v in ndata.get("inputs", {}).items():
-                                    if isinstance(v, list) and v[0] == dialog_node_id:
-                                        sg1[nid]["inputs"][k] = ["999", 0]
-                                        
-                        if writer_node_id and director_node_id:
-                            sg1[writer_node_id]["inputs"]["audio_latent"] = [director_node_id, 3]
-
-                        sg1 = inject_node_overrides(sg1, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene)
-
-                        print(f"🎬 Processing Encoded Caches for Scene {idx} (Locked to {total_frames} frames / {exact_audio_duration:.3f}s)...", flush=True)
-                        await self.execute_comfy_workflow(session, sg1)
-                        await self.clear_comfy_memory(session, unload_models=False)
-
-                    print("\n🧹 Phase 1 Batch Complete. Clearing Address Spaces...", flush=True)
+                    print("\n🧹 Phase 1 Complete. Purging Audio Engines...", flush=True)
                     await self.clear_comfy_memory(session, unload_models=True)
 
-                    print(f"\n[Lypsync API] 🎥 STARTING PHASE 2: BASE SAMPLING & UPSCALING {len(batch_scenes)} VIDEOS", flush=True)
+                    print(f"\n[Lypsync API] 🎬 STARTING PHASE 2: DIRECTOR WORKFLOW CACHING", flush=True)
+                    for idx, scene in enumerate(batch_scenes):
+                        sg2 = json.loads(json.dumps(subgraph_2))
+                        
+                        # Trigger Global Modeller Injections 
+                        sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
+                        
+                        director_id = next((k for k, v in sg2.items() if v["class_type"] == "LTXDirector"), None)
+                        if director_id:
+                            w_vals = sg2[director_id].get("widgets_values", [])
+                            if len(w_vals) > 3:
+                                w_vals[1] = scene["total_frames"] 
+                                w_vals[3] = json.dumps(scene["timeline_payload"])
+                            sg2[director_id]["widgets_values"] = w_vals
+
+                        print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx}...", flush=True)
+                        await self.execute_comfy_workflow(session, sg2)
+                        await self.clear_comfy_memory(session, unload_models=False)
+
+                    print(f"\n[Lypsync API] 🎞️ STARTING PHASE 3: FINAL COMBINE & RENDER", flush=True)
                     out_dir = "/workspace/ComfyUI/output"
                     if os.path.exists(out_dir): shutil.rmtree(out_dir)
                     os.makedirs(out_dir)
 
                     for idx, scene in enumerate(batch_scenes):
-                        scene["seed"] = scene.get("seed", int(time.time() * 1000) % 1000000)
-                        exact_audio_duration = scene["exact_audio_duration"]
-                        total_frames = scene["total_frames"]
+                        sg3 = json.loads(json.dumps(subgraph_3))
+                        sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
 
-                        sg2 = json.loads(json.dumps(subgraph_2))
-                        sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene)
-
-                        print(f"🎬 Rendering Video for Scene {idx}...", flush=True)
-                        await self.execute_comfy_workflow(session, sg2)
+                        print(f"🚀 Diffusing & Rendering Video for Scene {idx}...", flush=True)
+                        await self.execute_comfy_workflow(session, sg3)
                         await self.clear_comfy_memory(session, unload_models=False)
 
                         output_files = []
@@ -684,13 +581,13 @@ except Exception: pass
                             for name in filenames:
                                 if name.endswith((".mp4", ".gif", ".webm")): output_files.append(os.path.join(root_p, name))
 
-                        if not output_files: raise Exception(f"Inference for Scene {idx} finished but no output media files detected.")
+                        if not output_files: raise Exception(f"Phase 3 for Scene {idx} finished but no media files detected.")
                         
                         output_files.sort(key=os.path.getmtime)
                         target_video_file = output_files[-1]
                         saved_filename = os.path.basename(target_video_file)
 
-                        target_key = f"{date_folder}/lypsync_clips/{int(time.time())}_{scene.get('name', 'clip')}_{saved_filename}"
+                        target_key = f"{date_folder}/lypsync_v3_clips/{int(time.time())}_{scene.get('name', 'clip')}_{saved_filename}"
                         print(f"📤 Syncing Finished Asset {idx} to R2...", flush=True)
                         await asyncio.get_event_loop().run_in_executor(None, self.s3.upload_file, target_video_file, "video-asset-files-storage-workflow", target_key)
                         
@@ -703,7 +600,7 @@ except Exception: pass
                         })
                         os.remove(target_video_file)
 
-                    print(f"\n[Lypsync API] 🎉 All Scenes Rendered. Pipeline Finished. Full Purge.", flush=True)
+                    print(f"\n[Lypsync API] 🎉 All Subgraphs Rendered. Pipeline Finished.", flush=True)
                     await self.clear_comfy_memory(session, unload_models=True)
                     
                     return generated_outputs
