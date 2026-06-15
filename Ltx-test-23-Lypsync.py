@@ -206,54 +206,58 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MemoryCacheReader": "Memory Cache Reader"
 }
 """)
-
-        print("🔗 Running Atomic Model Folder Linker for LTX 2.3 & Qwen3-TTS...")
-        base_models_dir = "/workspace/ComfyUI/models"
         
-        dirs = [
-            "unet", "vae", "clip", "text_encoders", "checkpoints", "loras", 
-            "upscale_models", "latent_upscale_models", "diffusion_models", 
-            "audio_separators", "audio_vae", "audio_checkpoints", "qwen3_tts"
-        ]
-        for d in dirs: os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
+        # ==============================================================================
+        # FIX 1: Native ComfyUI Model Indexing for KJNodes (Extra Model Paths)
+        # ==============================================================================
+        print("🔗 Configuring Native Extra Model Paths for Canonical Storage...")
+        extra_paths_content = """
+modal_weights:
+    base_path: /mnt/weights/canonical_storage
+    checkpoints: .
+    unet: .
+    diffusion_models: .
+    clip: .
+    text_encoders: .
+    vae: .
+    loras: .
+    latent_upscale_models: .
+    audio_vae: .
+"""
+        with open("/workspace/ComfyUI/extra_model_paths.yaml", "w") as f:
+            f.write(extra_paths_content)
 
+        print("🔗 Running Atomic Model Folder Linker...")
+        base_models_dir = "/workspace/ComfyUI/models"
+        for d in ["unet", "vae", "clip", "text_encoders", "checkpoints", "loras", "upscale_models", "latent_upscale_models", "diffusion_models", "audio_vae", "qwen3_tts"]: 
+            os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
+
+        # ==============================================================================
+        # FIX 2: Symlink Qwen3-TTS entire folders directly to preserve HF subdirectories
+        # ==============================================================================
+        qwen_src_dir = "/mnt/weights/qwen3tts"
+        if os.path.exists(qwen_src_dir):
+            for folder_name in os.listdir(qwen_src_dir):
+                src_path = os.path.join(qwen_src_dir, folder_name)
+                dest_path = os.path.join(base_models_dir, "qwen3_tts", folder_name)
+                # Link the full directory to preserve tokenizers and config subfolders
+                if os.path.isdir(src_path) and not os.path.exists(dest_path):
+                    os.symlink(src_path, dest_path)
+
+        # ==============================================================================
+        # FIX 3: Brute-force symlink canonical_storage files into ALL standard node directories
+        # ==============================================================================
         if os.path.exists("/mnt/weights/canonical_storage"):
             for root_dir, _, files in os.walk("/mnt/weights/canonical_storage"):
                 for filename in files:
-                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin", ".onnx", ".yaml", ".json")): continue
+                    if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")): continue
                     src_path = os.path.join(root_dir, filename)
-                    name_lower = filename.lower()
-                    
-                    if "spatial-upscaler" in name_lower:
-                        dest = "latent_upscale_models"
-                    elif any(x in name_lower for x in ["lora", "talking_head", "transition", "hardcut", "camera-control"]):
-                        dest = "loras"
-                    elif "audio_vae" in name_lower:
-                        dest = "audio_vae"
-                        # FIX: LTX Custom Node specifically looks in 'checkpoints' as a fallback
-                        alt_dest = os.path.join(base_models_dir, "checkpoints", filename)
-                        if not os.path.exists(alt_dest): os.symlink(src_path, alt_dest)
-                    elif "video_vae" in name_lower or "taeltx" in name_lower:
-                        dest = "vae"
-                    elif "gemma" in name_lower or "text_projection" in name_lower or "clip" in name_lower:
-                        dest = "clip"
-                        # Mirror to text_encoders for universal compatibility
-                        alt_dest = os.path.join(base_models_dir, "text_encoders", filename)
-                        if not os.path.exists(alt_dest): os.symlink(src_path, alt_dest)
-                        # FIX: LTX text_projection Custom Node specifically looks in 'checkpoints'
-                        alt_dest2 = os.path.join(base_models_dir, "checkpoints", filename)
-                        if not os.path.exists(alt_dest2): os.symlink(src_path, alt_dest2)
-                    elif "qwen3-tts" in root_dir.lower():
-                        qwen_model_folder = os.path.basename(root_dir)
-                        os.makedirs(os.path.join(base_models_dir, "qwen3_tts", qwen_model_folder), exist_ok=True)
-                        dest = os.path.join("qwen3_tts", qwen_model_folder)
-                    else:
-                        dest = "checkpoints" # Default unet location
-                        
-                    symlink_dest = os.path.join(base_models_dir, dest, filename)
-                    if not os.path.exists(symlink_dest):
-                        try: os.symlink(src_path, symlink_dest)
-                        except FileExistsError: pass
+                    # We securely mirror the file to ALL ComfyUI folders. This prevents ANY custom node from failing
+                    for dest in ["checkpoints", "unet", "diffusion_models", "clip", "vae", "loras", "latent_upscale_models", "audio_vae", "text_encoders"]:
+                        symlink_dest = os.path.join(base_models_dir, dest, filename)
+                        if not os.path.exists(symlink_dest):
+                            try: os.symlink(src_path, symlink_dest)
+                            except Exception: pass
 
         self.s3 = boto3.client(
             service_name='s3', 
@@ -375,7 +379,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         if widgets is not None and widx is not None and len(widgets) > widx: widgets[widx] = v
 
                     if c_type == "DiffusionModelLoaderKJ":
-                        # FIX: Corrected input name from unet_name to model_name and patched sage_attention correctly
                         set_val("model_name", 0, "ltx-2.3-22b-distilled-fp8.safetensors")
                         set_val("weight_dtype", 1, "default") 
                         set_val("sage_attention", None, "auto") 
@@ -406,7 +409,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         set_val("custom_height", None, custom_h)
                         set_val("height", None, custom_h)
                         
-                        # FIX: Clamp Director parameters perfectly to avoid Validation Error
                         if c_type == "LTXDirector":
                             set_val("img_compression", None, 100)
                             set_val("divisible_by", None, 256)
@@ -482,7 +484,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                             save_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "SaveAudio"), None)
                             load_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "LoadAudio"), None)
 
-                            # 🛑 CRITICAL FIX: Dynamically disconnect all other prompts in the role bank so Comfy doesn't try to execute unlinked logic!
                             if qwen_rolebank_id and "inputs" in sg1[qwen_rolebank_id]:
                                 for i in range(2, 9):
                                     if f"prompt_{i}" in sg1[qwen_rolebank_id]["inputs"]:
@@ -495,12 +496,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                                 ref_path = os.path.join(dynamic_guides_dir, f"ref_spk_{spk_id}.wav")
                                 if not os.path.exists(ref_path): await download_asset(spk_conf.get("ref_url"), ref_path)
                                 
-                                # 🛑 CRITICAL FIX 2: Route Clone Audio into Clone Prompt Node properly
                                 sg1[load_audio_id]["inputs"]["audio"] = ref_path
                                 sg1[qwen_clone_id]["inputs"]["ref_audio"] = [str(load_audio_id), 0]
                                 sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_clone_id), 0]
                             else:
-                                # 🛑 CRITICAL FIX 3: Route Design Audio into Clone Prompt Node to satisfy expected embedding Output type!
                                 sg1[qwen_design_id]["inputs"]["instruct"] = spk_conf.get("prompt", "")
                                 sg1[qwen_clone_id]["inputs"]["ref_audio"] = [str(qwen_design_id), 0]
                                 sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_clone_id), 0]
