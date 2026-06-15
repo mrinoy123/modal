@@ -25,7 +25,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="numba")
 # ==============================================================================
 # PART 2 & 3: BASE IMAGE & OS CONFIGURATION
 # ==============================================================================
-# ADDED: 'sox' and 'libsox-fmt-all' to fix the Qwen3-TTS Missing Sox Error
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04",
     add_python="3.12"
@@ -359,7 +358,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
             ram_task = asyncio.create_task(self._ram_squeezer())
             generated_outputs = []
 
-            # ---- CORE FUNCTION: GLOBAL NODE WEIGHT INJECTOR ----
             def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
                 for node_id, node_data in list(sg.items()):
                     c_type = node_data.get("class_type", "")
@@ -371,7 +369,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         inputs[k] = v
                         if widgets is not None and widx is not None and len(widgets) > widx: widgets[widx] = v
 
-                    # Explicit Weight & Loader Overrides
                     if c_type == "DiffusionModelLoaderKJ":
                         set_val("unet_name", 0, "ltx-2.3-22b-distilled-fp8.safetensors")
                         set_val("weight_dtype", 1, "default") 
@@ -394,11 +391,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
                         set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
 
-                    # Global Cache & Sync Overrides
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         set_val("scene_id", None, str(idx))
 
-                    # Director Core Overrides
                     elif c_type in ["LTXDirector", "LTXDirectorGuide", "PromptRelayEncode"]:
                         set_val("custom_width", None, custom_w)
                         set_val("width", None, custom_w)
@@ -443,7 +438,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                     from PIL import Image
                     
                     for idx, scene in enumerate(batch_scenes):
-                        # Safely auto-parse 1-person vs 2-person configurations
                         speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
                         script_array = scene.get("script", [{"speaker": "A", "text": "Testing audio.", "visual_action": "Stable camera."}])
                         
@@ -462,7 +456,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         segments_timeline = []
                         target_samplerate = 24000
                         
-                        # Sequential Batch Processing Loop
                         for line_idx, line in enumerate(script_array):
                             spk_id = line.get("speaker", "A")
                             spk_conf = speakers_conf.get(spk_id, {"mode": "design", "prompt": "A default voice."})
@@ -471,7 +464,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
                             sg1 = json.loads(json.dumps(subgraph_1))
                             
-                            # Safely extract dynamic Qwen3 Node Map
                             qwen_design_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceDesign"), None)
                             qwen_clone_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceClonePrompt"), None)
                             qwen_rolebank_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSRoleBank"), None)
@@ -479,27 +471,29 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                             save_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "SaveAudio"), None)
                             load_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "LoadAudio"), None)
 
-                            # Dynamic Graph Wiring Overrides
+                            # 🛑 CRITICAL FIX: Dynamically disconnect all other prompts in the role bank so Comfy doesn't try to execute unlinked logic!
+                            if qwen_rolebank_id and "inputs" in sg1[qwen_rolebank_id]:
+                                for i in range(2, 9):
+                                    if f"prompt_{i}" in sg1[qwen_rolebank_id]["inputs"]:
+                                        del sg1[qwen_rolebank_id]["inputs"][f"prompt_{i}"]
+
                             sg1[save_audio_id]["inputs"]["filename_prefix"] = f"raw_line_{idx}_{line_idx}"
-                            
-                            # FIX: Use 'script' as key for Dialogue Inference node, NOT 'text'
                             sg1[qwen_dialogue_id]["inputs"]["script"] = f"Speaker {spk_id}: {line_text}"
                             
-                            # FIX: Properly Route Design/Clone via Role Bank, bypassing all Switch complications 
                             if spk_conf.get("mode") == "clone":
                                 ref_path = os.path.join(dynamic_guides_dir, f"ref_spk_{spk_id}.wav")
                                 if not os.path.exists(ref_path): await download_asset(spk_conf.get("ref_url"), ref_path)
                                 
-                                # Route Clone Flow securely
+                                # 🛑 CRITICAL FIX 2: Route Clone Audio into Clone Prompt Node properly
                                 sg1[load_audio_id]["inputs"]["audio"] = ref_path
                                 sg1[qwen_clone_id]["inputs"]["ref_audio"] = [str(load_audio_id), 0]
                                 sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_clone_id), 0]
                             else:
-                                # Route Design Flow securely
+                                # 🛑 CRITICAL FIX 3: Route Design Audio into Clone Prompt Node to satisfy expected embedding Output type!
                                 sg1[qwen_design_id]["inputs"]["instruct"] = spk_conf.get("prompt", "")
-                                sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_design_id), 0]
+                                sg1[qwen_clone_id]["inputs"]["ref_audio"] = [str(qwen_design_id), 0]
+                                sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_clone_id), 0]
 
-                            # Finally, map configured Role Bank to Dialogue Inference Node to satisfy node types
                             sg1[qwen_rolebank_id]["inputs"]["role_name_1"] = f"Speaker {spk_id}"
                             sg1[qwen_dialogue_id]["inputs"]["role_bank"] = [str(qwen_rolebank_id), 0]
 
@@ -511,13 +505,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                             output_files.sort(key=os.path.getmtime)
                             raw_slice_path = output_files[-1]
 
-                            # Millisecond Measurement & Math
                             data, samplerate = sf.read(raw_slice_path)
                             target_samplerate = samplerate
                             duration_seconds = len(data) / samplerate
                             frames_for_line = math.ceil(duration_seconds * 25)
                             
-                            # Auto map correct focus image if running a 2-person split shot
                             img_target = img2_path if (spk_id == "B" and os.path.exists(img2_path)) else img1_path
                             segments_timeline.append({
                                 "id": f"shot_{line_idx}",
@@ -532,7 +524,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                             master_audio_arrays.append(data)
                             os.remove(raw_slice_path)
 
-                        # Assemble final unified timeline
                         master_audio = np.concatenate(master_audio_arrays)
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
@@ -556,7 +547,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
-                        # Trigger Global Modeller Injections 
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
                         
                         director_id = next((k for k, v in sg2.items() if v["class_type"] == "LTXDirector"), None)
