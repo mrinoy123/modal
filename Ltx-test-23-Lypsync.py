@@ -25,15 +25,16 @@ warnings.filterwarnings("ignore", category=UserWarning, module="numba")
 # ==============================================================================
 # PART 2 & 3: BASE IMAGE & OS CONFIGURATION
 # ==============================================================================
+# ADDED: 'sox' and 'libsox-fmt-all' to fix the Qwen3-TTS Missing Sox Error
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04",
     add_python="3.12"
 ).apt_install(
     "git", "wget", "ffmpeg", "libgl1", "libglib2.0-0",
     "build-essential", "ninja-build", "cmake", "clang", "llvm",
-    "libgoogle-perftools-dev" 
+    "libgoogle-perftools-dev", "sox", "libsox-fmt-all"
 ).env({
-    "FORCE_REBUILD_INDEX": "520"  
+    "FORCE_REBUILD_INDEX": "521"  
 })
 
 build_image = base_image.env({
@@ -380,7 +381,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         set_val("text_encoder", 0, "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors")
                         set_val("ckpt_name", 1, "ltx-2.3_text_projection_bf16.safetensors")
                         
-                        
                     elif c_type == "LTXVAudioVAELoader":
                         set_val("ckpt_name", 0, "LTX23_audio_vae_bf16.safetensors")
                         
@@ -474,23 +474,34 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                             # Safely extract dynamic Qwen3 Node Map
                             qwen_design_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceDesign"), None)
                             qwen_clone_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceClonePrompt"), None)
+                            qwen_rolebank_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSRoleBank"), None)
                             qwen_dialogue_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSDialogueInference"), None)
                             save_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "SaveAudio"), None)
                             load_audio_id = next((k for k, v in sg1.items() if v["class_type"] == "LoadAudio"), None)
 
                             # Dynamic Graph Wiring Overrides
                             sg1[save_audio_id]["inputs"]["filename_prefix"] = f"raw_line_{idx}_{line_idx}"
-                            sg1[qwen_dialogue_id]["inputs"]["text"] = f"Speaker {spk_id}: {line_text}"
                             
-                            # BYPASS SWITCH LOGIC: Directly route designated voice engine into dialogue node
+                            # FIX: Use 'script' as key for Dialogue Inference node, NOT 'text'
+                            sg1[qwen_dialogue_id]["inputs"]["script"] = f"Speaker {spk_id}: {line_text}"
+                            
+                            # FIX: Properly Route Design/Clone via Role Bank, bypassing all Switch complications 
                             if spk_conf.get("mode") == "clone":
                                 ref_path = os.path.join(dynamic_guides_dir, f"ref_spk_{spk_id}.wav")
                                 if not os.path.exists(ref_path): await download_asset(spk_conf.get("ref_url"), ref_path)
+                                
+                                # Route Clone Flow securely
                                 sg1[load_audio_id]["inputs"]["audio"] = ref_path
-                                sg1[qwen_dialogue_id]["inputs"]["role_bank"] = [str(qwen_clone_id), 0]
+                                sg1[qwen_clone_id]["inputs"]["ref_audio"] = [str(load_audio_id), 0]
+                                sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_clone_id), 0]
                             else:
+                                # Route Design Flow securely
                                 sg1[qwen_design_id]["inputs"]["instruct"] = spk_conf.get("prompt", "")
-                                sg1[qwen_dialogue_id]["inputs"]["role_bank"] = [str(qwen_design_id), 0]
+                                sg1[qwen_rolebank_id]["inputs"]["prompt_1"] = [str(qwen_design_id), 0]
+
+                            # Finally, map configured Role Bank to Dialogue Inference Node to satisfy node types
+                            sg1[qwen_rolebank_id]["inputs"]["role_name_1"] = f"Speaker {spk_id}"
+                            sg1[qwen_dialogue_id]["inputs"]["role_bank"] = [str(qwen_rolebank_id), 0]
 
                             print(f"🎤 Synthesizing Audio Slice: Speaker {spk_id} - Line {line_idx}...", flush=True)
                             await self.execute_comfy_workflow(session, sg1)
