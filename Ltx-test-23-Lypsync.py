@@ -420,14 +420,22 @@ modal_weights:
                             set_val("duration_seconds", None, exact_audio_duration)
                         
                         # ==============================================================================
-                        # FIX: UNIVERSAL TIMELINE INJECTION (Applied to Phase 2 and Phase 3 Nodes)
+                        # CRITICAL FIX: Explicitly target "timeline_data" input for API JSON workflows
                         # ==============================================================================
                         if c_type in ["LTXDirector", "LTXDirectorGuide"] and "timeline_payload" in scene_data:
                             payload_str = json.dumps(scene_data["timeline_payload"])
+                            
+                            # API JSON workflows STRICTLY read inputs['timeline_data']
+                            set_val("timeline_data", None, payload_str)
+                            
+                            # Fallbacks for UI-mode custom nodes
                             set_val("timeline_ui", None, payload_str)
                             set_val("timeline", None, payload_str)
                             
-                            # Fallback standard injection for UI-formatted workflows
+                            if "global_prompt" in inputs:
+                                fallback_p = scene_data["timeline_payload"]["segments"][0]["prompts"][0] if scene_data["timeline_payload"]["segments"] else "Cinematic shot."
+                                set_val("global_prompt", None, fallback_p)
+                            
                             if widgets is not None and len(widgets) > 3:
                                 widgets[1] = total_frames 
                                 widgets[3] = payload_str
