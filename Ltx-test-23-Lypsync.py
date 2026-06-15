@@ -420,21 +420,21 @@ modal_weights:
                             set_val("duration_seconds", None, exact_audio_duration)
                         
                         # ==============================================================================
-                        # CRITICAL FIX: Explicitly target "timeline_data" input for API JSON workflows
+                        # CRITICAL FIX: Explicitly populate local_prompts & segment_lengths strings 
+                        # to replace the missing JS frontend behavior in API mode.
                         # ==============================================================================
                         if c_type in ["LTXDirector", "LTXDirectorGuide"] and "timeline_payload" in scene_data:
                             payload_str = json.dumps(scene_data["timeline_payload"])
-                            
-                            # API JSON workflows STRICTLY read inputs['timeline_data']
                             set_val("timeline_data", None, payload_str)
-                            
-                            # Fallbacks for UI-mode custom nodes
                             set_val("timeline_ui", None, payload_str)
                             set_val("timeline", None, payload_str)
                             
-                            if "global_prompt" in inputs:
-                                fallback_p = scene_data["timeline_payload"]["segments"][0]["prompts"][0] if scene_data["timeline_payload"]["segments"] else "Cinematic shot."
-                                set_val("global_prompt", None, fallback_p)
+                            # Inject exact hidden string lists that the Python Node requires
+                            if "local_prompts_str" in scene_data:
+                                set_val("local_prompts", None, scene_data["local_prompts_str"])
+                                set_val("segment_lengths", None, scene_data["segment_lengths_str"])
+                                set_val("guide_strength", None, scene_data["guide_strength_str"])
+                                set_val("global_prompt", None, scene_data["global_prompt_str"])
                             
                             if widgets is not None and len(widgets) > 3:
                                 widgets[1] = total_frames 
@@ -589,12 +589,27 @@ modal_weights:
                                     s["length"] = 0
                             segments_timeline = [s for s in segments_timeline if s["length"] > 0]
                         
+                        # ==============================================================================
+                        # CRITICAL FIX 2: Generate literal backend string representations 
+                        # to replace the missing JS frontend behavior in API mode.
+                        # ==============================================================================
+                        local_prompts_str = "\n".join([s["prompt"] for s in segments_timeline])
+                        segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline])
+                        guide_strength_str = ",".join(["1.0"] * len(segments_timeline))
+                        global_prompt_str = segments_timeline[0]["prompt"] if segments_timeline else "A cinematic shot, stable camera, talking."
+
                         scene["exact_audio_duration"] = float(padded_frames - 1) / 25.0
                         scene["total_frames"] = padded_frames
                         scene["timeline_payload"] = {
                             "segments": segments_timeline,
                             "audioSegments": [{"audioFile": perfect_audio_path, "start": 0}]
                         }
+                        
+                        # Bundle the strings to be injected directly into the API kwargs
+                        scene["local_prompts_str"] = local_prompts_str
+                        scene["segment_lengths_str"] = segment_lengths_str
+                        scene["guide_strength_str"] = guide_strength_str
+                        scene["global_prompt_str"] = global_prompt_str
                         
                         print(f"✅ Scene {idx} Calculated: {padded_frames} Frames. Timeline Accurately Padded.", flush=True)
 
