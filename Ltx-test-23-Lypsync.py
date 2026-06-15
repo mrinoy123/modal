@@ -418,6 +418,19 @@ modal_weights:
                             set_val("duration_frames", None, total_frames)
                             set_val("length", None, total_frames)
                             set_val("duration_seconds", None, exact_audio_duration)
+                        
+                        # ==============================================================================
+                        # FIX: UNIVERSAL TIMELINE INJECTION (Applied to Phase 2 and Phase 3 Nodes)
+                        # ==============================================================================
+                        if c_type in ["LTXDirector", "LTXDirectorGuide"] and "timeline_payload" in scene_data:
+                            payload_str = json.dumps(scene_data["timeline_payload"])
+                            set_val("timeline_ui", None, payload_str)
+                            set_val("timeline", None, payload_str)
+                            
+                            # Fallback standard injection for UI-formatted workflows
+                            if widgets is not None and len(widgets) > 3:
+                                widgets[1] = total_frames 
+                                widgets[3] = payload_str
                             
                 return sg
 
@@ -477,7 +490,6 @@ modal_weights:
                             
                             visual_action = line.get("visual_action", "Stable camera.").replace('"', "'").replace("\n", " ").strip()
                             
-                            # FALLBACK FIX: Make absolutely sure the string is never empty
                             if not visual_action or len(visual_action) < 2:
                                 visual_action = "A cinematic shot, stable camera, talking."
 
@@ -532,16 +544,13 @@ modal_weights:
                             
                             img_target = img2_path if (spk_id == "B" and os.path.exists(img2_path)) else img1_path
                             
-                            # ==============================================================================
-                            # FIX: Injecting ALL possible prompt keys to guarantee LTXDirector catches the text!
-                            # ==============================================================================
                             segments_timeline.append({
                                 "id": f"shot_{line_idx}",
                                 "start": total_frames_tracked,
                                 "length": frames_for_line,
-                                "text": visual_action,          # Captures UI text areas
-                                "prompt": visual_action,        # Captures standard prompt keys
-                                "prompts": [visual_action],     # Captures string array schemas
+                                "text": visual_action,          
+                                "prompt": visual_action,        
+                                "prompts": [visual_action],     
                                 "type": "image",
                                 "imageFile": img_target
                             })
@@ -587,17 +596,8 @@ modal_weights:
                     print(f"\n[Lypsync API] 🎬 STARTING PHASE 2: DIRECTOR WORKFLOW CACHING", flush=True)
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
-                        
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene)
                         
-                        director_id = next((k for k, v in sg2.items() if v["class_type"] == "LTXDirector"), None)
-                        if director_id:
-                            w_vals = sg2[director_id].get("widgets_values", [])
-                            if len(w_vals) > 3:
-                                w_vals[1] = scene["total_frames"] 
-                                w_vals[3] = json.dumps(scene["timeline_payload"])
-                            sg2[director_id]["widgets_values"] = w_vals
-
                         print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx}...", flush=True)
                         await self.execute_comfy_workflow(session, sg2)
                         await self.clear_comfy_memory(session, unload_models=False)
