@@ -35,7 +35,7 @@ base_image = modal.Image.from_registry(
     "build-essential", "ninja-build", "cmake", "clang", "llvm",
     "libgoogle-perftools-dev" 
 ).env({
-    "FORCE_REBUILD_INDEX": "512"  # Cache bump for Timeline Validation Override
+    "FORCE_REBUILD_INDEX": "512"  
 })
 
 build_image = base_image.env({
@@ -92,7 +92,6 @@ final_image = deps_image.run_commands(
 # PART 5: MODAL APP CONFIGURATION & CLOUD VOLUMES 
 # ==============================================================================
 app = modal.App("media-worker-ltx23-director-lypsync")
-# UPDATED: Pointing directly to the new consolidated storage volume
 weights_volume = modal.Volume.from_name("ltx-2-3-all-model-weights", create_if_missing=False)
 
 @app.cls(
@@ -379,7 +378,6 @@ except Exception: pass
             generated_outputs = []
 
             def clean_dialog_prompt(dialog_str: str) -> str:
-                # Helper to strip structured markdown headers from dialogue text for clean visual conditioning
                 lines = dialog_str.split("\n")
                 cleaned_parts = []
                 for line in lines:
@@ -405,35 +403,43 @@ except Exception: pass
                     inputs = node_data.get("inputs", {})
                     
                     if c_type == "DiffusionModelLoaderKJ":
-                        inputs["model_name"] = "ltx-2.3-22b-distilled-fp8.safetensors"
+                        # CRITICAL FIX: Use the dev-fp8 checkpoint to prevent mathematical collision with the ID LoRA
+                        inputs["model_name"] = "ltx-2.3-22b-dev-fp8.safetensors"
+                        
                     elif c_type == "DenoLTXMultiLoraLoader":
-                        # Disable distilled LoRA when using the distilled base checkpoint to prevent dual-distillation weight corruption
-                        inputs["lora_1"] = "__none__" 
+                        # Map accurate LoRA names from your storage 
+                        inputs["lora_1"] = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors" 
+                        inputs["strength_1"] = 0.5   # Distilled LoRA strength
                         inputs["lora_2"] = "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors" 
-                        inputs["strength_2"] = 1.0
+                        inputs["strength_2"] = 1.0   # ID LoRA strength
                         for i in range(3, 9):
                             k = f"lora_{i}"
                             if k in inputs: inputs[k] = "__none__"
+                            
                     elif c_type == "LTXAVTextEncoderLoader":
                         inputs["text_encoder"] = "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors"
                         inputs["ckpt_name"] = "ltx-2.3_text_projection_bf16.safetensors"
+                        
                     elif c_type == "MelBandRoFormerModelLoader":
                         inputs["model_name"] = "MelBandRoformer_fp32.safetensors"
+                        
                     elif c_type == "LTXVAudioVAELoader":
                         inputs["ckpt_name"] = "LTX23_audio_vae_bf16.safetensors"
+                        
                     elif c_type in ["VAELoader", "VAELoaderKJ"]:
                         inputs["vae_name"] = "LTX23_video_vae_bf16.safetensors"
+                        
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
                         inputs["model_name"] = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+                        
                     elif c_type == "FL_CosyVoice3_ModelLoader":
                         inputs["model_version"] = "Fun-CosyVoice3-0.5B"
                         inputs["download_source"] = "HuggingFace" 
+                        
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         inputs["scene_id"] = str(idx)
                         
-                    # 🚀 DIRECTOR OVERRIDE (WITH STRICT FALLBACK PROMPTS & TIMELINE JSON)
-                    elif c_type in ["LTXDirector", "PromptRelayEncode"] or any(k in inputs for k in ["local_prompts", "global_prompts", "global_prompt"]):
-                        
+                    elif c_type in ["LTXDirector", "LTXDirectorGuide", "PromptRelayEncode"]:
                         if "custom_width" in inputs: inputs["custom_width"] = custom_w
                         elif "width" in inputs: inputs["width"] = custom_w
                         
@@ -445,20 +451,13 @@ except Exception: pass
                             if "length" in inputs: inputs["length"] = total_frames
                             if "duration_seconds" in inputs: inputs["duration_seconds"] = exact_audio_duration
 
-                        # 🔥 THE FIX: Strict Fallback Prompts. Empty strings crash the LTXDirector node natively.
-                        spk1 = scene_data.get("speaker1_text", "").strip()
-                        spk2 = scene_data.get("speaker2_text", "").strip()
-                        dialog = scene_data.get("dialog_text", "").strip()
-                        
-                        spk1 = spk1 if spk1 else "Speaking naturally."
-                        spk2 = spk2 if spk2 else "Responding."
-                        dialog = dialog if dialog else spk1
+                        spk1 = scene_data.get("speaker1_text", "").strip() or "Speaking naturally."
+                        spk2 = scene_data.get("speaker2_text", "").strip() or "Responding."
+                        dialog = scene_data.get("dialog_text", "").strip() or spk1
+                        visual_prompt = clean_dialog_prompt(dialog)
 
                         has_char_2 = bool(scene_data.get("image2_url"))
                         segments = []
-
-                        # Visual Prompt parsed cleanly to exclude distracting formatting tags
-                        visual_prompt = clean_dialog_prompt(dialog)
 
                         if has_char_2:
                             frames_1 = int(total_frames / 2)
@@ -477,10 +476,13 @@ except Exception: pass
                                 "prompt": visual_prompt, "type": "image", "imageFile": f"dynamic_guides/char1_{idx}.png"
                             })
 
-                        # Force exact mathematical structure into timeline_data to pass ComfyUI Node validation
-                        inputs["timeline_data"] = json.dumps({"segments": segments, "audioSegments": []})
+                        if c_type == "LTXDirector":
+                            # CRITICAL FIX: Inject the perfectly synced audio dynamically into the timeline string
+                            inputs["timeline_data"] = json.dumps({
+                                "segments": segments, 
+                                "audioSegments": [{"audioFile": f"dynamic_guides/perfect_dialog_{idx}.wav", "start": 0}]
+                            })
                         
-                        # Set text fields just in case it falls back to text overrides
                         formatted_prompt = f"[Scene] Cinematic visual.\n[Characters]\nSpeaker: {dialog}"
                         if "local_prompts" in inputs: inputs["local_prompts"] = formatted_prompt
                         elif "global_prompts" in inputs: inputs["global_prompts"] = formatted_prompt
@@ -589,7 +591,6 @@ except Exception: pass
                         print(f"🎤 Running Isolated TTS pass for Scene {idx}...", flush=True)
                         await self.execute_comfy_workflow(session, phase0_wf)
                         
-                        # Find the generated audio
                         output_files = glob.glob(f"/workspace/ComfyUI/output/raw_dialog_{idx}_*.*")
                         if not output_files: raise Exception("Phase 0 failed to generate Audio.")
                         output_files.sort(key=os.path.getmtime)
@@ -598,12 +599,10 @@ except Exception: pass
                         data, samplerate = sf.read(raw_audio_path)
                         actual_audio_duration = len(data) / samplerate
 
-                        # Calculate exact mathematically valid frames
                         total_frames = (math.ceil(int(actual_audio_duration * 25) / 8) * 8) + 1
                         if total_frames > 257: total_frames = 257 
                         exact_audio_duration = float(total_frames - 1) / 25.0
                         
-                        # Pad/Trim Audio exactly to this duration to prevent tensor shape collapse
                         target_samples = int(exact_audio_duration * samplerate)
                         if len(data) > target_samples:
                             data = data[:target_samples]
@@ -615,7 +614,6 @@ except Exception: pass
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, data, samplerate)
                         
-                        # Save the perfect numbers back into the scene for Phase 1 & 2
                         scene["exact_audio_duration"] = exact_audio_duration
                         scene["total_frames"] = total_frames
 
@@ -626,7 +624,7 @@ except Exception: pass
                         
                         sg1 = json.loads(json.dumps(subgraph_1))
                         
-                        # BYPASS COSYVOICE IN PHASE 1 TO USE THE PERFECT AUDIO
+                        # BYPASS COSYVOICE IN PHASE 1 TO USE THE PERFECT AUDIO FOR VAE ENCODE
                         dialog_node_id = None
                         for nid, ndata in sg1.items():
                             if ndata.get("class_type") == "FL_CosyVoice3_Dialog":
