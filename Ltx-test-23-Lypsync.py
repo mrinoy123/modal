@@ -67,7 +67,7 @@ clone_image = torch_image.run_commands(
     "git clone --depth 1 https://github.com/yolain/ComfyUI-Easy-Use.git /workspace/ComfyUI/custom_nodes/ComfyUI-Easy-Use",
     "git clone --depth 1 https://github.com/Deno2026/comfyui-deno-custom-nodes.git /workspace/ComfyUI/custom_nodes/comfyui-deno-custom-nodes",
     "git clone --depth 1 https://github.com/kijai/ComfyUI-MelBandRoFormer.git /workspace/ComfyUI/custom_nodes/ComfyUI-MelBandRoFormer",
-    "git clone --depth 1 https://github.com/StartHua/ComfyUI-Qwen3-TTS.git /workspace/ComfyUI/custom_nodes/ComfyUI-Qwen3-TTS",
+    "git clone --depth 1 https://github.com/flybirdxx/ComfyUI-Qwen-TTS.git /workspace/ComfyUI/custom_nodes/ComfyUI-Qwen-TTS",
     "git clone --depth 1 https://github.com/kijai/ComfyUI-PromptRelay.git /workspace/ComfyUI/custom_nodes/ComfyUI-PromptRelay"
 )
 
