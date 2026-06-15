@@ -229,9 +229,6 @@ modal_weights:
         for d in ["unet", "vae", "clip", "text_encoders", "checkpoints", "loras", "upscale_models", "latent_upscale_models", "diffusion_models", "audio_vae", "qwen3_tts"]: 
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
-        # ==============================================================================
-        # FIX 1: Foolproof Qwen3-TTS Symlinking (Multiple Path Variants)
-        # ==============================================================================
         print("🔗 Mapping HuggingFace Qwen structure dynamically...")
         qwen_src_dir = "/mnt/weights/qwen3tts"
         if os.path.exists(qwen_src_dir):
@@ -239,16 +236,13 @@ modal_weights:
                 src = os.path.join(qwen_src_dir, d)
                 if not os.path.isdir(src): continue
                 
-                # Link to all potential folder names the custom node might use to bypass downloading
                 for pb in ["qwen3_tts", "Qwen3-TTS", "qwen_tts"]:
-                    # Direct link: models/qwen3_tts/Qwen3-TTS-12Hz-1.7B-VoiceDesign
                     dst1 = os.path.join(base_models_dir, pb, d)
                     os.makedirs(os.path.dirname(dst1), exist_ok=True)
                     if not os.path.exists(dst1):
                         try: os.symlink(src, dst1)
                         except Exception: pass
                         
-                    # Prefixed link: models/qwen3_tts/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
                     dst2 = os.path.join(base_models_dir, pb, "Qwen", d)
                     os.makedirs(os.path.dirname(dst2), exist_ok=True)
                     if not os.path.exists(dst2):
@@ -282,8 +276,6 @@ modal_weights:
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
-        
-        # We removed the HF_HUB_OFFLINE flag so snapshot_download can quietly validate our local files instead of violently crashing
         
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
@@ -484,6 +476,10 @@ modal_weights:
                             line_text = line.get("text", "")
                             
                             visual_action = line.get("visual_action", "Stable camera.").replace('"', "'").replace("\n", " ").strip()
+                            
+                            # FALLBACK FIX: Make absolutely sure the string is never empty
+                            if not visual_action or len(visual_action) < 2:
+                                visual_action = "A cinematic shot, stable camera, talking."
 
                             sg1 = json.loads(json.dumps(subgraph_1))
                             
@@ -536,11 +532,16 @@ modal_weights:
                             
                             img_target = img2_path if (spk_id == "B" and os.path.exists(img2_path)) else img1_path
                             
+                            # ==============================================================================
+                            # FIX: Injecting ALL possible prompt keys to guarantee LTXDirector catches the text!
+                            # ==============================================================================
                             segments_timeline.append({
                                 "id": f"shot_{line_idx}",
                                 "start": total_frames_tracked,
                                 "length": frames_for_line,
-                                "prompts": [visual_action],
+                                "text": visual_action,          # Captures UI text areas
+                                "prompt": visual_action,        # Captures standard prompt keys
+                                "prompts": [visual_action],     # Captures string array schemas
                                 "type": "image",
                                 "imageFile": img_target
                             })
