@@ -207,9 +207,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 """)
         
-        # ==============================================================================
-        # FIX 1: Native ComfyUI Model Indexing for KJNodes (Extra Model Paths)
-        # ==============================================================================
         print("🔗 Configuring Native Extra Model Paths for Canonical Storage...")
         extra_paths_content = """
 modal_weights:
@@ -233,26 +230,29 @@ modal_weights:
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         # ==============================================================================
-        # FIX 2: Symlink Qwen3-TTS entire folders directly to preserve HF subdirectories
+        # FIX 1: Aggressive Target Searching to Prevent Qwen3-TTS Redownloading 
         # ==============================================================================
-        qwen_src_dir = "/mnt/weights/qwen3tts"
-        if os.path.exists(qwen_src_dir):
-            for folder_name in os.listdir(qwen_src_dir):
-                src_path = os.path.join(qwen_src_dir, folder_name)
-                dest_path = os.path.join(base_models_dir, "qwen3_tts", folder_name)
-                # Link the full directory to preserve tokenizers and config subfolders
-                if os.path.isdir(src_path) and not os.path.exists(dest_path):
-                    os.symlink(src_path, dest_path)
+        print("🔗 Mapping HuggingFace Qwen structure dynamically...")
+        qwen_dest_base = os.path.join(base_models_dir, "qwen3_tts", "Qwen")
+        os.makedirs(qwen_dest_base, exist_ok=True)
+        
+        target_qwen_dirs = ["Qwen3-TTS-12Hz-1.7B-VoiceDesign", "Qwen3-TTS-12Hz-1.7B-Base", "Qwen3-TTS-Tokenizer-12Hz"]
+        
+        if os.path.exists("/mnt/weights"):
+            for root, dirs, files in os.walk("/mnt/weights"):
+                for d in dirs:
+                    if d in target_qwen_dirs:
+                        src = os.path.join(root, d)
+                        dst = os.path.join(qwen_dest_base, d)
+                        if not os.path.exists(dst):
+                            try: os.symlink(src, dst)
+                            except Exception: pass
 
-        # ==============================================================================
-        # FIX 3: Brute-force symlink canonical_storage files into ALL standard node directories
-        # ==============================================================================
         if os.path.exists("/mnt/weights/canonical_storage"):
             for root_dir, _, files in os.walk("/mnt/weights/canonical_storage"):
                 for filename in files:
                     if not filename.endswith((".safetensors", ".gguf", ".pth", ".pt", ".bin")): continue
                     src_path = os.path.join(root_dir, filename)
-                    # We securely mirror the file to ALL ComfyUI folders. This prevents ANY custom node from failing
                     for dest in ["checkpoints", "unet", "diffusion_models", "clip", "vae", "loras", "latent_upscale_models", "audio_vae", "text_encoders"]:
                         symlink_dest = os.path.join(base_models_dir, dest, filename)
                         if not os.path.exists(symlink_dest):
@@ -275,6 +275,8 @@ modal_weights:
         env_vars["TORCH_NUM_THREADS"] = "1"
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
+        # Inject universal HF cache override in case nodes fallback to downloading
+        env_vars["HF_HOME"] = "/mnt/weights/huggingface"
         
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
@@ -473,7 +475,9 @@ modal_weights:
                             spk_id = line.get("speaker", "A")
                             spk_conf = speakers_conf.get(spk_id, {"mode": "design", "prompt": "A default voice."})
                             line_text = line.get("text", "")
-                            visual_action = line.get("visual_action", "Stable camera.")
+                            
+                            # FIX 2: Sanitize visual action text to prevent internal JSON parse crashes on weird quotes.
+                            visual_action = line.get("visual_action", "Stable camera.").replace('"', "'").replace("\n", " ").strip()
 
                             sg1 = json.loads(json.dumps(subgraph_1))
                             
@@ -490,7 +494,12 @@ modal_weights:
                                         del sg1[qwen_rolebank_id]["inputs"][f"prompt_{i}"]
 
                             sg1[save_audio_id]["inputs"]["filename_prefix"] = f"raw_line_{idx}_{line_idx}"
-                            sg1[qwen_dialogue_id]["inputs"]["script"] = f"Speaker {spk_id}: {line_text}"
+                            
+                            # Support dynamic node updates safely
+                            if "text" in sg1[qwen_dialogue_id]["inputs"]:
+                                sg1[qwen_dialogue_id]["inputs"]["text"] = f"Speaker {spk_id}: {line_text}"
+                            elif "script" in sg1[qwen_dialogue_id]["inputs"]:
+                                sg1[qwen_dialogue_id]["inputs"]["script"] = f"Speaker {spk_id}: {line_text}"
                             
                             if spk_conf.get("mode") == "clone":
                                 ref_path = os.path.join(dynamic_guides_dir, f"ref_spk_{spk_id}.wav")
@@ -538,17 +547,38 @@ modal_weights:
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
-                        total_frames_tracked = (math.ceil(total_frames_tracked / 8) * 8) + 1
-                        if total_frames_tracked > 257: total_frames_tracked = 257 
+                        # Apply standard LTX divisible rounding padding 
+                        padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
+                        if padded_frames > 257: padded_frames = 257 
                         
-                        scene["exact_audio_duration"] = float(total_frames_tracked - 1) / 25.0
-                        scene["total_frames"] = total_frames_tracked
+                        # ==============================================================================
+                        # FIX 1 (CONTINUED): Guarantee mathematical prompt coverage across entire padded timeline 
+                        # ==============================================================================
+                        current_total_frames = sum(s["length"] for s in segments_timeline)
+                        
+                        if current_total_frames < padded_frames and segments_timeline:
+                            # Stretch the very last visual action to cover the empty padding gap safely
+                            segments_timeline[-1]["length"] += (padded_frames - current_total_frames)
+                        elif current_total_frames > padded_frames:
+                            # Trim excess segments progressively from the back if it overflows 257 exactly
+                            diff = current_total_frames - padded_frames
+                            for s in reversed(segments_timeline):
+                                if s["length"] > diff:
+                                    s["length"] -= diff
+                                    break
+                                else:
+                                    diff -= s["length"]
+                                    s["length"] = 0
+                            segments_timeline = [s for s in segments_timeline if s["length"] > 0]
+                        
+                        scene["exact_audio_duration"] = float(padded_frames - 1) / 25.0
+                        scene["total_frames"] = padded_frames
                         scene["timeline_payload"] = {
                             "segments": segments_timeline,
                             "audioSegments": [{"audioFile": perfect_audio_path, "start": 0}]
                         }
                         
-                        print(f"✅ Scene {idx} Calculated: {total_frames_tracked} Frames. Timeline Built.", flush=True)
+                        print(f"✅ Scene {idx} Calculated: {padded_frames} Frames. Timeline Accurately Padded.", flush=True)
 
                     print("\n🧹 Phase 1 Complete. Purging Audio Engines...", flush=True)
                     await self.clear_comfy_memory(session, unload_models=True)
