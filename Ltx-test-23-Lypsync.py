@@ -400,60 +400,64 @@ except Exception: pass
 
                 for node_id, node_data in list(sg.items()):
                     c_type = node_data.get("class_type", "")
-                    inputs = node_data.get("inputs", {})
                     
+                    if "inputs" not in node_data: node_data["inputs"] = {}
+                    inputs = node_data["inputs"]
+                    widgets = node_data.get("widgets_values", [])
+
+                    def set_val(k, widx, v):
+                        inputs[k] = v
+                        if widgets is not None and widx is not None and len(widgets) > widx:
+                            widgets[widx] = v
+
                     if c_type == "DiffusionModelLoaderKJ":
-                        inputs["model_name"] = "ltx-2.3-22b-dev-fp8.safetensors"
-                        inputs["weight_dtype"] = "default" 
-                        inputs["sage_attention"] = "auto"
+                        set_val("weight_dtype", 1, "default") 
+                        # CORRECT FIX: Turn OFF Sage Attention boolean to trigger default PyTorch SDPA
+                        set_val("use_sage_attention", 3, False) 
                         
                     elif c_type == "DenoLTXMultiLoraLoader":
-                        inputs["lora_1"] = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors" 
-                        inputs["strength_1"] = 0.45
-                        inputs["lora_2"] = "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors" 
-                        inputs["strength_2"] = 0.45
-                        for i in range(3, 9):
-                            k = f"lora_{i}"
-                            if k in inputs: inputs[k] = "__none__"
+                        set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
+                        set_val("strength_1", 3, 1.0) 
+                        set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
+                        set_val("strength_2", 8, 0.45)
                             
                     elif c_type == "LTXAVTextEncoderLoader":
-                        inputs["text_encoder"] = "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors"
-                        inputs["ckpt_name"] = "ltx-2.3_text_projection_bf16.safetensors"
+                        set_val("text_encoder", 0, "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors")
+                        set_val("ckpt_name", 1, "ltx-2.3_text_projection_bf16.safetensors")
                         
                     elif c_type == "MelBandRoFormerModelLoader":
-                        inputs["model_name"] = "MelBandRoformer_fp32.safetensors"
+                        set_val("model_name", 0, "MelBandRoformer_fp32.safetensors")
                         
                     elif c_type == "LTXVAudioVAELoader":
-                        inputs["ckpt_name"] = "LTX23_audio_vae_bf16.safetensors"
+                        set_val("ckpt_name", 0, "LTX23_audio_vae_bf16.safetensors")
                         
                     elif c_type in ["VAELoader", "VAELoaderKJ"]:
-                        inputs["vae_name"] = "LTX23_video_vae_bf16.safetensors"
+                        set_val("vae_name", 0, "LTX23_video_vae_bf16.safetensors")
                         
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
-                        inputs["model_name"] = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+                        set_val("model_name", 0, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
                         
                     elif c_type == "FL_CosyVoice3_ModelLoader":
-                        inputs["model_version"] = "Fun-CosyVoice3-0.5B"
-                        inputs["download_source"] = "HuggingFace" 
+                        set_val("model_version", 0, "Fun-CosyVoice3-0.5B")
+                        set_val("download_source", 1, "HuggingFace")
                         
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
-                        inputs["scene_id"] = str(idx)
+                        set_val("scene_id", None, str(idx))
                         
                     elif c_type == "BasicScheduler":
                         if str(node_id) == "307":
-                            inputs["denoise"] = 1.0
+                            set_val("denoise", 2, 1.0) 
 
                     elif c_type in ["LTXDirector", "LTXDirectorGuide", "PromptRelayEncode"]:
-                        if "custom_width" in inputs: inputs["custom_width"] = custom_w
-                        elif "width" in inputs: inputs["width"] = custom_w
-                        
-                        if "custom_height" in inputs: inputs["custom_height"] = custom_h
-                        elif "height" in inputs: inputs["height"] = custom_h
+                        set_val("custom_width", None, custom_w)
+                        set_val("width", None, custom_w)
+                        set_val("custom_height", None, custom_h)
+                        set_val("height", None, custom_h)
                         
                         if total_frames > 0:  
-                            if "duration_frames" in inputs: inputs["duration_frames"] = total_frames
-                            if "length" in inputs: inputs["length"] = total_frames
-                            if "duration_seconds" in inputs: inputs["duration_seconds"] = exact_audio_duration
+                            set_val("duration_frames", None, total_frames)
+                            set_val("length", None, total_frames)
+                            set_val("duration_seconds", None, exact_audio_duration)
 
                         spk1 = scene_data.get("speaker1_text", "").strip() or "Speaking naturally."
                         spk2 = scene_data.get("speaker2_text", "").strip() or "Responding."
@@ -481,44 +485,44 @@ except Exception: pass
                             })
 
                         if c_type == "LTXDirector":
-                            inputs["timeline_data"] = json.dumps({
+                            set_val("timeline_data", None, json.dumps({
                                 "segments": segments, 
                                 "audioSegments": [{"audioFile": f"dynamic_guides/perfect_dialog_{idx}.wav", "start": 0}]
-                            })
+                            }))
                         
                         formatted_prompt = f"[Scene] Cinematic visual.\n[Characters]\nSpeaker: {dialog}"
-                        if "local_prompts" in inputs: inputs["local_prompts"] = formatted_prompt
-                        elif "global_prompts" in inputs: inputs["global_prompts"] = formatted_prompt
-                        elif "global_prompt" in inputs: inputs["global_prompt"] = formatted_prompt
-                        elif "text" in inputs: inputs["text"] = formatted_prompt
+                        set_val("local_prompts", None, formatted_prompt)
+                        set_val("global_prompts", None, formatted_prompt)
+                        set_val("global_prompt", None, formatted_prompt)
+                        set_val("text", None, formatted_prompt)
                                 
                     elif c_type == "FL_CosyVoice3_Dialog":
-                        inputs["dialog_text"] = scene_data.get("dialog_text", "SPEAKER A: Hello.")
-                        inputs["seed"] = scene_data.get("seed", int(time.time() * 1000) % 1000000)
+                        set_val("dialog_text", 0, scene_data.get("dialog_text", "SPEAKER A: Hello."))
+                        set_val("seed", 3, scene_data.get("seed", int(time.time() * 1000) % 1000000))
                         
                     elif c_type == "LoadAudio":
                         audio_node_counter += 1
                         target_aud = f"dynamic_guides/spk1_{idx}.wav" if audio_node_counter == 1 else f"dynamic_guides/spk2_{idx}.wav"
-                        if "audio_path" in inputs: inputs["audio_path"] = target_aud
-                        elif "audio" in inputs: inputs["audio"] = target_aud
-                        else: inputs["audio"] = target_aud
+                        set_val("audio_path", None, target_aud)
+                        set_val("audio", None, target_aud)
                             
                     elif c_type == "LoadImage":
                         image_node_counter += 1
                         target_img = f"dynamic_guides/char1_{idx}.png" if image_node_counter == 1 else f"dynamic_guides/char2_{idx}.png"
-                        if "image_path" in inputs: inputs["image_path"] = target_img
-                        elif "image" in inputs: inputs["image"] = target_img
-                        elif "image_url" in inputs: inputs["image_url"] = target_img
-                        else: inputs["image"] = target_img
+                        set_val("image_path", None, target_img)
+                        set_val("image", None, target_img)
+                        set_val("image_url", None, target_img)
                             
                     elif c_type == "RandomNoise":
-                        inputs["noise_seed"] = scene_data.get("seed", int(time.time() * 1000) % 1000000)
+                        set_val("noise_seed", 0, scene_data.get("seed", int(time.time() * 1000) % 1000000))
+                        
                     elif c_type == "VHS_VideoCombine":
-                        inputs["save_output"] = True
+                        set_val("save_output", None, True)
 
                     elif c_type == "VAEDecode" and str(node_id) == "301":
                         if total_frames > 97 and "109" in sg:
                             inputs["samples"] = ["109", 2]
+                            
                     elif c_type == "LTXVAudioVAEDecode" and str(node_id) == "302":
                         if total_frames > 97 and "108" in sg:
                             inputs["samples"] = ["108", 1]
@@ -580,7 +584,6 @@ except Exception: pass
                         else:
                             Image.new('RGB', (custom_w, custom_h), color='black').save(img2_path)
                             
-                        # PHASE 0: Generate the Audio Independently First
                         audio_script = f"SPEAKER A: {scene.get('speaker1_text', '')}\nSPEAKER B: {scene.get('speaker2_text', '.')}".strip()
                         
                         phase0_wf = {
@@ -627,12 +630,10 @@ except Exception: pass
                         
                         sg1 = json.loads(json.dumps(subgraph_1))
                         
-                        # --- FIX: DYNAMIC REWIRING ---
                         dialog_node_id = None
                         writer_node_id = None
                         director_node_id = None
                         
-                        # Identify the key nodes
                         for nid, ndata in sg1.items():
                             c_type = ndata.get("class_type")
                             if c_type == "FL_CosyVoice3_Dialog":
@@ -642,7 +643,6 @@ except Exception: pass
                             elif c_type == "LTXDirector":
                                 director_node_id = nid
                                 
-                        # Swap CosyVoice Output for LoadAudio
                         if dialog_node_id:
                             sg1["999"] = {"class_type": "LoadAudio", "inputs": {"audio": f"dynamic_guides/perfect_dialog_{idx}.wav"}}
                             for nid, ndata in sg1.items():
@@ -650,10 +650,7 @@ except Exception: pass
                                     if isinstance(v, list) and v[0] == dialog_node_id:
                                         sg1[nid]["inputs"][k] = ["999", 0]
                                         
-                        # Sever the redundant Audio VAE Encode node and map Director's Audio Latent directly to Cache
                         if writer_node_id and director_node_id:
-                            # In ComfyUI API JSON, links are represented as [node_id, output_index]
-                            # Output index 3 on LTXDirector is "audio_latent"
                             sg1[writer_node_id]["inputs"]["audio_latent"] = [director_node_id, 3]
 
                         sg1 = inject_node_overrides(sg1, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene)
