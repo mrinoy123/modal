@@ -237,8 +237,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         # Mirror to text_encoders for universal compatibility
                         alt_dest = os.path.join(base_models_dir, "text_encoders", filename)
                         if not os.path.exists(alt_dest): os.symlink(src_path, alt_dest)
-                    elif "melband" in name_lower:
-                        dest = "melbandroformer"
+
                     elif "qwen3-tts" in root_dir.lower():
                         qwen_model_folder = os.path.basename(root_dir)
                         os.makedirs(os.path.join(base_models_dir, "qwen3_tts", qwen_model_folder), exist_ok=True)
@@ -381,8 +380,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
                         set_val("text_encoder", 0, "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors")
                         set_val("ckpt_name", 1, "ltx-2.3_text_projection_bf16.safetensors")
                         
-                    elif c_type == "MelBandRoFormerModelLoader":
-                        set_val("model_name", 0, "MelBandRoformer_fp32.safetensors")
                         
                     elif c_type == "LTXVAudioVAELoader":
                         set_val("ckpt_name", 0, "LTX23_audio_vae_bf16.safetensors")
