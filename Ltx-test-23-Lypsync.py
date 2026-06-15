@@ -401,7 +401,7 @@ modal_weights:
                         set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
                         set_val("enabled_1", 1, True)
                         set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
-                        set_val("enabled_2", 6, True)  # FIXED: Ensure LoRA is forcefully enabled
+                        set_val("enabled_2", 6, True)
 
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         set_val("scene_id", None, str(idx))
@@ -631,7 +631,6 @@ modal_weights:
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
                         # --- GRAPH HEALING: FIX SUBGRAPH 2 STATIC NOISE CAUSE ---
-                        # Prevent negative conditioning bleed into the cache writer
                         cond_id = next((k for k, v in sg2.items() if v.get("class_type") == "LTXVConditioning"), None)
                         for node_id, node_data in sg2.items():
                             if node_data.get("class_type") == "MemoryCacheWriter" and cond_id:
@@ -652,7 +651,6 @@ modal_weights:
                         sg3 = json.loads(json.dumps(subgraph_3))
 
                         # --- GRAPH HEALING: FIX SUBGRAPH 3 STATIC NOISE CAUSE ---
-                        # Identify Stage 1 Denoised Audio Separator automatically
                         stage1_sep_id = None
                         for n_id, n_data in sg3.items():
                             if n_data.get("class_type") == "LTXVSeparateAVLatent":
@@ -665,18 +663,26 @@ modal_weights:
                                         if float(scheduler_node.get("inputs", {}).get("denoise", 1.0)) == 1.0:
                                             stage1_sep_id = n_id
                                             
-                        if not stage1_sep_id: stage1_sep_id = "108" # Safety fallback
+                        if not stage1_sep_id: stage1_sep_id = "108"
                         
                         for node_id, node_data in sg3.items():
                             c_type = node_data.get("class_type")
-                            # Force Stage 2 Concatenator to utilize clean Stage 1 Audio (Prevents static noise)
+                            
+                            # Safely isolate Stage 2 Concatenator (Traces back to Upsampler, not Cache)
                             if c_type == "LTXVConcatAVLatent":
                                 vid_link = node_data.get("inputs", {}).get("video_latent", [])
                                 if isinstance(vid_link, list) and str(vid_link[0]) in sg3:
-                                    if sg3[str(vid_link[0])].get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
-                                        node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
+                                    vid_node = sg3[str(vid_link[0])]
+                                    if vid_node.get("class_type") in ["LTXDirectorGuide", "LTXVCropGuides"]:
+                                        latent_src = vid_node.get("inputs", {}).get("latent", [])
+                                        is_stage1 = False
+                                        if isinstance(latent_src, list) and str(latent_src[0]) in sg3:
+                                            if sg3[str(latent_src[0])].get("class_type") == "MemoryCacheReader":
+                                                is_stage1 = True
                                         
-                            # Force VAE Audio Decoder to decode pristine Stage 1 Audio (Prevents metallic audio)
+                                        if not is_stage1:
+                                            node_data["inputs"]["audio_latent"] = [stage1_sep_id, 1]
+                                            
                             if c_type == "LTXVAudioVAEDecode":
                                 node_data["inputs"]["samples"] = [stage1_sep_id, 1]
 
