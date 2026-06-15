@@ -288,7 +288,7 @@ except Exception: pass
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--use-sage-attention", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
+            "--bf16-vae", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -394,7 +394,7 @@ except Exception: pass
                         cleaned_parts.append(line_strip)
                 return " ".join(cleaned_parts)
 
-def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
+            def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene_data):
                 audio_node_counter = 0
                 image_node_counter = 0
 
@@ -403,14 +403,11 @@ def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, tot
                     inputs = node_data.get("inputs", {})
                     
                     if c_type == "DiffusionModelLoaderKJ":
-                        # CRITICAL FIX 1: Load pre-quantized FP8 model as 'default' dtype to prevent double-casting corruption.
-                        # CRITICAL FIX 2: Force 'sdpa' attention to avoid SageAttention NaNs on L40S.
                         inputs["model_name"] = "ltx-2.3-22b-dev-fp8.safetensors"
                         inputs["weight_dtype"] = "default" 
                         inputs["sage_attention"] = "sdpa"
                         
                     elif c_type == "DenoLTXMultiLoraLoader":
-                        # CRITICAL FIX 3: ID LoRA strength must be 0.45, NOT 1.0. 1.0 destroys the manifold geometry.
                         inputs["lora_1"] = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors" 
                         inputs["strength_1"] = 0.45
                         inputs["lora_2"] = "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors" 
@@ -442,6 +439,10 @@ def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, tot
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         inputs["scene_id"] = str(idx)
                         
+                    elif c_type == "BasicScheduler":
+                        if str(node_id) == "307":
+                            inputs["denoise"] = 1.0
+
                     elif c_type in ["LTXDirector", "LTXDirectorGuide", "PromptRelayEncode"]:
                         if "custom_width" in inputs: inputs["custom_width"] = custom_w
                         elif "width" in inputs: inputs["width"] = custom_w
@@ -626,18 +627,34 @@ def inject_node_overrides(sg, idx, custom_w, custom_h, exact_audio_duration, tot
                         
                         sg1 = json.loads(json.dumps(subgraph_1))
                         
-                        # BYPASS COSYVOICE IN PHASE 1 TO USE THE PERFECT AUDIO FOR VAE ENCODE
+                        # --- FIX: DYNAMIC REWIRING ---
                         dialog_node_id = None
+                        writer_node_id = None
+                        director_node_id = None
+                        
+                        # Identify the key nodes
                         for nid, ndata in sg1.items():
-                            if ndata.get("class_type") == "FL_CosyVoice3_Dialog":
+                            c_type = ndata.get("class_type")
+                            if c_type == "FL_CosyVoice3_Dialog":
                                 dialog_node_id = nid
-                                break
+                            elif c_type == "MemoryCacheWriter":
+                                writer_node_id = nid
+                            elif c_type == "LTXDirector":
+                                director_node_id = nid
+                                
+                        # Swap CosyVoice Output for LoadAudio
                         if dialog_node_id:
                             sg1["999"] = {"class_type": "LoadAudio", "inputs": {"audio": f"dynamic_guides/perfect_dialog_{idx}.wav"}}
                             for nid, ndata in sg1.items():
                                 for k, v in ndata.get("inputs", {}).items():
                                     if isinstance(v, list) and v[0] == dialog_node_id:
                                         sg1[nid]["inputs"][k] = ["999", 0]
+                                        
+                        # Sever the redundant Audio VAE Encode node and map Director's Audio Latent directly to Cache
+                        if writer_node_id and director_node_id:
+                            # In ComfyUI API JSON, links are represented as [node_id, output_index]
+                            # Output index 3 on LTXDirector is "audio_latent"
+                            sg1[writer_node_id]["inputs"]["audio_latent"] = [director_node_id, 3]
 
                         sg1 = inject_node_overrides(sg1, idx, custom_w, custom_h, exact_audio_duration, total_frames, scene)
 
