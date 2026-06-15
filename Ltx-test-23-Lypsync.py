@@ -1,5 +1,7 @@
 # ==============================================================================
 # PART 1: IMPORTS & ENVIRONMENT SETUP
+# Purpose: Initializes necessary Python libraries and environment variables 
+# for the Modal application, including async orchestration and HTTP client handling.
 # ==============================================================================
 import modal
 import subprocess
@@ -24,6 +26,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="numba")
 
 # ==============================================================================
 # PART 2 & 3: BASE IMAGE & OS CONFIGURATION
+# Purpose: Sets up the raw CUDA 12.5 container, required Linux libraries (ffmpeg, build-essential),
+# and foundational Python ML dependencies required for LTX inference.
 # ==============================================================================
 base_image = modal.Image.from_registry(
     "nvidia/cuda:12.5.1-devel-ubuntu24.04",
@@ -51,6 +55,8 @@ build_image = base_image.env({
 
 # ==============================================================================
 # PART 4: COMFYUI & CUSTOM NODES CLONING
+# Purpose: Pulls the ComfyUI core alongside specifically required audio-visual nodes 
+# (VideoHelperSuite, LTXVideo, WhatDreamsCost, Qwen-TTS) and applies non-conflicting dependencies.
 # ==============================================================================
 torch_image = build_image.run_commands(
     "python3.12 -m pip install --no-cache-dir torch==2.5.1+cu124 torchvision==0.20.1+cu124 torchaudio==2.5.1+cu124 --extra-index-url https://download.pytorch.org/whl/cu124",
@@ -88,6 +94,8 @@ final_image = deps_image.run_commands(
 
 # ==============================================================================
 # PART 5: MODAL APP CONFIGURATION & CLOUD VOLUMES 
+# Purpose: Defines the GPU scaling limits, mounts the external model weight volume, 
+# injects CPU-based pointer cache nodes for multi-subgraph healing, and starts the internal ComfyUI server.
 # ==============================================================================
 app = modal.App("media-worker-ltx23-director-lypsync-v3")
 weights_volume = modal.Volume.from_name("ltx-2-3-all-model-weights", create_if_missing=False)
@@ -341,6 +349,9 @@ modal_weights:
 
     # ==============================================================================
     # PART 6: LYPSYNC 3-SUBGRAPH ORCHESTRATION & BATCHING
+    # Purpose: Exposes the primary API endpoint to accept n8n payloads, orchestrates the audio generation, 
+    # safely configures the LTX Director JSON workflow (now without divisible_by limits crashing), 
+    # and synchronizes the final rendered MP4s back to Cloudflare R2.
     # ==============================================================================
     @modal.fastapi_endpoint(method="POST")
     async def generate(self, request: Request, x_api_key: Optional[str] = Header(None)):
@@ -412,11 +423,6 @@ modal_weights:
                         set_val("width", None, custom_w)
                         set_val("custom_height", None, custom_h)
                         set_val("height", None, custom_h)
-                        
-                        if c_type == "LTXDirector":
-                            # Fix: Properly map the width/height to avoid 32x100 resolution collapse
-                            set_val("img_compression", None, custom_h)
-                            set_val("divisible_by", None, custom_w)
                         
                         if total_frames > 0:  
                             set_val("duration_frames", None, total_frames)
