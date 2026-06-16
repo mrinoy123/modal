@@ -415,11 +415,11 @@ modal_weights:
                         
                     elif c_type == "LTXVAudioVAELoader":
                         set_val("ckpt_name", 0, "LTX23_audio_vae_bf16.safetensors")
-                        
+                          
                     elif c_type in ["VAELoader", "VAELoaderKJ"]:
                         set_val("vae_name", 0, "LTX23_video_vae_bf16.safetensors")
                         set_val("weight_dtype", None, "bf16") 
-                        
+                         
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
                         set_val("model_name", 0, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
 
@@ -455,13 +455,13 @@ modal_weights:
                             set_val("timeline_data", None, payload_str)
                             set_val("timeline_ui", None, payload_str)
                             set_val("timeline", None, payload_str)
-                            
+                             
                             if "local_prompts_str" in scene_data:
                                 set_val("local_prompts", None, scene_data["local_prompts_str"])
                                 set_val("segment_lengths", None, scene_data["segment_lengths_str"])
                                 set_val("guide_strength", None, scene_data["guide_strength_str"])
                                 set_val("global_prompt", None, scene_data["global_prompt_str"])
-                            
+                             
                             if widgets is not None and len(widgets) > 3:
                                 widgets[1] = total_frames 
                                 widgets[3] = payload_str
@@ -492,7 +492,7 @@ modal_weights:
                         except Exception: pass
                         return False
 
-                  print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
+                    print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
                     
                     import soundfile as sf
                     import numpy as np 
@@ -517,7 +517,7 @@ modal_weights:
                         total_frames_tracked = 0
                         segments_timeline = []
                         target_samplerate = 16000 # LTX-Video optimal native conditioning rate
-                        
+                         
                         for line_idx, line in enumerate(script_array):
                             spk_id = line.get("speaker", "A")
                             spk_conf = speakers_conf.get(spk_id, {"mode": "design", "prompt": "A default voice."})
@@ -526,7 +526,7 @@ modal_weights:
                             visual_action = line.get("visual_action", "Stable camera.").replace('"', "'").replace("\n", " ").strip()
                             if not visual_action or len(visual_action) < 2:
                                 visual_action = "A cinematic shot, stable camera, talking."
-
+                                
                             sg1 = json.loads(json.dumps(subgraph_1))
                             
                             qwen_design_id = next((k for k, v in sg1.items() if v["class_type"] == "FB_Qwen3TTSVoiceDesign"), None)
@@ -572,7 +572,7 @@ modal_weights:
                             raw_slice_path = output_files[-1]
 
                             data, samplerate = sf.read(raw_slice_path)
-                            
+                             
                             # --- LYPSYNC FIX 1: TRIM TTS SILENCE AND RESAMPLE TO LTX NATIVE (16kHz) ---
                             data, _ = librosa.effects.trim(data, top_db=35) # Removes artificial Qwen pauses
                             
@@ -640,7 +640,7 @@ modal_weights:
                             })
                             total_frames_tracked += silence_frames
                             # --------------------------------------------------------------------------
-                            
+                             
                             os.remove(raw_slice_path)
 
                         # Calculate final padding
@@ -648,7 +648,7 @@ modal_weights:
                          
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
-                        
+                         
                         text_total_frames = sum(s["length"] for s in segments_timeline if s["type"] == "text")
                         
                         # Apply scene end paddings dynamically
