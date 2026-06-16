@@ -419,6 +419,7 @@ modal_weights:
                         
                     elif c_type in ["VAELoader", "VAELoaderKJ"]:
                         set_val("vae_name", 0, "LTX23_video_vae_bf16.safetensors")
+                        set_val("weight_dtype", None, "bf16") 
                         
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
                         set_val("model_name", 0, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
