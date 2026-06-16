@@ -14,9 +14,6 @@ import asyncio
 import ctypes
 import math
 import glob
-import numpy as np
-import soundfile as sf
-from PIL import Image
 from urllib.parse import urlparse
 from fastapi import Request, Response, HTTPException, Header
 from fastapi.responses import StreamingResponse
