@@ -118,19 +118,31 @@ class LTX23DirectorLypsyncEngine:
     @modal.enter()
     def start_comfy(self):
         import boto3
+        import re
         
-        print("🔧 Patching LTX Director for bf16 Audio VAE compatibility...")
-        ltx_director_path = "/workspace/ComfyUI/custom_nodes/WhatDreamsCost-ComfyUI/ltx_director.py"
-        if os.path.exists(ltx_director_path):
-            with open(ltx_director_path, "r") as f:
-                ltx_code = f.read()
-            # Intercepts the raw float tensor and casts it to bfloat16 to match the VAE type
-            ltx_code = ltx_code.replace(
-                "latent_samples = audio_vae.encode(waveform.movedim(1, -1))", 
-                "latent_samples = audio_vae.encode(waveform.movedim(1, -1).to(torch.bfloat16))"
+        print("🔧 Patching ComfyUI Native Audio VAE Core for exact bf16 compatibility...")
+        audio_vae_path = "/workspace/ComfyUI/comfy/ldm/lightricks/vae/audio_vae.py"
+        if os.path.exists(audio_vae_path):
+            with open(audio_vae_path, "r") as f:
+                audio_vae_code = f.read()
+            
+            # Fix ComfyUI's core forgetting to cast the internally generated float32 mel_spec to the loaded weights dtype before sending to VAE
+            audio_vae_code = re.sub(
+                r"latents\s*=\s*self\.autoencoder\.encode\(\s*mel_spec\s*\)",
+                "latents = self.autoencoder.encode(mel_spec.to(next(self.autoencoder.parameters()).dtype))",
+                audio_vae_code
             )
-            with open(ltx_director_path, "w") as f:
-                f.write(ltx_code)
+            # Patch decoding block to ensure the generated mel_spec flips back to standard float32 so the vocoder doesn't crash on inference
+            audio_vae_code = re.sub(
+                r"mel_spec\s*=\s*self\.autoencoder\.decode\(\s*latents\s*\)",
+                "mel_spec = self.autoencoder.decode(latents.to(next(self.autoencoder.parameters()).dtype)).to(import_torch().float32 if 'import_torch' in globals() else type(latents).float32)",
+                audio_vae_code
+            )
+            # Safe absolute cast fallback for string matching injection
+            audio_vae_code = audio_vae_code.replace(".to(import_torch().float32 if 'import_torch' in globals() else type(latents).float32)", ".to(latents.dtype).float()")
+
+            with open(audio_vae_path, "w") as f:
+                f.write(audio_vae_code)
 
         print("🎨 Building Disk-Backed Pointer-Pass Memory Nodes for Infinite Batching...")
         os.makedirs("/workspace/ComfyUI/custom_nodes/LTXCustomPipeline", exist_ok=True)
