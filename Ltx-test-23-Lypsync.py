@@ -403,7 +403,8 @@ modal_weights:
                     if c_type == "DiffusionModelLoaderKJ":
                         set_val("model_name", 0, "ltx-2.3-22b-dev-fp8.safetensors")
                         set_val("weight_dtype", 1, "default") 
-                        set_val("sage_attention", None, "auto") 
+                        set_val("sage_attention", None, "auto")
+                        set_val("compute_dtype", None, "bf16") 
                         
                     elif c_type == "LTXAVTextEncoderLoader":
                         set_val("text_encoder", 0, "gemma-3-12b-it-heretic-v2_fp8_e4m3fn.safetensors")
@@ -421,8 +422,10 @@ modal_weights:
                     elif c_type == "DenoLTXMultiLoraLoader":
                         set_val("lora_1", 2, "ltx-2.3-22b-distilled-lora-384-1.1.safetensors")
                         set_val("enabled_1", 1, True)
+                        set_val("strength_1", None, 0.45) 
                         set_val("lora_2", 7, "LTX_2.3_ID_LoRA_TalkVid_3K.safetensors")
                         set_val("enabled_2", 6, True)  
+                        set_val("strength_2", None, 0.45)
 
                     # INJECT THE UNIQUE SESSION ID
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
