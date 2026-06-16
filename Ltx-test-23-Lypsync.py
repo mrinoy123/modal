@@ -118,32 +118,7 @@ class LTX23DirectorLypsyncEngine:
     @modal.enter()
     def start_comfy(self):
         import boto3
-        import re
         
-        print("🔧 Patching ComfyUI Native Audio VAE Core for exact bf16 compatibility...")
-        audio_vae_path = "/workspace/ComfyUI/comfy/ldm/lightricks/vae/audio_vae.py"
-        if os.path.exists(audio_vae_path):
-            with open(audio_vae_path, "r") as f:
-                audio_vae_code = f.read()
-            
-            # Fix ComfyUI's core forgetting to cast the internally generated float32 mel_spec to the loaded weights dtype before sending to VAE
-            audio_vae_code = re.sub(
-                r"latents\s*=\s*self\.autoencoder\.encode\(\s*mel_spec\s*\)",
-                "latents = self.autoencoder.encode(mel_spec.to(next(self.autoencoder.parameters()).dtype))",
-                audio_vae_code
-            )
-            # Patch decoding block to ensure the generated mel_spec flips back to standard float32 so the vocoder doesn't crash on inference
-            audio_vae_code = re.sub(
-                r"mel_spec\s*=\s*self\.autoencoder\.decode\(\s*latents\s*\)",
-                "mel_spec = self.autoencoder.decode(latents.to(next(self.autoencoder.parameters()).dtype)).to(import_torch().float32 if 'import_torch' in globals() else type(latents).float32)",
-                audio_vae_code
-            )
-            # Safe absolute cast fallback for string matching injection
-            audio_vae_code = audio_vae_code.replace(".to(import_torch().float32 if 'import_torch' in globals() else type(latents).float32)", ".to(latents.dtype).float()")
-
-            with open(audio_vae_path, "w") as f:
-                f.write(audio_vae_code)
-
         print("🎨 Building Disk-Backed Pointer-Pass Memory Nodes for Infinite Batching...")
         os.makedirs("/workspace/ComfyUI/custom_nodes/LTXCustomPipeline", exist_ok=True)
         custom_nodes_path = "/workspace/ComfyUI/custom_nodes/LTXCustomPipeline/__init__.py"
@@ -323,7 +298,7 @@ modal_weights:
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
-            "--bf16-vae", "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
+            "--fp8_e4m3fn-unet", "--fp8_e4m3fn-text-enc"
         ], cwd="/workspace/ComfyUI", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env_vars)
         
         self.t = threading.Thread(target=self._log_reader, daemon=True)
@@ -628,7 +603,7 @@ modal_weights:
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
-                        # Removed hardcoded max frame cap as requested allowing infinite frame scaling
+                         
                         
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
