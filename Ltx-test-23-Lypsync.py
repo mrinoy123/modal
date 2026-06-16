@@ -244,7 +244,8 @@ modal_weights:
 
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
-        for d in ["unet", "vae", "clip", "text_encoders", "checkpoints", "loras", "upscale_models", "latent_upscale_models", "diffusion_models", "audio_vae", "qwen3_tts"]: 
+        # FIX 1: We must ensure qwen-tts directory is prepared here too
+        for d in ["unet", "vae", "clip", "text_encoders", "checkpoints", "loras", "upscale_models", "latent_upscale_models", "diffusion_models", "audio_vae", "qwen-tts"]: 
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
         print("🔗 Mapping HuggingFace Qwen structure dynamically...")
@@ -254,13 +255,15 @@ modal_weights:
                 src = os.path.join(qwen_src_dir, d)
                 if not os.path.isdir(src): continue
                 
-                for pb in ["qwen3_tts", "Qwen3-TTS", "qwen_tts"]:
+                # FIX 2: The critical addition of the exact "qwen-tts" string to the iteration
+                for pb in ["qwen-tts", "qwen3_tts", "Qwen3-TTS", "qwen_tts"]:
                     dst1 = os.path.join(base_models_dir, pb, d)
                     os.makedirs(os.path.dirname(dst1), exist_ok=True)
                     if not os.path.exists(dst1):
                         try: os.symlink(src, dst1)
                         except Exception: pass
                         
+                    # Hugging Face mapping: The Node actually expects `models/qwen-tts/Qwen/Qwen3-TTS-X` 
                     dst2 = os.path.join(base_models_dir, pb, "Qwen", d)
                     os.makedirs(os.path.dirname(dst2), exist_ok=True)
                     if not os.path.exists(dst2):
@@ -295,7 +298,6 @@ modal_weights:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
-        # Notice: --bf16-vae has been completely removed to prevent Audio VAE type mismatch issues.
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -416,7 +418,7 @@ modal_weights:
                         
                     elif c_type in ["VAELoader", "VAELoaderKJ"]:
                         set_val("vae_name", 0, "LTX23_video_vae_bf16.safetensors")
-                        set_val("weight_dtype", None, "bf16") # Force Video VAE into bf16 to save massive VRAM and speed up encoding/decoding
+                        set_val("weight_dtype", None, "bf16") 
                         
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
                         set_val("model_name", 0, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
@@ -429,7 +431,6 @@ modal_weights:
                         set_val("enabled_2", 6, True)  
                         set_val("strength_2", None, 0.45)
 
-                    # INJECT THE UNIQUE SESSION ID
                     elif c_type in ["MemoryCacheWriter", "MemoryCacheReader"]:
                         set_val("scene_id", None, f"{s_id}_{idx}")
 
@@ -492,6 +493,10 @@ modal_weights:
                         return False
 
                     print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
+                    
+                    import soundfile as sf
+                    import numpy as np 
+                    from PIL import Image
                     
                     for idx, scene in enumerate(batch_scenes):
                         speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
@@ -571,15 +576,12 @@ modal_weights:
                             duration_seconds = len(data) / samplerate
                             frames_for_line = math.ceil(duration_seconds * 25)
                             
-                            # --- LYPSYNC FIX: PADDING AUDIO WITH EXACT SILENCE ---
-                            # Calculate exactly how many audio samples represent the rounded-up 'frames_for_line'
                             exact_required_samples = int((frames_for_line / 25.0) * target_samplerate)
                             padding_needed = exact_required_samples - len(data)
                             
                             if padding_needed > 0:
                                 silence_array = np.zeros(padding_needed, dtype=data.dtype)
                                 data = np.concatenate((data, silence_array))
-                            # -----------------------------------------------------
 
                             img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
 
