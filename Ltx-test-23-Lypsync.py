@@ -492,11 +492,12 @@ modal_weights:
                         except Exception: pass
                         return False
 
-                    print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
+                  print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
                     
                     import soundfile as sf
                     import numpy as np 
                     from PIL import Image
+                    import librosa
                     
                     for idx, scene in enumerate(batch_scenes):
                         speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
@@ -515,7 +516,7 @@ modal_weights:
                         master_audio_arrays = []
                         total_frames_tracked = 0
                         segments_timeline = []
-                        target_samplerate = 24000
+                        target_samplerate = 16000 # LTX-Video optimal native conditioning rate
                         
                         for line_idx, line in enumerate(script_array):
                             spk_id = line.get("speaker", "A")
@@ -523,7 +524,6 @@ modal_weights:
                             line_text = line.get("text", "")
                             
                             visual_action = line.get("visual_action", "Stable camera.").replace('"', "'").replace("\n", " ").strip()
-                            
                             if not visual_action or len(visual_action) < 2:
                                 visual_action = "A cinematic shot, stable camera, talking."
 
@@ -572,8 +572,15 @@ modal_weights:
                             raw_slice_path = output_files[-1]
 
                             data, samplerate = sf.read(raw_slice_path)
-                            target_samplerate = samplerate
-                            duration_seconds = len(data) / samplerate
+                            
+                            # --- LYPSYNC FIX 1: TRIM TTS SILENCE AND RESAMPLE TO LTX NATIVE (16kHz) ---
+                            data, _ = librosa.effects.trim(data, top_db=35) # Removes artificial Qwen pauses
+                            
+                            if samplerate != target_samplerate:
+                                data = librosa.resample(data, orig_sr=samplerate, target_sr=target_samplerate)
+                            # --------------------------------------------------------------------------
+                            
+                            duration_seconds = len(data) / target_samplerate
                             frames_for_line = math.ceil(duration_seconds * 25)
                             
                             exact_required_samples = int((frames_for_line / 25.0) * target_samplerate)
@@ -585,6 +592,7 @@ modal_weights:
 
                             img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
 
+                            # 1. TIGHT SPEECH SEGMENT
                             segments_timeline.append({
                                 "id": f"image_{line_idx}",
                                 "start": total_frames_tracked,
@@ -593,7 +601,6 @@ modal_weights:
                                 "imageFile": img_relative_target,
                                 "guideStrength": 1.0
                             })
-                            
                             segments_timeline.append({
                                 "id": f"text_{line_idx}",
                                 "start": total_frames_tracked,
@@ -603,15 +610,40 @@ modal_weights:
                                 "prompt": visual_action,        
                                 "prompts": [visual_action]
                             })
-                            
                             total_frames_tracked += frames_for_line
                             master_audio_arrays.append(data)
+                            
+                            # --- LYPSYNC FIX 2: EXPLICITLY INJECT SILENT "MOUTH CLOSED" SEGMENTS ---
+                            # This forces the character to close their mouth naturally between spoken lines
+                            silence_frames = 12 # ~0.48s natural pause
+                            silence_samples = int((silence_frames / 25.0) * target_samplerate)
+                            master_audio_arrays.append(np.zeros(silence_samples, dtype=data.dtype))
+                            
+                            silent_prompt = "A cinematic shot, stable camera, character listening, silent, mouth completely closed."
+                            
+                            segments_timeline.append({
+                                "id": f"image_silence_{line_idx}",
+                                "start": total_frames_tracked,
+                                "length": silence_frames,
+                                "type": "image",
+                                "imageFile": img_relative_target,
+                                "guideStrength": 1.0
+                            })
+                            segments_timeline.append({
+                                "id": f"text_silence_{line_idx}",
+                                "start": total_frames_tracked,
+                                "length": silence_frames,
+                                "type": "text",
+                                "text": silent_prompt,
+                                "prompt": silent_prompt,
+                                "prompts": [silent_prompt]
+                            })
+                            total_frames_tracked += silence_frames
+                            # --------------------------------------------------------------------------
+                            
                             os.remove(raw_slice_path)
 
-                        master_audio = np.concatenate(master_audio_arrays)
-                        perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
-                        sf.write(perfect_audio_path, master_audio, target_samplerate)
-                        
+                        # Calculate final padding
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
                          
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
@@ -619,10 +651,16 @@ modal_weights:
                         
                         text_total_frames = sum(s["length"] for s in segments_timeline if s["type"] == "text")
                         
+                        # Apply scene end paddings dynamically
                         if text_total_frames < padded_frames:
                             diff = padded_frames - text_total_frames
                             if last_text_seg: last_text_seg["length"] += diff
                             if last_image_seg: last_image_seg["length"] += diff
+                            
+                            # Ensure the audio array gets perfectly padded to match the new visual length!
+                            pad_samples = int((diff / 25.0) * target_samplerate)
+                            master_audio_arrays.append(np.zeros(pad_samples, dtype=master_audio_arrays[0].dtype))
+                            
                         elif text_total_frames > padded_frames:
                             diff = text_total_frames - padded_frames
                             for s_type in ["text", "image"]:
@@ -637,6 +675,11 @@ modal_weights:
                                         s["length"] = 0
                                         
                         segments_timeline = [s for s in segments_timeline if s["length"] > 0]
+                        
+                        # Concatenate and save the master dialog at 16kHz
+                        master_audio = np.concatenate(master_audio_arrays)
+                        perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
+                        sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
                         local_prompts_str = "\n".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
                         segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
