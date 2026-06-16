@@ -401,7 +401,7 @@ modal_weights:
                         if widgets is not None and widx is not None and len(widgets) > widx: widgets[widx] = v
 
                     if c_type == "DiffusionModelLoaderKJ":
-                        set_val("model_name", 0, "ltx-2.3-22b-distilled-fp8.safetensors")
+                        set_val("model_name", 0, "ltx-2.3-22b-dev-fp8.safetensors")
                         set_val("weight_dtype", 1, "default") 
                         set_val("sage_attention", None, "auto") 
                         
