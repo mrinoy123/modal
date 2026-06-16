@@ -678,8 +678,8 @@ modal_weights:
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
-                        # CRITICAL BUG FIX: Use "\n---\n" to split prompt segments instead of just "\n"
-                        local_prompts_str = "\n---\n".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
+                        
+                        local_prompts_str = " | ".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
                         segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
                         guide_strength_str = ",".join(["1.0"] * len([s for s in segments_timeline if s["type"] == "image"]))
                         
