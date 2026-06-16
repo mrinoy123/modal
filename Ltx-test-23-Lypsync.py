@@ -119,6 +119,19 @@ class LTX23DirectorLypsyncEngine:
     def start_comfy(self):
         import boto3
         
+        print("🔧 Patching LTX Director for bf16 Audio VAE compatibility...")
+        ltx_director_path = "/workspace/ComfyUI/custom_nodes/WhatDreamsCost-ComfyUI/ltx_director.py"
+        if os.path.exists(ltx_director_path):
+            with open(ltx_director_path, "r") as f:
+                ltx_code = f.read()
+            # Intercepts the raw float tensor and casts it to bfloat16 to match the VAE type
+            ltx_code = ltx_code.replace(
+                "latent_samples = audio_vae.encode(waveform.movedim(1, -1))", 
+                "latent_samples = audio_vae.encode(waveform.movedim(1, -1).to(torch.bfloat16))"
+            )
+            with open(ltx_director_path, "w") as f:
+                f.write(ltx_code)
+
         print("🎨 Building Disk-Backed Pointer-Pass Memory Nodes for Infinite Batching...")
         os.makedirs("/workspace/ComfyUI/custom_nodes/LTXCustomPipeline", exist_ok=True)
         custom_nodes_path = "/workspace/ComfyUI/custom_nodes/LTXCustomPipeline/__init__.py"
@@ -603,7 +616,7 @@ modal_weights:
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
-                        if padded_frames > 257: padded_frames = 257 
+                        # Removed hardcoded max frame cap as requested allowing infinite frame scaling
                         
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
