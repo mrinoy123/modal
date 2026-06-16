@@ -298,7 +298,7 @@ modal_weights:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
-        # Notice: --bf16-vae has been removed. Audio VAE natively loads in its safe fp32 space!
+        # Notice: --bf16-vae has been completely removed to prevent Audio VAE type mismatch issues.
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -419,7 +419,7 @@ modal_weights:
                         
                     elif c_type in ["VAELoader", "VAELoaderKJ"]:
                         set_val("vae_name", 0, "LTX23_video_vae_bf16.safetensors")
-                        set_val("weight_dtype", None, "bf16") 
+                        set_val("weight_dtype", None, "bf16") # Force Video VAE into bf16 to save massive VRAM and speed up encoding/decoding
                         
                     elif c_type == "LowVRAMLatentUpscaleModelLoader":
                         set_val("model_name", 0, "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")
