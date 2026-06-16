@@ -14,6 +14,9 @@ import asyncio
 import ctypes
 import math
 import glob
+import numpy as np
+import soundfile as sf
+from PIL import Image
 from urllib.parse import urlparse
 from fastapi import Request, Response, HTTPException, Header
 from fastapi.responses import StreamingResponse
@@ -295,6 +298,7 @@ modal_weights:
         env_vars["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.8"
         env_vars["CUDA_MODULE_LOADING"] = "LAZY" 
         
+        # Notice: --bf16-vae has been removed. Audio VAE natively loads in its safe fp32 space!
         self.process = subprocess.Popen([
             "python3.12", "main.py", "--listen", "127.0.0.1", "--port", "8188",
             "--mmap-torch-files", "--cache-none", "--temp-directory", "/tmp/comfy_swap", 
@@ -491,10 +495,6 @@ modal_weights:
 
                     print(f"\n[Lypsync API] 🎙️ STARTING PHASE 1: DYNAMIC QWEN3-TTS AUDIO CALCULATION", flush=True)
                     
-                    import soundfile as sf
-                    import numpy as np 
-                    from PIL import Image
-                    
                     for idx, scene in enumerate(batch_scenes):
                         speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
                         script_array = scene.get("script", [{"speaker": "A", "text": "Testing audio.", "visual_action": "Stable camera."}])
@@ -573,6 +573,16 @@ modal_weights:
                             duration_seconds = len(data) / samplerate
                             frames_for_line = math.ceil(duration_seconds * 25)
                             
+                            # --- LYPSYNC FIX: PADDING AUDIO WITH EXACT SILENCE ---
+                            # Calculate exactly how many audio samples represent the rounded-up 'frames_for_line'
+                            exact_required_samples = int((frames_for_line / 25.0) * target_samplerate)
+                            padding_needed = exact_required_samples - len(data)
+                            
+                            if padding_needed > 0:
+                                silence_array = np.zeros(padding_needed, dtype=data.dtype)
+                                data = np.concatenate((data, silence_array))
+                            # -----------------------------------------------------
+
                             img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
 
                             segments_timeline.append({
@@ -604,7 +614,6 @@ modal_weights:
                         
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
                          
-                        
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                         last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
                         
@@ -661,8 +670,6 @@ modal_weights:
                     for idx, scene in enumerate(batch_scenes):
                         sg2 = json.loads(json.dumps(subgraph_2))
                         
-                        # Graph Healing removed for Subgraph 2 as well
-
                         sg2 = inject_node_overrides(sg2, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene, session_id)
                         
                         print(f"🎥 Injecting Timeline & Caching Guide Data for Scene {idx} to Disk...", flush=True)
@@ -676,8 +683,6 @@ modal_weights:
 
                     for idx, scene in enumerate(batch_scenes):
                         sg3 = json.loads(json.dumps(subgraph_3))
-
-                        # Graph Healing logic completely removed here as requested.
 
                         sg3 = inject_node_overrides(sg3, idx, custom_w, custom_h, scene["exact_audio_duration"], scene["total_frames"], scene, session_id)
 
