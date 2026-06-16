@@ -495,6 +495,7 @@ modal_weights:
                     import numpy as np 
                     from PIL import Image
                     import librosa
+                    import re
                     
                     for idx, scene in enumerate(batch_scenes):
                         speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
@@ -514,6 +515,9 @@ modal_weights:
                         total_frames_tracked = 0
                         segments_timeline = []
                         target_samplerate = 16000 # LTX-Video optimal native conditioning rate
+                        
+                        current_speaker = None
+                        last_image_seg = None
                          
                         for line_idx, line in enumerate(script_array):
                             spk_id = line.get("speaker", "A")
@@ -571,7 +575,7 @@ modal_weights:
                             data, samplerate = sf.read(raw_slice_path)
                              
                             # --- LYPSYNC FIX 1: TRIM TTS SILENCE AND RESAMPLE TO LTX NATIVE (16kHz) ---
-                            data, _ = librosa.effects.trim(data, top_db=35) # Removes artificial Qwen pauses
+                            data, _ = librosa.effects.trim(data, top_db=35) 
                             
                             if samplerate != target_samplerate:
                                 data = librosa.resample(data, orig_sr=samplerate, target_sr=target_samplerate)
@@ -587,17 +591,36 @@ modal_weights:
                                 silence_array = np.zeros(padding_needed, dtype=data.dtype)
                                 data = np.concatenate((data, silence_array))
 
+                            # --- FIX 2: INHERIT CONTEXT FOR SILENT PROMPT ---
+                            # Strips words like 'speaking' but keeps the suit/studio description intact
+                            silent_prompt = re.sub(r'(?i)\b(speaking|talking|lip sync)\b', '', visual_action)
+                            silent_prompt = re.sub(r',\s*,', ',', silent_prompt).strip(', ')
+                            silent_prompt += ", character listening, silent, mouth completely closed."
+
+                            silence_frames = 12 
+                            silence_samples = int((silence_frames / 25.0) * target_samplerate)
+                            line_total_frames = frames_for_line + silence_frames
+
                             img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
 
-                            # 1. TIGHT SPEECH SEGMENT
-                            segments_timeline.append({
-                                "id": f"image_{line_idx}",
-                                "start": total_frames_tracked,
-                                "length": frames_for_line,
-                                "type": "image",
-                                "imageFile": img_relative_target,
-                                "guideStrength": 1.0
-                            })
+                            # --- FIX 3: CONTINUOUS IMAGE SEGMENT ---
+                            # If the speaker hasn't changed, we do NOT inject the image again. We just extend the shot.
+                            if spk_id != current_speaker:
+                                last_image_seg = {
+                                    "id": f"image_{line_idx}",
+                                    "start": total_frames_tracked,
+                                    "length": line_total_frames,
+                                    "type": "image",
+                                    "imageFile": img_relative_target,
+                                    "guideStrength": 1.0
+                                }
+                                segments_timeline.append(last_image_seg)
+                                current_speaker = spk_id
+                            else:
+                                if last_image_seg is not None:
+                                    last_image_seg["length"] += line_total_frames
+
+                            # We still switch the text back and forth to open and close the mouth
                             segments_timeline.append({
                                 "id": f"text_{line_idx}",
                                 "start": total_frames_tracked,
@@ -607,36 +630,21 @@ modal_weights:
                                 "prompt": visual_action,        
                                 "prompts": [visual_action]
                             })
-                            total_frames_tracked += frames_for_line
-                            master_audio_arrays.append(data)
                             
-                            # --- LYPSYNC FIX 2: EXPLICITLY INJECT SILENT "MOUTH CLOSED" SEGMENTS ---
-                            # This forces the character to close their mouth naturally between spoken lines
-                            silence_frames = 12 # ~0.48s natural pause
-                            silence_samples = int((silence_frames / 25.0) * target_samplerate)
-                            master_audio_arrays.append(np.zeros(silence_samples, dtype=data.dtype))
-                            
-                            silent_prompt = "A cinematic shot, stable camera, character listening, silent, mouth completely closed."
-                            
-                            segments_timeline.append({
-                                "id": f"image_silence_{line_idx}",
-                                "start": total_frames_tracked,
-                                "length": silence_frames,
-                                "type": "image",
-                                "imageFile": img_relative_target,
-                                "guideStrength": 1.0
-                            })
                             segments_timeline.append({
                                 "id": f"text_silence_{line_idx}",
-                                "start": total_frames_tracked,
+                                "start": total_frames_tracked + frames_for_line,
                                 "length": silence_frames,
                                 "type": "text",
                                 "text": silent_prompt,
                                 "prompt": silent_prompt,
                                 "prompts": [silent_prompt]
                             })
-                            total_frames_tracked += silence_frames
-                            # --------------------------------------------------------------------------
+                            
+                            total_frames_tracked += line_total_frames
+                            
+                            master_audio_arrays.append(data)
+                            master_audio_arrays.append(np.zeros(silence_samples, dtype=data.dtype))
                              
                             os.remove(raw_slice_path)
 
@@ -644,7 +652,6 @@ modal_weights:
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
                          
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
-                        last_image_seg = next((s for s in reversed(segments_timeline) if s["type"] == "image"), None)
                          
                         text_total_frames = sum(s["length"] for s in segments_timeline if s["type"] == "text")
                         
@@ -678,7 +685,7 @@ modal_weights:
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
-                        
+                        # --- FIX 4: Use " | " to split prompt segments for PromptRelay compatibility ---
                         local_prompts_str = " | ".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
                         segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
                         guide_strength_str = ",".join(["1.0"] * len([s for s in segments_timeline if s["type"] == "image"]))
