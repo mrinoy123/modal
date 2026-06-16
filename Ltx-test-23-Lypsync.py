@@ -440,6 +440,7 @@ modal_weights:
                         if c_type == "LTXDirector":
                             set_val("img_compression", None, 100)
                             set_val("divisible_by", None, 32)
+                            set_val("use_custom_audio", None, True)
                         
                         if total_frames > 0:  
                             set_val("duration_frames", None, total_frames)
@@ -638,7 +639,12 @@ modal_weights:
                         scene["total_frames"] = padded_frames
                         scene["timeline_payload"] = {
                             "segments": segments_timeline,
-                            "audioSegments": [{"audioFile": audio_relative_path, "start": 0}]
+                            "audioSegments": [{
+                                "audioFile": audio_relative_path, 
+                                "start": 0,
+                                "length": padded_frames,
+                                "trimStart": 0
+                            }]
                         }
                         
                         scene["local_prompts_str"] = local_prompts_str
