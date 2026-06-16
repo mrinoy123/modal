@@ -244,7 +244,6 @@ modal_weights:
 
         print("🔗 Running Atomic Model Folder Linker...")
         base_models_dir = "/workspace/ComfyUI/models"
-        # FIX 1: We must ensure qwen-tts directory is prepared here too
         for d in ["unet", "vae", "clip", "text_encoders", "checkpoints", "loras", "upscale_models", "latent_upscale_models", "diffusion_models", "audio_vae", "qwen-tts"]: 
             os.makedirs(os.path.join(base_models_dir, d), exist_ok=True)
 
@@ -255,7 +254,6 @@ modal_weights:
                 src = os.path.join(qwen_src_dir, d)
                 if not os.path.isdir(src): continue
                 
-                # FIX 2: The critical addition of the exact "qwen-tts" string to the iteration
                 for pb in ["qwen-tts", "qwen3_tts", "Qwen3-TTS", "qwen_tts"]:
                     dst1 = os.path.join(base_models_dir, pb, d)
                     os.makedirs(os.path.dirname(dst1), exist_ok=True)
@@ -263,7 +261,6 @@ modal_weights:
                         try: os.symlink(src, dst1)
                         except Exception: pass
                         
-                    # Hugging Face mapping: The Node actually expects `models/qwen-tts/Qwen/Qwen3-TTS-X` 
                     dst2 = os.path.join(base_models_dir, pb, "Qwen", d)
                     os.makedirs(os.path.dirname(dst2), exist_ok=True)
                     if not os.path.exists(dst2):
@@ -681,10 +678,15 @@ modal_weights:
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
-                        local_prompts_str = "\n".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
+                        # CRITICAL BUG FIX: Use "\n---\n" to split prompt segments instead of just "\n"
+                        local_prompts_str = "\n---\n".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
                         segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
                         guide_strength_str = ",".join(["1.0"] * len([s for s in segments_timeline if s["type"] == "image"]))
-                        global_prompt_str = segments_timeline[1]["prompt"] if len(segments_timeline) > 1 else "A cinematic shot, stable camera, talking."
+                        
+                        # Fetch the first valid text element safely
+                        text_segments = [s for s in segments_timeline if s["type"] == "text"]
+                        global_prompt_str = text_segments[0]["prompt"] if text_segments else "A cinematic shot, stable camera, talking."
+                        
                         audio_relative_path = f"dynamic_guides/perfect_dialog_{idx}.wav"
 
                         scene["exact_audio_duration"] = float(padded_frames - 1) / 25.0
