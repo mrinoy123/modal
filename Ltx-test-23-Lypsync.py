@@ -501,6 +501,10 @@ modal_weights:
                         speakers_conf = scene.get("speakers", {"A": {"mode": "design", "prompt": "A cinematic voice.", "ref_url": ""}})
                         script_array = scene.get("script", [{"speaker": "A", "text": "Testing audio.", "visual_action": "Stable camera."}])
                         
+                        # --- PULL DYNAMIC FALLBACKS FROM N8N JSON ---
+                        fallback_action = scene.get("default_visual_action", "A cinematic shot, stable camera, talking.")
+                        silent_suffix = scene.get("silent_action_suffix", ", character listening, silent, mouth completely closed.")
+                        
                         img1_path = os.path.join(dynamic_guides_dir, f"master_shot_1_{idx}.png")
                         img2_path = os.path.join(dynamic_guides_dir, f"master_shot_2_{idx}.png")
                         
@@ -524,9 +528,10 @@ modal_weights:
                             spk_conf = speakers_conf.get(spk_id, {"mode": "design", "prompt": "A default voice."})
                             line_text = line.get("text", "")
                             
-                            visual_action = line.get("visual_action", "Stable camera.").replace('"', "'").replace("\n", " ").strip()
+                            # Use n8n-provided string, or fallback if completely empty
+                            visual_action = line.get("visual_action", "").replace('"', "'").replace("\n", " ").strip()
                             if not visual_action or len(visual_action) < 2:
-                                visual_action = "A cinematic shot, stable camera, talking."
+                                visual_action = fallback_action
                                 
                             sg1 = json.loads(json.dumps(subgraph_1))
                             
@@ -574,12 +579,10 @@ modal_weights:
 
                             data, samplerate = sf.read(raw_slice_path)
                              
-                            # --- LYPSYNC FIX 1: TRIM TTS SILENCE AND RESAMPLE TO LTX NATIVE (16kHz) ---
                             data, _ = librosa.effects.trim(data, top_db=35) 
                             
                             if samplerate != target_samplerate:
                                 data = librosa.resample(data, orig_sr=samplerate, target_sr=target_samplerate)
-                            # --------------------------------------------------------------------------
                             
                             duration_seconds = len(data) / target_samplerate
                             frames_for_line = math.ceil(duration_seconds * 25)
@@ -591,11 +594,10 @@ modal_weights:
                                 silence_array = np.zeros(padding_needed, dtype=data.dtype)
                                 data = np.concatenate((data, silence_array))
 
-                            # --- FIX 2: INHERIT CONTEXT FOR SILENT PROMPT ---
-                            # Strips words like 'speaking' but keeps the suit/studio description intact
+                            # Apply dynamic n8n suffix instead of hardcoded english string
                             silent_prompt = re.sub(r'(?i)\b(speaking|talking|lip sync)\b', '', visual_action)
                             silent_prompt = re.sub(r',\s*,', ',', silent_prompt).strip(', ')
-                            silent_prompt += ", character listening, silent, mouth completely closed."
+                            silent_prompt += silent_suffix
 
                             silence_frames = 12 
                             silence_samples = int((silence_frames / 25.0) * target_samplerate)
@@ -603,8 +605,6 @@ modal_weights:
 
                             img_relative_target = f"dynamic_guides/master_shot_2_{idx}.png" if (spk_id == "B" and os.path.exists(img2_path)) else f"dynamic_guides/master_shot_1_{idx}.png"
 
-                            # --- FIX 3: CONTINUOUS IMAGE SEGMENT ---
-                            # If the speaker hasn't changed, we do NOT inject the image again. We just extend the shot.
                             if spk_id != current_speaker:
                                 last_image_seg = {
                                     "id": f"image_{line_idx}",
@@ -620,7 +620,6 @@ modal_weights:
                                 if last_image_seg is not None:
                                     last_image_seg["length"] += line_total_frames
 
-                            # We still switch the text back and forth to open and close the mouth
                             segments_timeline.append({
                                 "id": f"text_{line_idx}",
                                 "start": total_frames_tracked,
@@ -648,20 +647,17 @@ modal_weights:
                              
                             os.remove(raw_slice_path)
 
-                        # Calculate final padding
                         padded_frames = (math.ceil(total_frames_tracked / 8) * 8) + 1
                          
                         last_text_seg = next((s for s in reversed(segments_timeline) if s["type"] == "text"), None)
                          
                         text_total_frames = sum(s["length"] for s in segments_timeline if s["type"] == "text")
                         
-                        # Apply scene end paddings dynamically
                         if text_total_frames < padded_frames:
                             diff = padded_frames - text_total_frames
                             if last_text_seg: last_text_seg["length"] += diff
                             if last_image_seg: last_image_seg["length"] += diff
                             
-                            # Ensure the audio array gets perfectly padded to match the new visual length!
                             pad_samples = int((diff / 25.0) * target_samplerate)
                             master_audio_arrays.append(np.zeros(pad_samples, dtype=master_audio_arrays[0].dtype))
                             
@@ -680,19 +676,18 @@ modal_weights:
                                         
                         segments_timeline = [s for s in segments_timeline if s["length"] > 0]
                         
-                        # Concatenate and save the master dialog at 16kHz
                         master_audio = np.concatenate(master_audio_arrays)
                         perfect_audio_path = os.path.join(dynamic_guides_dir, f"perfect_dialog_{idx}.wav")
                         sf.write(perfect_audio_path, master_audio, target_samplerate)
                         
-                        # --- FIX 4: Use " | " to split prompt segments for PromptRelay compatibility ---
                         local_prompts_str = " | ".join([s["prompt"] for s in segments_timeline if s["type"] == "text"])
                         segment_lengths_str = ",".join([str(s["length"]) for s in segments_timeline if s["type"] == "text"])
                         guide_strength_str = ",".join(["1.0"] * len([s for s in segments_timeline if s["type"] == "image"]))
                         
-                        # Fetch the first valid text element safely
                         text_segments = [s for s in segments_timeline if s["type"] == "text"]
-                        global_prompt_str = text_segments[0]["prompt"] if text_segments else "A cinematic shot, stable camera, talking."
+                        
+                        # Apply dynamic n8n fallback instead of hardcoded english string
+                        global_prompt_str = text_segments[0]["prompt"] if text_segments else fallback_action
                         
                         audio_relative_path = f"dynamic_guides/perfect_dialog_{idx}.wav"
 
